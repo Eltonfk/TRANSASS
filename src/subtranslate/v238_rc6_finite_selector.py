@@ -71,7 +71,7 @@ def make_presentation(candidates:list[dict[str,Any]], *, seed:int, owner_labels:
 
 def selector_schema()->dict[str,Any]: return json.loads(json.dumps(SELECTOR_SCHEMA))
 
-def build_selector_request(*, semantic_group_id:str, owners:list[dict[str,str]], target:str, presentation:dict[str,Any], model:str="qwen3.5:9b")->dict[str,Any]:
+def build_selector_request(*, semantic_group_id:str, owners:list[dict[str,str]], target:str, presentation:dict[str,Any], model:str)->dict[str,Any]:
     atoms=target_atoms(target); labels=presentation["canonical_to_presented"]
     source="\n".join(f"OWNER {chr(64+labels[i])}: {owner['source_text']}" for i,owner in enumerate(owners,1))
     user="\n".join([f"SEMANTIC_GROUP: {semantic_group_id}","TASK: SELECT ONE FINITE CANDIDATE; DO NOT BUILD A MAPPING.","SOURCE OWNERS:",source,"TARGET ATOMS (immutable, shown once):"]+[f"ATOM {i}: {a}" for i,a in enumerate(atoms,1)]+["CANDIDATE CATALOG:"]+presentation["catalog"]+[f"NONE CHOICE: {presentation['none_choice_id']}","Return only a JSON root array containing exactly one integer choice ID. Choose NONE only if no listed candidate represents the semantic ownership."])

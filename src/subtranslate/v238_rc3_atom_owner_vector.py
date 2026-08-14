@@ -135,7 +135,7 @@ def validate_owner_vector(
     return internal, trace
 
 
-def build_atom_vector_request(*, semantic_group_id: str, target_text: str, source_segments: list[dict[str, str]], schema: dict[str, Any], model: str = "qwen3.5:9b") -> dict[str, Any]:
+def build_atom_vector_request(*, semantic_group_id: str, target_text: str, source_segments: list[dict[str, str]], schema: dict[str, Any], model: str) -> dict[str, Any]:
     atoms = target_atoms(target_text)
     owners = [{"owner_index": i, "source_text": seg["source_text"]} for i, seg in enumerate(source_segments, 1)]
     contract = {

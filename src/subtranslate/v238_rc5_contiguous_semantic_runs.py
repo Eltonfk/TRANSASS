@@ -80,7 +80,7 @@ def expand_and_validate_against_target(rows: list[list[int]], *, canonical_segme
     return internal, {"valid": True, "reason": "RC5_EXPANSION_AND_RC3_MAPPING_PASS", "expansion": expansion, "atom_trace": atom_trace}
 
 
-def build_run_request(*, semantic_group_id: str, target_text: str, source_segments: list[dict[str, str]], schema: dict[str, Any], presented_labels: dict[int, int] | None = None, model: str = "qwen3.5:9b") -> dict[str, Any]:
+def build_run_request(*, semantic_group_id: str, target_text: str, source_segments: list[dict[str, str]], schema: dict[str, Any], model: str, presented_labels: dict[int, int] | None = None) -> dict[str, Any]:
     presented_labels = presented_labels or {i: i for i in range(1, len(source_segments) + 1)}
     owners = [{"owner_label": presented_labels[i], "source_text": segment["source_text"]} for i, segment in enumerate(source_segments, 1)]
     atoms = target_atoms(target_text)

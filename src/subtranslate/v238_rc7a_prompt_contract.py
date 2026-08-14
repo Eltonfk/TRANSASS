@@ -8,7 +8,7 @@ from v238_rc3_atom_owner_vector import target_atoms
 from v238_rc7_factorized_selector import CHOICE_SCHEMA
 
 
-def build_rc7a_request(*, stage: str, semantic_group_id: str, owners: list[dict[str, Any]], target: str, presentation: dict[str, Any], model: str = "qwen3.5:9b", fixed_order: list[int] | None = None) -> dict[str, Any]:
+def build_rc7a_request(*, stage: str, semantic_group_id: str, owners: list[dict[str, Any]], target: str, presentation: dict[str, Any], model: str, fixed_order: list[int] | None = None) -> dict[str, Any]:
     atoms = target_atoms(target)
     labels = presentation["canonical_to_presented"]
     source_lines = [f"OWNER {chr(64 + labels[i])}: {owner['source_text']}" for i, owner in enumerate(owners, 1)]

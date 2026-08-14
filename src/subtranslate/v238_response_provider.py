@@ -1,0 +1,155 @@
+"""Explicit response boundary for the reusable V2.3.8 stage.
+
+The stage never discovers a model client by itself.  A caller must inject one
+of the three deliberately separate providers below.  This keeps live capture,
+offline replay, and deterministic tests from silently crossing boundaries.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from v236_durable_response_capture import DurableResponseCaptureV1, _atomic_json
+
+
+class ResponseProviderError(RuntimeError):
+    """A response was unavailable, ambiguous, or failed its strict contract."""
+
+
+class ResponseSchemaError(ResponseProviderError):
+    """A durable response did not satisfy the V2.3.8 response schema."""
+
+
+def _canonical(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _safe_id(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "call"))
+    return token[:96] or "call"
+
+
+def _parse_response(value: Any) -> dict[str, Any]:
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ResponseSchemaError("V238_RESPONSE_NOT_JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ResponseSchemaError("V238_RESPONSE_ROOT_NOT_OBJECT")
+    result = dict(value)
+    if "translation" in result and not isinstance(result["translation"], str):
+        raise ResponseSchemaError("V238_TRANSLATION_NOT_STRING")
+    if "text" in result and not isinstance(result["text"], str):
+        raise ResponseSchemaError("V238_TEXT_NOT_STRING")
+    if "translation" not in result and "text" not in result and "ass_text" not in result and "ownership_runs" not in result and "owner_vector" not in result:
+        raise ResponseSchemaError("V238_RESPONSE_HAS_NO_SUPPORTED_PAYLOAD")
+    return result
+
+
+class DurableResponseProvider:
+    """Provider with explicit LIVE_CAPTURED/OFFLINE_REPLAY/TEST_FAKE modes."""
+
+    MODES = {"LIVE_CAPTURED", "OFFLINE_REPLAY", "TEST_FAKE"}
+
+    def __init__(
+        self,
+        mode: str,
+        *,
+        capture_root: str | Path | None = None,
+        client: Callable[[dict[str, Any]], Any] | None = None,
+        fake: Callable[[dict[str, Any]], Any] | Mapping[str, Any] | None = None,
+        expected_capture_ids: Mapping[str, str] | None = None,
+    ) -> None:
+        self.mode = str(mode or "").upper()
+        if self.mode not in self.MODES:
+            raise ValueError(f"unsupported V2.3.8 response mode: {self.mode or '<empty>'}")
+        self.capture_root = Path(capture_root) if capture_root is not None else None
+        self.client = client
+        self.fake = fake
+        self.expected_capture_ids = dict(expected_capture_ids or {})
+        self.calls: list[dict[str, Any]] = []
+        if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
+            raise ValueError(f"{self.mode} requires an explicit capture_root")
+
+    def _capture_dir(self, request: Mapping[str, Any], capture_id: str | None) -> tuple[str, Path]:
+        raw_id = capture_id or str(request.get("capture_id") or "")
+        if not raw_id:
+            digest = hashlib.sha256(_canonical(dict(request))).hexdigest()[:24]
+            raw_id = f"v238-call-{digest}"
+        call_id = _safe_id(raw_id)
+        root = self.capture_root if self.capture_root is not None else Path(".")
+        return call_id, root / call_id
+
+    def _fake_response(self, request: dict[str, Any], call_id: str) -> dict[str, Any]:
+        if callable(self.fake):
+            return _parse_response(self.fake(request))
+        if isinstance(self.fake, Mapping):
+            if call_id in self.fake:
+                return _parse_response(self.fake[call_id])
+            if "default" in self.fake:
+                return _parse_response(self.fake["default"])
+        # TEST_FAKE is intentionally source-preserving: it proves the call
+        # graph and structural contracts without pretending to be a model.
+        return {"translation": str(request.get("text", "")), "mode": "TEST_FAKE"}
+
+    def _offline_response(self, request: dict[str, Any], call_id: str, call_dir: Path) -> dict[str, Any]:
+        if not call_dir.is_dir():
+            raise ResponseProviderError("V238_OFFLINE_CAPTURE_MISSING")
+        expected = self.expected_capture_ids.get(str(request.get("capture_id", call_id)))
+        if expected and expected != call_id:
+            raise ResponseProviderError("V238_OFFLINE_CAPTURE_ID_MISMATCH")
+        request_path = call_dir / "request_payload.json"
+        if not request_path.is_file():
+            raise ResponseProviderError("V238_OFFLINE_REQUEST_MISSING")
+        recorded = json.loads(request_path.read_text(encoding="utf-8"))
+        if hashlib.sha256(_canonical(recorded)).hexdigest() != hashlib.sha256(_canonical(request)).hexdigest():
+            raise ResponseProviderError("V238_OFFLINE_REQUEST_IDENTITY_MISMATCH")
+        candidates = (call_dir / "response_payload.json", call_dir / "parsed_response.json", call_dir / "raw-http-response.bin")
+        response_path = next((path for path in candidates if path.is_file()), None)
+        if response_path is None:
+            raise ResponseProviderError("V238_OFFLINE_RESPONSE_MISSING")
+        return _parse_response(response_path.read_bytes())
+
+    def respond(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> dict[str, Any]:
+        payload = dict(request)
+        call_id, call_dir = self._capture_dir(payload, capture_id)
+        payload.setdefault("capture_id", call_id)
+        if self.mode == "TEST_FAKE":
+            response = self._fake_response(payload, call_id)
+        elif self.mode == "OFFLINE_REPLAY":
+            response = self._offline_response(payload, call_id, call_dir)
+        else:
+            if self.client is None:
+                raise ResponseProviderError("V238_LIVE_CLIENT_NOT_INJECTED")
+            call_dir.parent.mkdir(parents=True, exist_ok=True)
+            capture = DurableResponseCaptureV1(call_dir, call_id=call_id)
+            capture.prepare(payload, {"mode": self.mode, "capture_id": call_id})
+            raw = self.client(payload)
+            parsed = _parse_response(raw)
+            # Injected clients are the only permitted network boundary.  The
+            # raw bytes and parsed value are both made durable before return.
+            raw_bytes = raw if isinstance(raw, bytes) else _canonical(raw)
+            capture.receive_injected(raw_bytes, metadata={"mode": self.mode})
+            _atomic_json(call_dir / "parsed_response.json", parsed)
+            response = parsed
+        self.calls.append({"capture_id": call_id, "mode": self.mode, "request_sha256": hashlib.sha256(_canonical(payload)).hexdigest()})
+        return response
+
+    def translate(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> str:
+        result = self.respond(request, capture_id=capture_id)
+        value = result.get("translation", result.get("text"))
+        if not isinstance(value, str):
+            raise ResponseSchemaError("V238_TRANSLATION_MISSING")
+        return value
+
+    def ownership(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> dict[str, Any]:
+        return self.respond(request, capture_id=capture_id)
+
+
+__all__ = ["DurableResponseProvider", "ResponseProviderError", "ResponseSchemaError"]

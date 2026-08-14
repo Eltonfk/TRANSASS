@@ -48,12 +48,17 @@ def _call_full_adapter(plan_id: str, source: Path, output: Path, context: dict[s
     glossary = context.get("glossary")
     if plan_id in {"v2_1_2", "v2_1_3"}:
         return function(source, output, glossary=glossary)
-    return function(
-        source, output, glossary=glossary,
+    kwargs = dict(
+        glossary=glossary,
         memory_db_root=context.get("memory_root"),
         anime_series_id=context.get("anime_series_id"),
         episode_id=context.get("episode_id"),
         job_id=context.get("job_id"),
+    )
+    if plan_id == "v2_3_8":
+        kwargs["execution_context"] = context
+    return function(
+        source, output, **kwargs,
     )
 
 
@@ -130,7 +135,14 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         full_stage_result = _call_full_adapter(full_stage_plan, source, intermediate, ctx)
         stage_results.append({"id": plan.stages[0], "result": full_stage_result})
         v230 = getattr(importlib.import_module(plan.augmentation_module), plan.augmentation_function)
-        v230_result = v230(intermediate, output, model=ctx.get("model_override"), ollama_url=ctx.get("ollama_url"))
+        karaoke_kwargs: dict[str, Any] = {
+            "model": ctx.get("model_override"),
+            "ollama_url": ctx.get("ollama_url"),
+        }
+        karaoke_provider = ctx.get("karaoke_translator")
+        if callable(karaoke_provider):
+            karaoke_kwargs["translator"] = karaoke_provider
+        v230_result = v230(intermediate, output, **karaoke_kwargs)
         v230_result = _validate_v230_result(v230_result)
         stage_results.append({"id": "KARAOKE_AUGMENTATION_V230", "result": v230_result})
         if not output.is_file():

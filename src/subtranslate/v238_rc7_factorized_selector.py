@@ -154,7 +154,7 @@ def make_composition_presentation(compositions: list[dict[str, Any]], *, fixed_o
     return make_stage_presentation(items, seed=seed, owner_count=len(fixed_order), owner_labels=owner_labels)
 
 
-def build_stage_request(*, stage: str, semantic_group_id: str, owners: list[dict[str, str]], target: str, presentation: dict[str, Any], model: str = "qwen3.5:9b", fixed_order: list[int] | None = None) -> dict[str, Any]:
+def build_stage_request(*, stage: str, semantic_group_id: str, owners: list[dict[str, str]], target: str, presentation: dict[str, Any], model: str, fixed_order: list[int] | None = None) -> dict[str, Any]:
     atoms = target_atoms(target)
     labels = presentation["canonical_to_presented"]
     source = "\n".join(f"OWNER {chr(64 + labels[i])}: {owner['source_text']}" for i, owner in enumerate(owners, 1))

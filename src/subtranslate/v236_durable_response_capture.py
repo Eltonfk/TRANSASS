@@ -157,6 +157,32 @@ class DurableResponseCaptureV1:
                 client_exit_status=1,
             )
 
+    def receive_injected(self, raw_body: bytes, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Persist bytes returned by an explicitly injected transport.
+
+        The production client remains outside this class.  This seam is used
+        by the generic V2.3.8 provider so tests and callers can inject a
+        transport without giving the capture layer a second HTTP authority.
+        """
+        current = self._state()
+        if current["state"] != "REQUEST_DURABLE":
+            raise RuntimeError("DURABLE_CAPTURE_INJECTED_NOT_PERMITTED_FROM_CURRENT_STATE")
+        self._transition("TRANSPORT_IN_PROGRESS", transport_started_at=_now(), transport_metadata=metadata or {})
+        canonical = self.call_dir / "raw-http-response.bin"
+        _write_bytes_durable(canonical, bytes(raw_body))
+        _fsync_directory(self.call_dir)
+        transport = {
+            "http_status": 200,
+            "raw_response_path": canonical.name,
+            "raw_response_bytes": len(raw_body),
+            "raw_response_sha256": _sha(canonical.read_bytes()),
+            "transport_finished_at": _now(),
+            "client_exit_status": 0,
+            "injected_transport": True,
+        }
+        _atomic_json(self.call_dir / "transport_result.json", transport)
+        return self._transition("RESPONSE_DURABLE", **transport)
+
     def validate(self, parser: Callable[[bytes], Any], validator: Callable[[Any], Any]) -> dict[str, Any]:
         current = self._state()
         if current["state"] not in {"RESPONSE_DURABLE", "VALIDATION_PENDING"}:

@@ -12,7 +12,6 @@ from typing import Any
 from v238_rc7a_prompt_contract import build_rc7a_request
 
 
-RC7B_MODEL = "qwen3.5:9b"
 RC7B_OPTIONS = {
     "temperature": 0.0,
     "num_ctx": 4096,
@@ -28,7 +27,7 @@ def build_rc7b_request(
     target: str,
     presentation: dict[str, Any],
     fixed_order: list[int] | None = None,
-    model: str = RC7B_MODEL,
+    model: str,
 ) -> dict[str, Any]:
     """Build an RC7A-equivalent request with RC7B reasoning configuration."""
     request = build_rc7a_request(

@@ -22,7 +22,7 @@ def build_rc7b1_request(
     target: str,
     presentation: dict[str, Any],
     fixed_order: list[int] | None = None,
-    model: str = "qwen3.5:9b",
+    model: str,
 ) -> dict[str, Any]:
     request = build_rc7b_request(
         stage=stage,
