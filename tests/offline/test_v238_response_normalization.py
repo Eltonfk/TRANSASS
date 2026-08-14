@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from v238_per_call_durability import DurableCallFault, DurableV226Call
+from v238_per_call_durability import DurableCallError, DurableCallFault, DurableV226Call
 from v238_response_normalization import NormalizationRejected, POLICY, project_extra_property_response
 
 
@@ -92,6 +92,7 @@ class ResponseNormalizationTests(unittest.TestCase):
             "candidate_execution_contract": "normalization-test",
             "episode_budget_limits": {"planned_initial_calls": 1, "retry_reserve": 1, "physical_ceiling": 2},
             "candidate_commit": "candidate-test",
+            "response_normalization_policy": POLICY,
         }
         data.update(overrides)
         return data
@@ -147,6 +148,9 @@ class ResponseNormalizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = self.context(root)
+            # The first live call deliberately exercises the legacy strict
+            # response path; policy is enabled only for the restart replay.
+            context.pop("response_normalization_policy", None)
             config = Config("http://ollama.invalid", model="qwen3.5:9b", strict_json=True)
             config.model_digest = context["model_digest"]
             config.durable_context = context
@@ -269,6 +273,10 @@ class ResponseNormalizationTests(unittest.TestCase):
             self.assertEqual(issues, [])
             self.assertEqual(observation["reused_durable_response"], True)
             self.assertEqual(observation["normalization_status"], "DERIVED_PARSED_VALID_REUSED")
+            self.assertEqual(observation["derived_schema_status"], "VALID_AFTER_DETERMINISTIC_PROJECTION")
+            self.assertEqual(observation["physical_transport"], False)
+            self.assertEqual(observation["model_call_delta"], 0)
+            self.assertEqual(observation["retry_delta"], 0)
             self.assertEqual(observation["durable_state"], "DERIVED_PARSED_VALID")
 
     def test_recorded_invalid_derivation_fails_closed_without_projection_or_transport(self):
@@ -299,7 +307,12 @@ class ResponseNormalizationTests(unittest.TestCase):
             (call_dir / "derived_response.json").write_bytes(canonical_bytes(invalid_derived))
             manifest = json.loads((call_dir / "derived_normalization.json").read_text())
             manifest["normalized_response_sha256"] = sha256_bytes(canonical_bytes(invalid_derived))
-            (call_dir / "derived_normalization.json").write_text(json.dumps(manifest))
+            manifest_bytes = canonical_bytes(manifest)
+            (call_dir / "derived_normalization.json").write_bytes(manifest_bytes)
+            state = json.loads((call_dir / "state.json").read_text())
+            state["derived_response_sha256"] = sha256_bytes(canonical_bytes(invalid_derived))
+            state["derived_manifest_sha256"] = sha256_bytes(manifest_bytes)
+            (call_dir / "state.json").write_bytes(canonical_bytes(state))
             context.pop("durability_fault_point")
             config.durable_context = context
             with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *args, **kwargs: posts.append(1)):
@@ -308,6 +321,76 @@ class ResponseNormalizationTests(unittest.TestCase):
             self.assertEqual(posts, [1])
             state = json.loads((call_dir / "state.json").read_text())
             self.assertEqual(state["state"], "DERIVED_NORMALIZATION_RECORDED")
+
+    def test_state_hash_binding_tamper_matrix(self):
+        """Every private-file tamper is rejected against state authority."""
+        from v238_per_call_durability import canonical_bytes, sha256_bytes
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root)
+            metadata = {"attempt_type": "INITIAL", "logical_batch_id": "tamper", "attempt_ordinal": 1, "parent_attempt_id": None, "unit_membership_sha256": "membership"}
+            call = DurableV226Call(context, {"payload": 1}, metadata)
+            call.reserve(); call.prepare_request()
+            with call.exclusive_transport_claim():
+                call.begin_transport(); call.record_response(b'{"translations":[]}', status_code=200)
+            call.mark_parsed(valid=False, error="extra property")
+            value, audit = project_extra_property_response(self.value(extra={"context_note": "private"}), range(1, 9))
+            call.record_derived_normalization(value, audit)
+            call.mark_derived_parsed_valid()
+            call_dir = call.call_dir
+            response_path = call_dir / "derived_response.json"
+            manifest_path = call_dir / "derived_normalization.json"
+            state_path = call_dir / "state.json"
+            original_response = response_path.read_bytes()
+            original_manifest = json.loads(manifest_path.read_text())
+            original_state = json.loads(state_path.read_text())
+
+            def reload_call():
+                return DurableV226Call(self.context(root), {"payload": 1}, metadata)
+
+            # A: response-only tamper.
+            response_path.write_bytes(canonical_bytes({"translations": [{"id": 1, "text": "changed"}]}))
+            with self.assertRaisesRegex(DurableCallError, "DERIVED_RESPONSE_HASH_MISMATCH|DERIVED_RESPONSE_STATE_HASH_MISMATCH"):
+                reload_call().load_derived_response()
+            response_path.write_bytes(original_response)
+
+            # B: manifest-only tamper.
+            manifest = dict(original_manifest); manifest["normalization_status"] = "tampered"
+            manifest_path.write_bytes(canonical_bytes(manifest))
+            with self.assertRaisesRegex(DurableCallError, "DERIVED_MANIFEST_STATE_HASH_MISMATCH"):
+                reload_call().load_derived_response()
+            manifest_path.write_bytes(canonical_bytes(original_manifest))
+
+            # C: coherent body+manifest rewrite cannot redefine state response hash.
+            changed = canonical_bytes({"translations": [{"id": 1, "text": "changed"}]})
+            response_path.write_bytes(changed)
+            manifest = dict(original_manifest); manifest["normalized_response_sha256"] = sha256_bytes(changed)
+            manifest_path.write_bytes(canonical_bytes(manifest))
+            with self.assertRaisesRegex(DurableCallError, "DERIVED_RESPONSE_STATE_HASH_MISMATCH"):
+                reload_call().load_derived_response()
+            response_path.write_bytes(original_response); manifest_path.write_bytes(canonical_bytes(original_manifest))
+
+            # D-G: manifest identity/policy/source changes remain state-bound.
+            for field, value in (("source_response_sha256", "f" * 64), ("policy", "OTHER_POLICY"), ("logical_call_id", "other-logical"), ("family_id", "other-family")):
+                with self.subTest(field=field):
+                    manifest = dict(original_manifest); manifest[field] = value
+                    manifest_path.write_bytes(canonical_bytes(manifest))
+                    with self.assertRaisesRegex(DurableCallError, "DERIVED_MANIFEST_STATE_HASH_MISMATCH|DERIVED_SOURCE_RESPONSE_MISMATCH|DERIVED_POLICY_MISMATCH|DERIVED_IDENTITY_MISMATCH"):
+                        reload_call().load_derived_response()
+                    manifest_path.write_bytes(canonical_bytes(original_manifest))
+
+            # H: even a fully state-coherent invalid derived body is rejected
+            # by the canonical validator; hashes alone never make it valid.
+            invalid = canonical_bytes({"translations": [{"id": 1}]})
+            response_path.write_bytes(invalid)
+            manifest = dict(original_manifest); manifest["normalized_response_sha256"] = sha256_bytes(invalid)
+            manifest_bytes = canonical_bytes(manifest); manifest_path.write_bytes(manifest_bytes)
+            state = dict(original_state); state["derived_response_sha256"] = sha256_bytes(invalid); state["derived_manifest_sha256"] = sha256_bytes(manifest_bytes)
+            state_path.write_bytes(canonical_bytes(state))
+            # The durability loader accepts the hash-coherent bytes; the
+            # canonical Client must still reject them during validation.
+            self.assertEqual(json.loads(reload_call().load_derived_response()), {"translations": [{"id": 1}]})
 
     def test_opt_in_exact_response_skips_projection(self):
         from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit

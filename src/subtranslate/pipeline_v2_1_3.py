@@ -1606,13 +1606,21 @@ class Client:
             observation["json_valid"] = True
             observation["structural_issues"] = issues
             if durable_call is not None:
-                if durable_call.state() == "DERIVED_NORMALIZATION_RECORDED":
+                durable_state = durable_call.state()
+                if durable_state in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"}:
                     if issues:
                         raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(issues))
-                    promoted = durable_call.mark_derived_parsed_valid()
-                    observation["derived_state"] = promoted.get("state")
-                    observation["normalization_status"] = "DERIVED_PARSED_VALID_REUSED"
-                elif durable_call.state() not in {"DERIVED_PARSED_VALID"}:
+                    if durable_state == "DERIVED_NORMALIZATION_RECORDED":
+                        promoted = durable_call.mark_derived_parsed_valid()
+                        observation["derived_state"] = promoted.get("state")
+                    if derived_body:
+                        observation["normalization_status"] = "DERIVED_PARSED_VALID_REUSED"
+                        observation["derived_schema_status"] = "VALID_AFTER_DETERMINISTIC_PROJECTION"
+                        observation["reused_durable_response"] = True
+                        observation["physical_transport"] = False
+                        observation["model_call_delta"] = 0
+                        observation["retry_delta"] = 0
+                elif durable_state not in {"DERIVED_PARSED_VALID"}:
                     durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
                 observation["durable_state"] = durable_call.state()
             observation["elapsed_client_seconds"] = time.perf_counter() - started

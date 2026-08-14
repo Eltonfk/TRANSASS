@@ -780,20 +780,48 @@ class DurableV226Call:
         return value
 
     def load_derived_response(self) -> bytes:
-        """Load and verify the private normalized response, never the raw one."""
+        """Load a derived response bound to state, manifest and identity.
+
+        ``state.json`` is the authoritative promotion record.  The private
+        body and manifest are only usable when their hashes agree with both
+        the state record and each other; a coherent body/manifest rewrite can
+        therefore not redefine a promoted derivation.
+        """
         response_path = self.call_dir / "derived_response.json"
         manifest_path = self.call_dir / "derived_normalization.json"
         if not response_path.is_file() or not manifest_path.is_file():
             raise DurableCallError("V238_DERIVED_RESPONSE_MISSING")
         try:
+            state = self._state()
             raw = response_path.read_bytes()
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("normalized_response_sha256") != sha256_bytes(raw):
+            actual_response_sha = sha256_bytes(raw)
+            manifest_response_sha = manifest.get("normalized_response_sha256")
+            state_response_sha = state.get("derived_response_sha256")
+            if manifest_response_sha != actual_response_sha:
                 raise DurableCallError("V238_DERIVED_RESPONSE_HASH_MISMATCH")
-            if manifest.get("source_response_sha256") != self._state().get("response_sha256"):
+            if state_response_sha != actual_response_sha:
+                raise DurableCallError("V238_DERIVED_RESPONSE_STATE_HASH_MISMATCH")
+            manifest_sha = sha256_bytes(canonical_bytes(manifest))
+            if state.get("derived_manifest_sha256") != manifest_sha:
+                raise DurableCallError("V238_DERIVED_MANIFEST_STATE_HASH_MISMATCH")
+            if manifest.get("source_response_sha256") != state.get("response_sha256"):
                 raise DurableCallError("V238_DERIVED_SOURCE_RESPONSE_MISMATCH")
-            if manifest.get("policy") != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
+            expected_policy = str(self.context.get("response_normalization_policy") or "")
+            if manifest.get("policy") != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1" or manifest.get("policy") != expected_policy:
                 raise DurableCallError("V238_DERIVED_POLICY_MISMATCH")
+            expected_identity = {
+                "source_response_sha256": state.get("response_sha256"),
+                "policy": expected_policy,
+                "logical_call_id": self.logical_call_id,
+                "physical_attempt_id": self.physical_attempt_id,
+                "family_id": self.family_contract.get("episode_family_id"),
+                "candidate_commit": self.context.get("candidate_commit"),
+                "identity": self.identity,
+            }
+            for key, expected in expected_identity.items():
+                if manifest.get(key) != expected:
+                    raise DurableCallError("V238_DERIVED_IDENTITY_MISMATCH:" + key)
             json.loads(raw.decode("utf-8"))
             return raw
         except DurableCallError:
