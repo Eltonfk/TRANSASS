@@ -77,6 +77,21 @@ def _sync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    """Persist an authoritative marker using sibling+fsync+rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    os.close(fd)
+    temporary = Path(raw)
+    try:
+        temporary.write_bytes((json.dumps(dict(value), ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+        _sync_file(temporary)
+        os.replace(temporary, path)
+        _sync_dir(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _atomic_stage_write(candidate: pysubs2.SSAFile, output_path: Path, source_path: Path, context: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a sibling file before making it authoritative."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,14 +104,14 @@ def _atomic_stage_write(candidate: pysubs2.SSAFile, output_path: Path, source_pa
         validation = validate_v238_candidate(source_path, temporary)
         os.replace(temporary, output_path)
         _sync_dir(output_path.parent)
+        if context.get("fault_injection") == "after_output_rename":
+            raise RuntimeError("V238_FAULT_AFTER_OUTPUT_RENAME")
         marker_root = context.get("stage_completion_root")
         if marker_root:
             marker_dir = Path(marker_root)
             marker_dir.mkdir(parents=True, exist_ok=True)
             marker = marker_dir / f"{output_path.name}.complete.json"
-            marker.write_text(json.dumps({"state": "COMPLETE", "sha256": _sha256(output_path), "validation": validation}, sort_keys=True) + "\n", encoding="utf-8")
-            _sync_file(marker)
-            _sync_dir(marker_dir)
+            _atomic_json(marker, {"state": "COMPLETE", "sha256": _sha256(output_path), "validation": validation})
         return validation
     finally:
         temporary.unlink(missing_ok=True)
@@ -158,6 +173,20 @@ def _base_metric_map(summary: Mapping[str, Any] | None) -> dict[str, int | float
         "completion_tokens": int(number("completion_tokens")),
         "elapsed_seconds": float(number("elapsed_seconds", "elapsed_client_seconds")),
     }
+
+
+def reconcile_atomic_stage_output(source: str | Path, output: str | Path, *, context: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconcile an output renamed before its completion marker was written."""
+    source_path, output_path = Path(source), Path(output)
+    if not output_path.is_file():
+        raise ResponseProviderError("V238_STAGE_OUTPUT_MISSING_FOR_RECONCILIATION")
+    validation = validate_v238_candidate(source_path, output_path)
+    marker_root = context.get("stage_completion_root")
+    if not marker_root:
+        raise ResponseProviderError("V238_STAGE_COMPLETION_ROOT_REQUIRED")
+    marker = Path(marker_root) / f"{output_path.name}.complete.json"
+    _atomic_json(marker, {"state": "COMPLETE", "sha256": _sha256(output_path), "validation": validation, "reconciled": True})
+    return {"state": "COMPLETE", "reconciled": True, "output_sha256": _sha256(output_path), "validation": validation}
 
 
 def _plain(value: str) -> str:
@@ -366,12 +395,16 @@ def execute_v238_stage(
     base_translation: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute the real V2.3.8 stage through an injected response boundary."""
+    started = time.perf_counter()
     source_path, output_path = Path(source), Path(output)
     if not source_path.is_file():
         raise FileNotFoundError(source_path)
     if output_path.exists():
         raise FileExistsError(output_path)
     provider = _provider(context)
+    operation_budget = context.get("operation_budget")
+    if operation_budget is not None and callable(getattr(provider, "attach_operation_budget", None)):
+        provider.attach_operation_budget(operation_budget, phase="V238_SEMANTIC")
     metrics_before = copy.deepcopy(getattr(provider, "metrics", {}))
     model = context.get("model") or context.get("model_override")
     mode = provider.mode
@@ -435,7 +468,6 @@ def execute_v238_stage(
             # Base V226 already supplies linguistic materialization. V238
             # transforms are deterministic; no artificial provider call.
             target_line.text, _details = _render_event(source_text, target_line.text or "", event_id=index, provider=provider, model=model, counters=counters, ownership_cache=ownership_cache)
-    started = time.perf_counter()
     validation = _atomic_stage_write(candidate, output_path, source_path, context)
     provider_metrics = copy.deepcopy(getattr(provider, "metrics", {}))
     metrics_delta = _metric_delta(metrics_before, provider_metrics)
@@ -444,7 +476,8 @@ def execute_v238_stage(
     if isinstance(base_summary, Mapping) and isinstance(base_summary.get("metrics"), Mapping):
         base_metrics.update(_base_metric_map(base_summary["metrics"]))
     v238_metrics = {key: value for key, value in metrics_delta.items() if isinstance(value, (int, float))}
-    aggregated_metrics = _full_metric_map(base_metrics, metrics_delta, counters, time.perf_counter() - started)
+    v238_elapsed = time.perf_counter() - started
+    aggregated_metrics = _full_metric_map(base_metrics, metrics_delta, counters, v238_elapsed)
     if isinstance(base_summary, Mapping):
         aggregated_metrics["checkpoint_created"] = int(base_summary.get("checkpoint_created", 0) or 0)
         aggregated_metrics["checkpoint_reused"] = int(base_summary.get("checkpoint_reused", 0) or 0)
@@ -463,7 +496,12 @@ def execute_v238_stage(
         "v238_metrics": v238_metrics,
         "aggregated_metrics": aggregated_metrics,
         "model_calls": int(aggregated_metrics.get("v226_model_generation_attempts", 0)) + int(aggregated_metrics.get("v238_model_attempts", 0)),
-        "network_calls": int(metrics_delta.get("application_network_calls", 0) or 0),
+        "network_calls": int(base_metrics.get("network_calls", 0) or 0) + int(metrics_delta.get("application_network_calls", 0) or 0),
+        "v238_wall_seconds": v238_elapsed,
+        "metrics_measurements": {
+            "v238_wall_seconds": {"value": v238_elapsed, "measurement_status": "MEASURED", "measurement_source": "v238_full_translation_stage"},
+            "provider_metrics": {"value": provider_metrics, "measurement_status": "MEASURED", "measurement_source": "DurableResponseProvider"},
+        },
     }
 
 
@@ -501,4 +539,4 @@ def validate_v238_candidate(source: str | Path, candidate: str | Path) -> dict[s
     }
 
 
-__all__ = ["PIPELINE_ID", "STAGE_ID", "execute_v238_stage", "validate_v238_candidate"]
+__all__ = ["PIPELINE_ID", "STAGE_ID", "execute_v238_stage", "reconcile_atomic_stage_output", "validate_v238_candidate"]

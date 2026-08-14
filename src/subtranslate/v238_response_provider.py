@@ -46,6 +46,17 @@ def _parse_response(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ResponseSchemaError("V238_RESPONSE_ROOT_NOT_OBJECT")
     result = dict(value)
+    if "candidates" in result:
+        if not isinstance(result["candidates"], list):
+            raise ResponseSchemaError("V238_CANDIDATES_NOT_LIST")
+        for item in result["candidates"]:
+            if not isinstance(item, Mapping) or not item.get("canonical_unit_id"):
+                raise ResponseSchemaError("V238_CANDIDATE_ID_REQUIRED")
+            if "text" in item and not isinstance(item["text"], str):
+                raise ResponseSchemaError("V238_CANDIDATE_TEXT_NOT_STRING")
+            if "translation" in item and not isinstance(item["translation"], str):
+                raise ResponseSchemaError("V238_CANDIDATE_TRANSLATION_NOT_STRING")
+        return result
     if "translation" in result and not isinstance(result["translation"], str):
         raise ResponseSchemaError("V238_TRANSLATION_NOT_STRING")
     if "text" in result and not isinstance(result["text"], str):
@@ -94,8 +105,14 @@ class DurableResponseProvider:
             "parse_failures": 0, "schema_failures": 0,
             "provider_requests": 0, "requests_by_operation": {},
         }
+        self.operation_budget: Any = None
+        self.operation_budget_phase = "V238_SEMANTIC"
         if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
             raise ValueError(f"{self.mode} requires an explicit capture_root")
+
+    def attach_operation_budget(self, budget: Any, *, phase: str = "V238_SEMANTIC") -> None:
+        self.operation_budget = budget
+        self.operation_budget_phase = str(phase)
 
     def _capture_dir(self, request: Mapping[str, Any], capture_id: str | None) -> tuple[str, Path]:
         raw_id = capture_id or str(request.get("capture_id") or "")
@@ -165,6 +182,10 @@ class DurableResponseProvider:
         else:
             if self.client is None:
                 raise ResponseProviderError("V238_LIVE_CLIENT_NOT_INJECTED")
+            if self.operation_budget is not None:
+                model_tag = str(payload.get("model") or "qwen3.5:9b")
+                model_digest = payload.get("model_digest")
+                self.operation_budget.reserve(model_tag=model_tag, model_digest=model_digest, phase=self.operation_budget_phase)
             call_dir.parent.mkdir(parents=True, exist_ok=True)
             capture = DurableResponseCaptureV1(call_dir, call_id=call_id)
             capture.prepare(payload, {"mode": self.mode, "capture_id": call_id})

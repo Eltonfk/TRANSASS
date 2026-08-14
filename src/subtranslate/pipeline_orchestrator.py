@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -114,6 +116,14 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
     source = Path(source_path)
     output = Path(output_path)
     ctx = _context(context)
+    if plan.id == "v2_3_8":
+        from v238_llama_policy import OperationCallBudget
+        mode = str(ctx.get("execution_mode") or getattr(ctx.get("response_provider"), "mode", "TEST_FAKE")).upper()
+        if mode == "LIVE_CAPTURED" and not ctx.get("operation_id"):
+            raise ValueError("V238_LIVE_OPERATION_ID_REQUIRED")
+        if mode != "LIVE_CAPTURED":
+            ctx.setdefault("operation_id", f"offline-{uuid.uuid4()}")
+        ctx.setdefault("operation_budget", OperationCallBudget(qwen_physical_maximum=int(ctx.get("qwen_physical_maximum", 131)), llama_generation_maximum=1))
     if ctx.get("operation") == "RETRANSLATE" and not plan.supports_retranslation:
         raise UnsupportedPipelineError(f"retranslation is not supported by pipeline plan: {plan.id}")
     if output.exists():
@@ -126,6 +136,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         result = _call_full_adapter(plan.id, source, output, ctx)
         return _result(plan.id, plan.stages[0], result, output)
 
+    pipeline_started = time.perf_counter()
     intermediate = _temporary_intermediate(output, plan.stages[0])
     stage_results: list[dict[str, Any]] = []
     keep_debug = bool(ctx.get("debug_keep_intermediate", False))
@@ -133,6 +144,10 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
     try:
         full_stage_plan = "v2_2_6" if plan.id == "v2_3_0" else "v2_3_8"
         full_stage_result = _call_full_adapter(full_stage_plan, source, intermediate, ctx)
+        full_stage_result = dict(full_stage_result) if isinstance(full_stage_result, dict) else {"adapter_result": full_stage_result}
+        full_stage_result.setdefault("timing", {})
+        full_stage_result["timing"].setdefault("pipeline_started", pipeline_started)
+        full_stage_result["timing"]["full_translation_wall_seconds"] = full_stage_result.get("full_translation_wall_seconds")
         stage_results.append({"id": plan.stages[0], "result": full_stage_result})
         v230 = getattr(importlib.import_module(plan.augmentation_module), plan.augmentation_function)
         karaoke_kwargs: dict[str, Any] = {
@@ -142,7 +157,9 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         karaoke_provider = ctx.get("karaoke_translator")
         if callable(karaoke_provider):
             karaoke_kwargs["translator"] = karaoke_provider
+        v230_started = time.perf_counter()
         v230_result = v230(intermediate, output, **karaoke_kwargs)
+        v230_elapsed = time.perf_counter() - v230_started
         v230_result = _validate_v230_result(v230_result)
         stage_results.append({"id": "KARAOKE_AUGMENTATION_V230", "result": v230_result})
         if not output.is_file():
@@ -166,6 +183,14 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
                 for key in ("song_units", "translated_units", "translated_events", "unsupported", "failures", "structural_failures", "ollama_calls", "input_sha256", "output_sha256")
                 if key in v230_result
             },
+            "metrics_measurements": {
+                "pipeline_wall_seconds": {"value": time.perf_counter() - pipeline_started, "measurement_status": "MEASURED", "measurement_source": "pipeline_orchestrator"},
+                "full_translation_wall_seconds": {"value": result.get("full_translation_wall_seconds"), "measurement_status": "MEASURED" if result.get("full_translation_wall_seconds") is not None else "UNAVAILABLE", "measurement_source": "production_v2_3_8_adapter"},
+                "v230_wall_seconds": {"value": v230_elapsed, "measurement_status": "MEASURED", "measurement_source": "production_v2_3_0_adapter"},
+            },
+            "pipeline_wall_seconds": time.perf_counter() - pipeline_started,
+            "v230_wall_seconds": v230_elapsed,
+            "operation_budget": ctx.get("operation_budget").snapshot() if hasattr(ctx.get("operation_budget"), "snapshot") else None,
         })
         if defer_cleanup:
             # This is an internal persistence hand-off only.  The caller must

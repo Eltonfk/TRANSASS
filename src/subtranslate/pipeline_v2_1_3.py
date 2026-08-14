@@ -114,6 +114,10 @@ class Config:
     # Optional local word list used only to distinguish a genuinely retained
     # English token from a legitimate name/romanisation/onomatopoeia.
     english_dictionary_path: str = "/usr/share/dict/american-english"
+    # Optional operation-scoped reservation ledger.  Legacy callers leave it
+    # unset; the V2.3.8 canonical materializer injects it explicitly.
+    operation_budget: Any = None
+    model_digest: str | None = None
 
     @classmethod
     def from_file(cls, path: Path) -> "Config":
@@ -1297,6 +1301,12 @@ class Client:
 
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
+        if self.config.operation_budget is not None:
+            self.config.operation_budget.reserve(
+                model_tag=self.model,
+                model_digest=getattr(self.config, "model_digest", None),
+                phase="V226_QWEN",
+            )
         schema = _schema(units)
         schema_kind = unit_schema_kind(units)
         targets: list[dict[str, Any]] = []

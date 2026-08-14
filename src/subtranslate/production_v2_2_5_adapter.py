@@ -389,6 +389,7 @@ def translate_subtitle_file_v2_2_5(
     anime_series_id: int | None = None,
     episode_id: int | None = None,
     job_id: str | None = None,
+    execution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if subtitle_path.suffix.lower() not in {".ass", ".ssa"}:
         raise RuntimeError("V2.2.5 aceita somente ASS/SSA; saída não publicada")
@@ -396,6 +397,9 @@ def translate_subtitle_file_v2_2_5(
         raise FileExistsError(f"a saída final já existe: {output_path.name}")
     started = time.perf_counter()
     config, merged_glossary = _config(subtitle_path, glossary)
+    if execution_context:
+        config.operation_budget = execution_context.get("operation_budget")
+        config.model_digest = execution_context.get("primary_model_digest") or execution_context.get("model_digest")
     memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
@@ -423,7 +427,7 @@ def translate_subtitle_file_v2_2_5(
     summary["memory_build"] = build
     summary["pipeline"] = APPROVED_PIPELINE
     summary["model"] = config.model
-    if not summary.get("eligible_experimental"):
+    if not summary.get("eligible_experimental") and not (execution_context or {}).get("v238_allow_primary_ledger_failures"):
         snapshot = ledger.snapshot(runner, summary, stage="eligibility_gate", error="v2_2_5_not_eligible")
         failure_summary = {
             "reason": "v2_2_5_not_eligible",
@@ -475,7 +479,20 @@ def translate_subtitle_file_v2_2_5(
         "memory_candidates_found", "memory_items_used", "memory_conflicts", "memory_misses", "retry_budget",
     )
     result = {key: summary.get(key) for key in result_keys}
-    result.update({"pipeline": APPROVED_PIPELINE, "model": config.model, "calls": summary.get("total_ollama_calls", 0), "retry_calls": summary.get("actual_retry_ollama_calls", 0), "elapsed_client_seconds": round(time.perf_counter() - started, 3), "output": output_path.name})
+    # Keep the factual V226 ledger/call observations available to the
+    # canonical V2.3.8 materializer.  These are runner-produced records, not
+    # a reconstruction from rendered ASS text.  The legacy scalar counters
+    # remain unchanged for existing consumers.
+    result.update({
+        "pipeline": APPROVED_PIPELINE,
+        "model": config.model,
+        "calls": summary.get("total_ollama_calls", 0),
+        "retry_calls": summary.get("actual_retry_ollama_calls", 0),
+        "primary_results": summary.get("results", []),
+        "primary_calls": summary.get("calls", []),
+        "elapsed_client_seconds": round(time.perf_counter() - started, 3),
+        "output": output_path.name,
+    })
     ledger.complete(runner, summary)
     print("V2_2_5_SUMMARY " + json.dumps(result, ensure_ascii=False, sort_keys=True))
     return result
