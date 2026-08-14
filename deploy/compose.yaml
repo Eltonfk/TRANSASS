@@ -1,7 +1,7 @@
 services:
   subtranslate:
     image: ${SUBTRANSLATE_IMAGE:-subtranslate:p2c3-20260813T223000Z}
-    container_name: subtranslate-consolidated-candidate
+    container_name: subtranslate
     restart: unless-stopped
     init: true
     user: "1000:1000"
