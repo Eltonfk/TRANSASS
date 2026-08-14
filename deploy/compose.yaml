@@ -1,8 +1,18 @@
 services:
   subtranslate:
-    image: subtranslate:p2c2-20260813T210000Z
+    image: ${SUBTRANSLATE_IMAGE:-subtranslate:p2c3-20260813T223000Z}
     container_name: subtranslate-consolidated-candidate
     restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
     env_file:
       - path: .env
         required: false
@@ -12,6 +22,11 @@ services:
       TRANSLATOR_OLLAMA_MODEL: ${TRANSLATOR_OLLAMA_MODEL:-qwen3.5:9b}
       TRANSLATOR_FALLBACK_OLLAMA_MODEL: ${TRANSLATOR_FALLBACK_OLLAMA_MODEL:-qwen3.5:9b}
       TRANSLATOR_REVIEW_MODEL: ${TRANSLATOR_REVIEW_MODEL:-qwen3.5:9b}
+      TRANSLATOR_REVIEW_MAX_PER_FILE: ${TRANSLATOR_REVIEW_MAX_PER_FILE:-30}
+      TRANSLATOR_BATCH_SIZE: ${TRANSLATOR_BATCH_SIZE:-4}
+      TRANSLATOR_CONTEXT_NEIGHBORS: ${TRANSLATOR_CONTEXT_NEIGHBORS:-1}
+      TRANSLATOR_CONTEXT_MAX_CHARS: ${TRANSLATOR_CONTEXT_MAX_CHARS:-360}
+      TRANSLATOR_MIN_FILE_AGE_SECONDS: ${TRANSLATOR_MIN_FILE_AGE_SECONDS:-600}
       TRANSLATOR_BASE_LIBRARY: /shows
       ANIME_LIBRARY_ROOTS: /shows
       TRANSLATOR_WEB_STATE_DIR: /app/state
@@ -21,9 +36,14 @@ services:
       - /Tank/data/Shows:/shows:rw
       - /docker/subtranslate/state:/app/state:rw
     tmpfs:
-      - /tmp:size=512m
-    expose:
-      - "5000"
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    ports:
+      - "192.168.1.5:5050:5000"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python3", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=2).read()"]
       interval: 30s
