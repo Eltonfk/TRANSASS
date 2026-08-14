@@ -1,0 +1,1 @@
+../src/subtranslate/pipeline_registry.py

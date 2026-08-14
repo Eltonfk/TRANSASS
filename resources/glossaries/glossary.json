@@ -1,0 +1,19 @@
+{
+  "default": {
+    "terms": {
+      "senpai": "senpai",
+      "sensei": "sensei",
+      "-san": "-san",
+      "-chan": "-chan",
+      "-kun": "-kun",
+      "-sama": "-sama"
+    }
+  },
+  "series": {
+    "Nome exato da série": {
+      "terms": {
+        "Termo original": "Termo preferido em PT-BR"
+      }
+    }
+  }
+}
