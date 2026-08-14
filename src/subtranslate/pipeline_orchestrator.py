@@ -62,8 +62,8 @@ def _call_legacy(source: Path, output: Path, context: dict[str, Any]) -> Any:
     return module.translate_subtitle_file(source, output, glossary=context.get("glossary"))
 
 
-def _temporary_intermediate(output: Path) -> Path:
-    fd, raw = tempfile.mkstemp(prefix=f".p2b1-v226-{output.stem}-", suffix=output.suffix, dir=str(output.parent))
+def _temporary_intermediate(output: Path, stage_id: str) -> Path:
+    fd, raw = tempfile.mkstemp(prefix=f".{stage_id.lower()}-{output.stem}-", suffix=output.suffix, dir=str(output.parent))
     os.close(fd)
     intermediate = Path(raw)
     intermediate.unlink(missing_ok=True)
@@ -117,17 +117,18 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
     if plan.id == "legacy":
         result = _call_legacy(source, output, ctx)
         return _result(plan.id, "LEGACY_TRANSLATION", result, output)
-    if plan.id != "v2_3_0":
+    if plan.id not in {"v2_3_0", "v2_3_8"}:
         result = _call_full_adapter(plan.id, source, output, ctx)
         return _result(plan.id, plan.stages[0], result, output)
 
-    intermediate = _temporary_intermediate(output)
+    intermediate = _temporary_intermediate(output, plan.stages[0])
     stage_results: list[dict[str, Any]] = []
     keep_debug = bool(ctx.get("debug_keep_intermediate", False))
     defer_cleanup = bool(ctx.get("defer_intermediate_cleanup", False))
     try:
-        v226_result = _call_full_adapter("v2_2_6", source, intermediate, ctx)
-        stage_results.append({"id": "FULL_TRANSLATION_V226", "result": v226_result})
+        full_stage_plan = "v2_2_6" if plan.id == "v2_3_0" else "v2_3_8"
+        full_stage_result = _call_full_adapter(full_stage_plan, source, intermediate, ctx)
+        stage_results.append({"id": plan.stages[0], "result": full_stage_result})
         v230 = getattr(importlib.import_module(plan.augmentation_module), plan.augmentation_function)
         v230_result = v230(intermediate, output, model=ctx.get("model_override"), ollama_url=ctx.get("ollama_url"))
         v230_result = _validate_v230_result(v230_result)
@@ -137,7 +138,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         # Preserve the full V2.2.6 summary at top level, then expose the
         # V2.3.0 metadata separately.  `calls` is total model calls across
         # both stages; retry_calls remains the base adapter retry count.
-        result = dict(v226_result) if isinstance(v226_result, dict) else {"adapter_result": v226_result}
+        result = dict(full_stage_result) if isinstance(full_stage_result, dict) else {"adapter_result": full_stage_result}
         base_calls = result.get("calls", result.get("total_ollama_calls", 0))
         base_retries = result.get("retry_calls", result.get("actual_retry_ollama_calls", 0))
         v230_calls = v230_result.get("ollama_calls", 0)
@@ -161,9 +162,9 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
             # is emitted to the Web/control-plane consumer.
             result["_internal"] = {
                 "stage_artifact_path": str(intermediate),
-                "stage_pipeline": "v2_2_6",
-                "stage_id": "FULL_TRANSLATION_V226",
-                "stage_result": v226_result,
+                "stage_pipeline": full_stage_plan,
+                "stage_id": plan.stages[0],
+                "stage_result": full_stage_result,
                 "stage_sha256": hashlib.sha256(intermediate.read_bytes()).hexdigest(),
                 "cleanup_required": True,
             }

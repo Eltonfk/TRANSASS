@@ -1,0 +1,2 @@
+# The canonical offline runner uses Python's stdlib unittest and needs no
+# additional test-only package. Runtime dependencies remain in requirements.lock.

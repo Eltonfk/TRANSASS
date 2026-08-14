@@ -81,6 +81,12 @@ _PLANS = {
         adapter_module="production_v2_2_6_adapter", adapter_function="translate_subtitle_file_v2_2_6",
         augmentation_module="production_v2_3_0_adapter", augmentation_function="augment_karaoke_candidate_v2_3_0", archive_translation=True,
     ),
+    "v2_3_8": _plan(
+        "v2_3_8", "V2.3.8", ("FULL_TRANSLATION_V238", "KARAOKE_AUGMENTATION_V230"),
+        notes="Candidate complete plan: reusable V2.3.8 full translation stage followed by the canonical V2.3.0 karaoke augmentation stage. The V2.3.8 intermediate is durable and non-publishable until final composition succeeds.",
+        adapter_module="production_v2_3_8_adapter", adapter_function="translate_subtitle_file_v2_3_8",
+        augmentation_module="production_v2_3_0_adapter", augmentation_function="augment_karaoke_candidate_v2_3_0", archive_translation=True,
+    ),
 }
 
 PLANS: Mapping[str, PipelinePlan] = MappingProxyType(_PLANS)
