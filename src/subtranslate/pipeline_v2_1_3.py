@@ -1463,6 +1463,8 @@ class Client:
                     body = json.loads(raw_body.decode("utf-8"))
                     observation["reused_durable_response"] = True
                     observation["physical_transport"] = False
+                    if state.get("state") == "DERIVED_NORMALIZATION_RECORDED":
+                        observation["derived_state_before_validation"] = "DERIVED_NORMALIZATION_RECORDED"
                 elif state.get("state") in {"CANCELLED_CONFIRMED", "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN", "RESERVATION_FAILED"}:
                     from v238_per_call_durability import DurableCallError
                     raise DurableCallError("V238_DURABLE_CALL_TERMINAL_RECONCILIATION_REQUIRED:" + str(state.get("state")))
@@ -1532,6 +1534,12 @@ class Client:
                     raise NormalizationRejected("V238_NORMALIZATION_REQUIRES_DURABLE_CONTEXT")
                 found_before, issues_before = validate_response(value, events)
                 if issues_before:
+                    # Preserve the raw response's invalid classification before
+                    # attempting the explicitly authorized projection.  A
+                    # fresh live response reaches RESPONSE_DURABLE directly;
+                    # the derived seam is only legal after this forward state.
+                    durable_call.mark_parsed(valid=False, error="; ".join(issues_before))
+                    observation["raw_durable_state"] = "PARSED_INVALID"
                     expected_item_keys = {
                         int(event_id): ("id", "segments") if is_multi_speaker(event) else ("id", "text")
                         for event_id, event in events.items()
@@ -1539,8 +1547,12 @@ class Client:
                     projected, audit = project_extra_property_response(
                         value, sorted(events), expected_item_keys=expected_item_keys,
                     )
+                    projected_found, projected_issues = validate_response(projected, events)
+                    if projected_issues:
+                        raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(projected_issues))
                     value = projected
-                    derived_state = durable_call.record_derived_normalization(value, audit)
+                    recorded_state = durable_call.record_derived_normalization(value, audit)
+                    derived_state = durable_call.mark_derived_parsed_valid()
                     observation.update({
                         "raw_schema_status": audit["raw_schema_status"],
                         "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
@@ -1554,9 +1566,13 @@ class Client:
                         "model_call_delta": 0,
                         "retry_delta": 0,
                         "derived_state": derived_state.get("state"),
+                        "derived_recorded_state": recorded_state.get("state"),
                     })
                     normalized = True
                 elif derived_body:
+                    # The recorded state is a durable intermediate.  It is
+                    # promoted only after the common canonical validator below
+                    # proves the derived response is complete and source-bound.
                     observation.update({
                         "raw_schema_status": "INVALID_EXTRA_PROPERTY",
                         "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
@@ -1590,7 +1606,13 @@ class Client:
             observation["json_valid"] = True
             observation["structural_issues"] = issues
             if durable_call is not None:
-                if durable_call.state() not in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"}:
+                if durable_call.state() == "DERIVED_NORMALIZATION_RECORDED":
+                    if issues:
+                        raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(issues))
+                    promoted = durable_call.mark_derived_parsed_valid()
+                    observation["derived_state"] = promoted.get("state")
+                    observation["normalization_status"] = "DERIVED_PARSED_VALID_REUSED"
+                elif durable_call.state() not in {"DERIVED_PARSED_VALID"}:
                     durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
                 observation["durable_state"] = durable_call.state()
             observation["elapsed_client_seconds"] = time.perf_counter() - started

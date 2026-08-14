@@ -802,11 +802,13 @@ class DurableV226Call:
             raise DurableCallError("V238_DERIVED_RESPONSE_CORRUPT") from exc
 
     def record_derived_normalization(self, normalized_value: Mapping[str, Any], audit: Mapping[str, Any]) -> dict[str, Any]:
-        """Persist and promote a deterministic projection after PARSED_INVALID.
+        """Persist a deterministic projection after PARSED_INVALID.
 
         The raw response and its PARSED_INVALID history remain untouched.  The
         derived response is private, atomically written and independently
-        hash-checked on every restart.
+        hash-checked on every restart.  This method deliberately stops at
+        DERIVED_NORMALIZATION_RECORDED; callers must validate the derived
+        response before invoking :meth:`mark_derived_parsed_valid`.
         """
         current = self._state()
         if current.get("state") == "DERIVED_PARSED_VALID":
@@ -814,7 +816,7 @@ class DurableV226Call:
             return current
         if current.get("state") == "DERIVED_NORMALIZATION_RECORDED":
             self.load_derived_response()
-            return self._transition("DERIVED_PARSED_VALID", derived_replayed_at=_now())
+            return current
         if current.get("state") != "PARSED_INVALID":
             raise DurableCallError("V238_DERIVED_NORMALIZATION_REQUIRES_PARSED_INVALID")
         policy = str(audit.get("policy") or "")
@@ -849,7 +851,27 @@ class DurableV226Call:
             derived_normalization_at=_now(),
         )
         self._fault("after_derived_recorded")
-        return self._transition("DERIVED_PARSED_VALID", derived_parsed_at=_now())
+        return recorded
+
+    def mark_derived_parsed_valid(self) -> dict[str, Any]:
+        """Promote a persisted projection only after canonical validation.
+
+        The response and manifest are reloaded before the forward-only state
+        transition.  Schema/cardinality/source-membership validation belongs
+        to the canonical client, so a recorded projection can never become
+        valid merely because its files exist.
+        """
+        current = self._state()
+        if current.get("state") == "DERIVED_PARSED_VALID":
+            self.load_derived_response()
+            return current
+        if current.get("state") != "DERIVED_NORMALIZATION_RECORDED":
+            raise DurableCallError("V238_DERIVED_VALID_PROMOTION_REQUIRES_RECORDED_STATE")
+        self.load_derived_response()
+        value = self._transition("DERIVED_PARSED_VALID", derived_parsed_at=_now())
+        self.budget_ledger.update_attempt(self.request_id, state=value["state"])
+        self._fault("after_derived_valid")
+        return value
 
 
 __all__ = ["DurableCallError", "DurableCallOutcomeUnknown", "DurableCallFault", "DurableV226Call", "EpisodeBudgetLedger", "STATE_TRANSITIONS", "STATES"]
