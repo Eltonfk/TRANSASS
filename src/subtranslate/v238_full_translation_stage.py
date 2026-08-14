@@ -39,6 +39,27 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _metric_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an auditable before/after delta without mutating provider state."""
+    delta: dict[str, Any] = {}
+    keys = set(before) | set(after)
+    for key in sorted(keys):
+        old, new = before.get(key), after.get(key)
+        if isinstance(old, Mapping) or isinstance(new, Mapping):
+            old_map = old if isinstance(old, Mapping) else {}
+            new_map = new if isinstance(new, Mapping) else {}
+            delta[key] = {
+                child: int(new_map.get(child, 0)) - int(old_map.get(child, 0))
+                for child in sorted(set(old_map) | set(new_map))
+                if isinstance(new_map.get(child, old_map.get(child, 0)), (int, float))
+            }
+        elif isinstance(old, (int, float)) or isinstance(new, (int, float)):
+            delta[key] = int(new or 0) - int(old or 0)
+        elif old != new:
+            delta[key] = {"before": old, "after": new}
+    return delta
+
+
 def _plain(value: str) -> str:
     return _TAG_RE.sub("", value or "").replace(r"\N", " ").replace(r"\h", " ").strip()
 
@@ -89,6 +110,7 @@ def _render_event(
     model: str | None,
     counters: dict[str, int],
     reviewed_envelope: str | None = None,
+    ownership_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Run the final deterministic layers for one generic ASS event."""
     counters["source_payload"] += 1
@@ -96,6 +118,13 @@ def _render_event(
     if base is None:
         raise ResponseProviderError("V238_SOURCE_PAYLOAD_RECONSTRUCTION_FAILED")
     details: dict[str, Any] = {"event_id": event_id, "path": "SOURCE_PAYLOAD"}
+    group_probe = getattr(provider, "v238_group_key", None)
+    if callable(group_probe) and group_probe(event_id) is None:
+        # The canonical base materializer has already produced the V226
+        # linguistic payload for ordinary units. V238 only rewrites explicitly
+        # classified structural groups; never reconstruct ordinary lines from
+        # visible text a second time.
+        return target_text, {"event_id": event_id, "path": "BASE_V226_PAYLOAD_PRESERVED"}
     if reviewed_envelope is not None:
         # Explicit OFFLINE_REPLAY data is a reviewed envelope, never a global
         # runtime fallback.  The generic detectors still run before it is
@@ -113,10 +142,15 @@ def _render_event(
             preserve_temporal_transform_envelope(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
         counters["reviewed_envelope"] = counters.get("reviewed_envelope", 0) + 1
         return reviewed_envelope, {"event_id": event_id, "path": "EXPLICIT_OFFLINE_REPLAY_ENVELOPE"}
-    if "\\t(" in source_text:
+    temporal_probe = getattr(provider, "is_temporal_group", None)
+    if "\\t(" in source_text and (not callable(temporal_probe) or temporal_probe(event_id)):
+        if callable(group_probe) and group_probe(event_id) is None:
+            return base, {"event_id": event_id, "path": "DETERMINISTIC_TEMPORAL_PRESERVATION"}
         counters["temporal_transform"] += 1
         temporal, trace = preserve_temporal_transform_envelope(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
         if temporal is None:
+            if callable(group_probe):
+                return base, {"event_id": event_id, "path": "REVIEWED_TEMPORAL_BASE_PRESERVATION", "trace": trace}
             raise ResponseProviderError("V238_TEMPORAL_TRANSFORM_UNPROVEN")
         details.update({"path": "TEMPORAL_TRANSFORM", "trace": trace})
         return temporal, details
@@ -129,6 +163,26 @@ def _render_event(
             source_text, semantic_unit_id=f"event-{event_id}", envelope_event_id=event_id
         )
         counters["semantic_ownership_detector"] += 1
+        visual_group_probe = getattr(provider, "is_visual_group", None)
+        if callable(visual_group_probe) and visual_group_probe(event_id):
+            reviewed_visual = getattr(provider, "reviewed_visual_envelope", None)
+            if callable(reviewed_visual):
+                envelope = reviewed_visual(event_id)
+                if isinstance(envelope, str):
+                    return envelope, {"event_id": event_id, "path": "REVIEWED_VISUAL_ENVELOPE"}
+            counters["visual_detector"] += 1
+            visual_program, visual_details = extract_visual_glyph_program(
+                source_text, program_id=f"event-{event_id}", envelope_id=event_id
+            )
+            if visual_program is not None and visual_details.get("valid"):
+                counters["visual_reconstruction"] += 1
+                rendered, trace = reconstruct_visual_glyph_envelope(
+                    source_text, _plain(target_text), program=visual_program, base_rebuilder=rc4_replace_source_payload
+                )
+                if rendered is None:
+                    return base, {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
+                return rendered, {"event_id": event_id, "path": "VISUAL_GLYPH", "trace": trace}
+            return base, {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
         program, program_details = extract_semantic_style_ownership(
             source_text, program_id=f"event-{event_id}", envelope_id=event_id
         )
@@ -152,7 +206,22 @@ def _render_event(
                 "source_segments": [segment.source_text for segment in program.source_semantic_segments],
                 "model": model,
             }
-            response = provider.ownership(request, capture_id=f"v238-ownership-event-{event_id}")
+            group_key_fn = getattr(provider, "ownership_group_key", None)
+            resolved_group = group_key_fn(request) if callable(group_key_fn) else f"event-{event_id}"
+            # An injected canonical unit/group resolver may explicitly state
+            # that this styled event has no V238 semantic ambiguity. In that
+            # case the source-payload seam is the deterministic authority and
+            # no provider request is permitted.
+            if resolved_group is None:
+                details.update({"path": "DETERMINISTIC_STYLE_PRESERVATION"})
+                return base, details
+            group_key = str(resolved_group)
+            if ownership_cache is not None and group_key in ownership_cache:
+                response = ownership_cache[group_key]
+            else:
+                response = provider.ownership(request, capture_id=f"v238-ownership-{group_key}")
+                if ownership_cache is not None:
+                    ownership_cache[group_key] = response
             if isinstance(response.get("anchors"), list):
                 counters["anchor_solver"] += 1
                 solver = AnchorConstrainedPartitionSolver(len(program.source_semantic_segments), len(target_atoms(_plain(target_text))))
@@ -203,6 +272,7 @@ def execute_v238_stage(
     if output_path.exists():
         raise FileExistsError(output_path)
     provider = _provider(context)
+    metrics_before = copy.deepcopy(getattr(provider, "metrics", {}))
     model = context.get("model") or context.get("model_override")
     mode = provider.mode
     source_subs = pysubs2.load(str(source_path), format="ass")
@@ -219,21 +289,40 @@ def execute_v238_stage(
         "visual_detector": 0, "visual_reconstruction": 0, "temporal_transform": 0,
         "ownership_request": 0, "anchor_solver": 0,
     }
+    # A no-base invocation must not invent units from visible text/style. An
+    # explicit caller may provide canonical V226 unit identities; otherwise
+    # each event remains its own linguistic unit.
+    explicit_units = context.get("linguistic_unit_ids")
+    if explicit_units is not None and not isinstance(explicit_units, Mapping):
+        raise ResponseProviderError("V238_LINGUISTIC_UNIT_IDENTITIES_INVALID")
+    member_ids: dict[str, list[int]] = {}
+    for event_index in range(len(source_subs.events)):
+        unit_id = str(explicit_units.get(event_index, f"event-{event_index}") if isinstance(explicit_units, Mapping) else f"event-{event_index}")
+        member_ids.setdefault(unit_id, []).append(event_index)
+    translated_units: dict[str, dict[str, Any]] = {}
+    ownership_cache: dict[str, dict[str, Any]] = {}
     for index, (source_line, target_line) in enumerate(zip(source_subs.events, candidate.events)):
         source_text = source_line.text or ""
         if base_translation is None:
-            counters["provider_requests"] += 1
-            response = provider.respond({
-                "operation": "v238_linguistic_translation",
-                "event_id": index,
-                "text": _plain(source_text),
-                "model": model,
-            }, capture_id=f"v238-translation-event-{index}")
+            unit_id = str(explicit_units.get(index, f"event-{index}") if isinstance(explicit_units, Mapping) else f"event-{index}")
+            response = translated_units.get(unit_id)
+            if response is None:
+                counters["provider_requests"] += 1
+                response = provider.respond({
+                    "operation": "v238_linguistic_translation",
+                    "unit_id": unit_id,
+                    "member_event_ids": member_ids[unit_id],
+                    "reason_code": "LINGUISTIC_UNIT_TRANSLATION",
+                    "expected_response_schema": "translation|text|ass_text",
+                    "text": _plain(source_text),
+                    "model": model,
+                }, capture_id=f"v238-translation-unit-{unit_id}")
+                translated_units[unit_id] = response
             replay_ass_text = response.get("ass_text")
             target = response.get("translation", response.get("text", _plain(source_text)))
             if not isinstance(target, str):
                 raise ResponseProviderError("V238_TRANSLATION_MISSING")
-            rendered, _details = _render_event(source_text, target, event_id=index, provider=provider, model=model, counters=counters, reviewed_envelope=replay_ass_text)
+            rendered, _details = _render_event(source_text, target, event_id=index, provider=provider, model=model, counters=counters, reviewed_envelope=replay_ass_text, ownership_cache=ownership_cache)
             if replay_ass_text is not None:
                 if not isinstance(replay_ass_text, str) or _plain(replay_ass_text) != _plain(target):
                     raise ResponseProviderError("V238_REPLAY_ASS_PAYLOAD_MISMATCH")
@@ -243,21 +332,22 @@ def execute_v238_stage(
                 rendered = replay_ass_text
             target_line.text = rendered
         else:
-            # A base V226 result supplies linguistic materialization.  The
-            # provider is still consulted through an explicit structural
-            # request so durable capture/replay remains on the executed path.
-            counters["provider_requests"] += 1
-            provider.respond({
-                "operation": "v238_structural_analysis",
-                "event_id": index,
-                "text": _plain(target_line.text or ""),
-                "source_text": _plain(source_text),
-                "model": model,
-            }, capture_id=f"v238-structure-event-{index}")
-            target_line.text, _details = _render_event(source_text, target_line.text or "", event_id=index, provider=provider, model=model, counters=counters)
+            # Base V226 already supplies linguistic materialization. V238
+            # transforms are deterministic; no artificial provider call.
+            target_line.text, _details = _render_event(source_text, target_line.text or "", event_id=index, provider=provider, model=model, counters=counters, ownership_cache=ownership_cache)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     candidate.save(str(output_path), encoding="utf-8")
     validation = validate_v238_candidate(source_path, output_path)
+    provider_metrics = copy.deepcopy(getattr(provider, "metrics", {}))
+    metrics_delta = _metric_delta(metrics_before, provider_metrics)
+    base_summary = context.get("base_materializer_summary")
+    base_metrics = {}
+    if isinstance(base_summary, Mapping) and isinstance(base_summary.get("metrics"), Mapping):
+        base_metrics = copy.deepcopy(dict(base_summary["metrics"]))
+    aggregate_metrics = dict(metrics_delta)
+    for key, value in base_metrics.items():
+        if isinstance(value, (int, float)):
+            aggregate_metrics[key] = int(aggregate_metrics.get(key, 0)) + int(value)
     return {
         **validation,
         "response_mode": mode,
@@ -265,8 +355,13 @@ def execute_v238_stage(
         "component_calls": counters,
         "publishable": False,
         "durable_intermediate": True,
-        "model_calls": 0,
-        "network_calls": 0,
+        "metrics": provider_metrics,
+        "metrics_before": metrics_before,
+        "metrics_after": provider_metrics,
+        "metrics_delta": metrics_delta,
+        "aggregated_metrics": aggregate_metrics,
+        "model_calls": aggregate_metrics.get("model_generation_calls", 0),
+        "network_calls": aggregate_metrics.get("application_network_calls", 0),
     }
 
 

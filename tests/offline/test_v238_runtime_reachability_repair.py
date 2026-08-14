@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from pipeline_orchestrator import execute_pipeline_plan
+from v238_full_translation_stage import execute_v238_stage
 from v238_response_provider import DurableResponseProvider, ResponseProviderError
 
 
@@ -21,6 +23,23 @@ Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\b1}styled{\\b0} text
 
 
 class V238RuntimeReachabilityRepairTests(unittest.TestCase):
+    class FixtureMaterializer:
+        mode = "TEST_FIXTURE"
+
+        def materialize(self, source, output, *, context):
+            Path(output).write_bytes(Path(source).read_bytes())
+            return {"mode": self.mode, "lineage": "TEST_FIXTURE"}
+
+    class AmbiguousMaterializer(FixtureMaterializer):
+        def materialize(self, source, output, *, context):
+            import pysubs2
+            subs = pysubs2.load(str(source), format="ass")
+            for event in subs.events:
+                if "styled" in event.text:
+                    event.text = "translated text"
+            subs.save(str(output), encoding="utf-8")
+            return {"mode": self.mode, "lineage": "TEST_FIXTURE_AMBIGUOUS"}
+
     def _source(self, root: Path) -> Path:
         source = root / "source.ass"
         source.write_text(ASS, encoding="utf-8")
@@ -33,12 +52,12 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             provider = DurableResponseProvider("TEST_FAKE")
             result = execute_pipeline_plan(
                 "v2_3_8", source, output,
-                {"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "test-configured-model"},
+                {"response_provider": provider, "base_materializer": self.FixtureMaterializer(), "execution_mode": "TEST_FAKE", "model": "test-configured-model"},
             )
             self.assertEqual([row["id"] for row in result["stages"]], ["FULL_TRANSLATION_V238", "KARAOKE_AUGMENTATION_V230"])
             stage = result["stages"][0]["result"]
             self.assertEqual(stage["stage_id"], "FULL_TRANSLATION_V238")
-            self.assertGreater(stage["component_calls"]["provider_requests"], 0)
+            self.assertEqual(stage["component_calls"]["provider_requests"], 0)
             self.assertGreater(stage["component_calls"]["source_payload"], 0)
             self.assertEqual(result["stages"][1]["result"]["song_units"], 0)
             self.assertTrue(output.is_file())
@@ -59,7 +78,7 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             with self.assertRaises(ResponseProviderError):
                 execute_pipeline_plan(
                     "v2_3_8", source, output,
-                    {"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "test-configured-model"},
+                    {"response_provider": provider, "base_materializer": self.AmbiguousMaterializer(), "execution_mode": "TEST_FAKE", "model": "test-configured-model"},
                 )
             self.assertFalse(output.exists())
 
@@ -75,6 +94,83 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             self.assertTrue((root / "call-1" / "request_payload.json").is_file())
             self.assertTrue((root / "call-1" / "raw-http-response.bin").is_file())
             self.assertTrue((root / "call-1" / "parsed_response.json").is_file())
+            self.assertEqual(provider.metrics["physical_client_calls"], 1)
+            self.assertEqual(provider.metrics["model_generation_calls"], 1)
+
+    def test_invalid_json_retains_raw_and_records_failure(self):
+        with tempfile.TemporaryDirectory(prefix="v238-invalid-json-") as raw:
+            root = Path(raw)
+            provider = DurableResponseProvider("LIVE_CAPTURED", capture_root=root, client=lambda request: b"{not-json")
+            with self.assertRaises(ResponseProviderError):
+                provider.respond({"operation": "invalid", "text": "source"}, capture_id="bad-1")
+            call = root / "bad-1"
+            self.assertTrue((call / "request_payload.json").is_file())
+            self.assertTrue((call / "raw-http-response.bin").is_file())
+            self.assertTrue((call / "validation_failure.json").is_file())
+            self.assertFalse((call / "parsed_response.json").exists())
+            self.assertEqual(json.loads((call / "capture_state.json").read_text())["state"], "VALIDATED_FAIL")
+            self.assertEqual(provider.metrics["physical_client_calls"], 1)
+            self.assertEqual(provider.metrics["parse_failures"], 1)
+
+    def test_invalid_utf8_wrong_root_and_missing_field_fail_closed(self):
+        cases = ((b"\xff\xfe", "utf8"), (b"[]", "root"), (b"{}", "schema"))
+        for raw_body, label in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix=f"v238-invalid-{label}-") as raw:
+                root = Path(raw)
+                provider = DurableResponseProvider("LIVE_CAPTURED", capture_root=root, client=lambda request, body=raw_body: body)
+                with self.assertRaises(ResponseProviderError):
+                    provider.respond({"operation": f"invalid_{label}", "text": "source"}, capture_id=f"bad-{label}")
+                call = root / f"bad-{label}"
+                self.assertTrue((call / "request_payload.json").is_file())
+                self.assertTrue((call / "raw-http-response.bin").is_file())
+                self.assertFalse((call / "parsed_response.json").exists())
+                self.assertTrue((call / "validation_failure.json").is_file())
+
+    def test_client_exception_after_request_is_counted_and_not_retried(self):
+        with tempfile.TemporaryDirectory(prefix="v238-client-failure-") as raw:
+            root = Path(raw)
+
+            def fail(_request):
+                raise OSError("injected transport failure")
+
+            provider = DurableResponseProvider("LIVE_CAPTURED", capture_root=root, client=fail)
+            with self.assertRaises(OSError):
+                provider.respond({"operation": "exception", "text": "source"}, capture_id="bad-exception")
+            call = root / "bad-exception"
+            self.assertTrue((call / "request_payload.json").is_file())
+            self.assertFalse((call / "raw-http-response.bin").exists())
+            self.assertEqual(provider.metrics["physical_client_calls"], 1)
+            self.assertEqual(provider.metrics["application_network_calls"], 1)
+            self.assertEqual(provider.metrics["model_generation_calls"], 1)
+
+    def test_transport_semantics_are_explicit(self):
+        with self.assertRaises(ValueError):
+            DurableResponseProvider("LIVE_CAPTURED", capture_root=Path("/tmp"), transport_semantics="UNKNOWN")
+
+    def test_repeated_linguistic_unit_fans_out_without_raw_event_amplification(self):
+        ass = ASS.replace("hello world", "same unit").replace(r"{\b1}styled{\b0} text", "same unit")
+        with tempfile.TemporaryDirectory(prefix="v238-unit-") as raw:
+            root = Path(raw)
+            source = root / "source.ass"
+            source.write_text(ass, encoding="utf-8")
+            provider = DurableResponseProvider("TEST_FAKE", fake={"default": {"translation": "same unit"}})
+            result = execute_v238_stage(
+                source, root / "final.ass",
+                context={"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "configured", "linguistic_unit_ids": {0: "unit-a", 1: "unit-a"}},
+            )
+            self.assertEqual(result["component_calls"]["provider_requests"], 1)
+            self.assertEqual(provider.metrics["test_fake_responses"], 1)
+
+    def test_equal_text_different_explicit_units_are_not_fused(self):
+        with tempfile.TemporaryDirectory(prefix="v238-unit-boundary-") as raw:
+            root = Path(raw)
+            source = self._source(root)
+            provider = DurableResponseProvider("TEST_FAKE", fake={"default": {"translation": "same unit"}})
+            result = execute_v238_stage(
+                source, root / "final.ass",
+                context={"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "configured", "linguistic_unit_ids": {0: "unit-a", 1: "unit-b"}},
+            )
+            self.assertEqual(result["component_calls"]["provider_requests"], 2)
 
 
 if __name__ == "__main__":

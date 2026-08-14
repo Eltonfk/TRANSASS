@@ -34,7 +34,10 @@ def _safe_id(value: str) -> str:
 
 def _parse_response(value: Any) -> dict[str, Any]:
     if isinstance(value, bytes):
-        value = value.decode("utf-8")
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ResponseSchemaError("V238_RESPONSE_NOT_UTF8") from exc
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -56,6 +59,7 @@ class DurableResponseProvider:
     """Provider with explicit LIVE_CAPTURED/OFFLINE_REPLAY/TEST_FAKE modes."""
 
     MODES = {"LIVE_CAPTURED", "OFFLINE_REPLAY", "TEST_FAKE"}
+    TRANSPORTS = {"OLLAMA_MODEL", "NETWORK_NON_MODEL", "LOCAL_TEST", "OFFLINE_REPLAY", "TEST_FAKE"}
 
     def __init__(
         self,
@@ -65,6 +69,7 @@ class DurableResponseProvider:
         client: Callable[[dict[str, Any]], Any] | None = None,
         fake: Callable[[dict[str, Any]], Any] | Mapping[str, Any] | None = None,
         expected_capture_ids: Mapping[str, str] | None = None,
+        transport_semantics: str | None = None,
     ) -> None:
         self.mode = str(mode or "").upper()
         if self.mode not in self.MODES:
@@ -73,7 +78,22 @@ class DurableResponseProvider:
         self.client = client
         self.fake = fake
         self.expected_capture_ids = dict(expected_capture_ids or {})
+        default_transport = {
+            "LIVE_CAPTURED": "OLLAMA_MODEL",
+            "OFFLINE_REPLAY": "OFFLINE_REPLAY",
+            "TEST_FAKE": "TEST_FAKE",
+        }[self.mode]
+        self.transport_semantics = str(transport_semantics or default_transport).upper()
+        if self.transport_semantics not in self.TRANSPORTS:
+            raise ValueError(f"unsupported V2.3.8 transport semantics: {self.transport_semantics or '<empty>'}")
         self.calls: list[dict[str, Any]] = []
+        self.metrics: dict[str, Any] = {
+            "physical_client_calls": 0, "model_generation_calls": 0,
+            "application_network_calls": 0, "offline_replay_reads": 0,
+            "test_fake_responses": 0, "durable_capture_writes": 0,
+            "parse_failures": 0, "schema_failures": 0,
+            "provider_requests": 0, "requests_by_operation": {},
+        }
         if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
             raise ValueError(f"{self.mode} requires an explicit capture_root")
 
@@ -114,14 +134,32 @@ class DurableResponseProvider:
         response_path = next((path for path in candidates if path.is_file()), None)
         if response_path is None:
             raise ResponseProviderError("V238_OFFLINE_RESPONSE_MISSING")
-        return _parse_response(response_path.read_bytes())
+        self.metrics["offline_replay_reads"] += 1
+        try:
+            return _parse_response(response_path.read_bytes())
+        except ResponseSchemaError:
+            self.metrics["parse_failures"] += 1
+            self.metrics["schema_failures"] += 1
+            raise
 
     def respond(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> dict[str, Any]:
         payload = dict(request)
         call_id, call_dir = self._capture_dir(payload, capture_id)
         payload.setdefault("capture_id", call_id)
+        self.metrics["provider_requests"] += 1
+        operation = str(payload.get("operation", "unknown"))
+        by_operation = self.metrics["requests_by_operation"]
+        by_operation[operation] = int(by_operation.get(operation, 0)) + 1
+        self.calls.append({
+            "capture_id": call_id,
+            "mode": self.mode,
+            "transport_semantics": self.transport_semantics,
+            "request_sha256": hashlib.sha256(_canonical(payload)).hexdigest(),
+            "operation": operation,
+        })
         if self.mode == "TEST_FAKE":
             response = self._fake_response(payload, call_id)
+            self.metrics["test_fake_responses"] += 1
         elif self.mode == "OFFLINE_REPLAY":
             response = self._offline_response(payload, call_id, call_dir)
         else:
@@ -130,15 +168,25 @@ class DurableResponseProvider:
             call_dir.parent.mkdir(parents=True, exist_ok=True)
             capture = DurableResponseCaptureV1(call_dir, call_id=call_id)
             capture.prepare(payload, {"mode": self.mode, "capture_id": call_id})
+            self.metrics["durable_capture_writes"] += 1
+            self.metrics["physical_client_calls"] += 1
+            if self.transport_semantics in {"OLLAMA_MODEL", "NETWORK_NON_MODEL"}:
+                self.metrics["application_network_calls"] += 1
+            if self.transport_semantics == "OLLAMA_MODEL":
+                self.metrics["model_generation_calls"] += 1
             raw = self.client(payload)
-            parsed = _parse_response(raw)
-            # Injected clients are the only permitted network boundary.  The
-            # raw bytes and parsed value are both made durable before return.
             raw_bytes = raw if isinstance(raw, bytes) else _canonical(raw)
             capture.receive_injected(raw_bytes, metadata={"mode": self.mode})
-            _atomic_json(call_dir / "parsed_response.json", parsed)
-            response = parsed
-        self.calls.append({"capture_id": call_id, "mode": self.mode, "request_sha256": hashlib.sha256(_canonical(payload)).hexdigest()})
+            self.metrics["durable_capture_writes"] += 1
+            try:
+                response = _parse_response((call_dir / "raw-http-response.bin").read_bytes())
+            except ResponseSchemaError as exc:
+                self.metrics["parse_failures"] += 1
+                self.metrics["schema_failures"] += 1
+                capture.mark_validation_failure(exc)
+                raise
+            _atomic_json(call_dir / "parsed_response.json", response)
+            self.metrics["durable_capture_writes"] += 1
         return response
 
     def translate(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> str:

@@ -202,6 +202,21 @@ class DurableResponseCaptureV1:
             _atomic_json(self.call_dir / "validation_failure.json", {"error": f"{type(exc).__name__}:{exc}"[:1000], "failed_at": _now()})
             return self._transition("VALIDATED_FAIL", validation_result="FAIL", validation_error=f"{type(exc).__name__}:{exc}"[:1000])
 
+    def mark_validation_failure(self, error: BaseException) -> dict[str, Any]:
+        """Record a parse/schema failure without discarding durable evidence."""
+        current = self._state()
+        if current["state"] not in {"RESPONSE_DURABLE", "VALIDATION_PENDING"}:
+            raise RuntimeError("DURABLE_CAPTURE_FAILURE_NOT_PERMITTED_FROM_CURRENT_STATE")
+        _atomic_json(
+            self.call_dir / "validation_failure.json",
+            {"error": f"{type(error).__name__}:{error}"[:1000], "failed_at": _now()},
+        )
+        return self._transition(
+            "VALIDATED_FAIL",
+            validation_result="FAIL",
+            validation_error=f"{type(error).__name__}:{error}"[:1000],
+        )
+
     def reconcile(self) -> dict[str, Any]:
         state = self._state()
         raw = self.call_dir / "raw-http-response.bin"

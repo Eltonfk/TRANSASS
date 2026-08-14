@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from production_v2_2_6_adapter import translate_subtitle_file_v2_2_6
+from v238_base_materializer import BaseTranslationMaterializerError, require_materializer
 from v238_full_translation_stage import PIPELINE_ID, STAGE_ID, execute_v238_stage
 
 
@@ -24,20 +25,24 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     if provider is None:
         raise RuntimeError("V238_EXECUTION_CONTEXT_REQUIRED")
 
-    # Offline/test providers supply the linguistic seam themselves and avoid
-    # importing the legacy model runner.  Live mode keeps the established
-    # V2.2.6 linguistic authority, then feeds its durable bytes through the
-    # actual V2.3.8 stage before the canonical V2.3.0 augmentation.
-    mode = getattr(provider, "mode", "")
-    if mode in {"TEST_FAKE", "OFFLINE_REPLAY"}:
-        result = execute_v238_stage(source, output, context=execution_context)
-    else:
-        with tempfile.TemporaryDirectory(prefix=".v238-v226-") as raw:
-            base = Path(raw) / output.name
+    # Every mode now selects an explicit base materializer.  The live wrapper
+    # is the canonical V226 implementation; offline/replay/test materializers
+    # are injected and remain outside the runtime package.
+    with tempfile.TemporaryDirectory(prefix=".v238-v226-") as raw:
+        base = Path(raw) / output.name
+        materializer = execution_context.get("base_materializer")
+        if materializer is None and getattr(provider, "mode", "") == "LIVE_CAPTURED":
             base_kwargs = dict(kwargs)
             base_kwargs.pop("execution_context", None)
             translate_subtitle_file_v2_2_6(source, base, **base_kwargs)
-            result = execute_v238_stage(source, output, context=execution_context, base_translation=base)
+            base_summary = {"mode": "CANONICAL_V226_LIVE", "calls": "delegated_to_v226"}
+        else:
+            selected = require_materializer(execution_context)
+            base_summary = dict(selected.materialize(source, base, context=execution_context) or {})
+        if not base.is_file():
+            raise BaseTranslationMaterializerError("V238_BASE_MATERIALIZER_DID_NOT_CREATE_OUTPUT")
+        result = execute_v238_stage(source, output, context={**execution_context, "base_materializer_summary": base_summary}, base_translation=base)
+        result["base_materializer"] = base_summary
     result.update({
         "pipeline": PIPELINE_ID,
         "stage_id": STAGE_ID,
