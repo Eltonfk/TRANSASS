@@ -1453,11 +1453,13 @@ class Client:
             observation["unit_membership_sha256"] = membership
         try:
             body = None
+            derived_body = False
             if durable_call is not None:
                 state = durable_call.prepare_request()
                 observation["durable_state_before_transport"] = state.get("state")
-                if state.get("state") in {"PARSED_VALID", "PARSED_INVALID", "RESPONSE_DURABLE"}:
-                    raw_body = durable_call.load_raw()
+                if state.get("state") in {"PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "RESPONSE_DURABLE"}:
+                    derived_body = state.get("state") in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"}
+                    raw_body = durable_call.load_derived_response() if state.get("state") in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"} else durable_call.load_raw()
                     body = json.loads(raw_body.decode("utf-8"))
                     observation["reused_durable_response"] = True
                     observation["physical_transport"] = False
@@ -1504,7 +1506,7 @@ class Client:
                 observation["http_status"] = response.status_code
                 response.raise_for_status()
                 body = response.json()
-            content = (body.get("message") or {}).get("content")
+            content = json.dumps(body, ensure_ascii=False) if derived_body else (body.get("message") or {}).get("content")
             observation["content_chars"] = len(content) if isinstance(content, str) else None
             observation["content_sha256"] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
             if self.config.diagnostic_capture and isinstance(content, str):
@@ -1521,13 +1523,76 @@ class Client:
                 if key in body: observation[key + "_seconds"] = body[key] / 1_000_000_000
             if durable_call is not None:
                 durable_call._fault("before_parse")
-            value = strict_json(content) if self.config.strict_json else json.loads(content)
+            value = body if derived_body else (strict_json(content) if self.config.strict_json else json.loads(content))
+            normalization_policy = str((durable_context or {}).get("response_normalization_policy") or "") if durable_context else ""
+            normalized = False
+            if normalization_policy == "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
+                from v238_response_normalization import NormalizationRejected, POLICY, project_extra_property_response
+                if durable_call is None:
+                    raise NormalizationRejected("V238_NORMALIZATION_REQUIRES_DURABLE_CONTEXT")
+                found_before, issues_before = validate_response(value, events)
+                if issues_before:
+                    expected_item_keys = {
+                        int(event_id): ("id", "segments") if is_multi_speaker(event) else ("id", "text")
+                        for event_id, event in events.items()
+                    }
+                    projected, audit = project_extra_property_response(
+                        value, sorted(events), expected_item_keys=expected_item_keys,
+                    )
+                    value = projected
+                    derived_state = durable_call.record_derived_normalization(value, audit)
+                    observation.update({
+                        "raw_schema_status": audit["raw_schema_status"],
+                        "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
+                        "normalization_attempted": True,
+                        "normalization_policy": POLICY,
+                        "normalization_status": "DERIVED_PARSED_VALID",
+                        "offending_item_count": audit["offending_item_count"],
+                        "dropped_property_count": audit["extra_property_count"],
+                        "derived_schema_status": audit["derived_schema_status"],
+                        "derived_response_sha": audit["normalized_response_sha256"],
+                        "model_call_delta": 0,
+                        "retry_delta": 0,
+                        "derived_state": derived_state.get("state"),
+                    })
+                    normalized = True
+                elif derived_body:
+                    observation.update({
+                        "raw_schema_status": "INVALID_EXTRA_PROPERTY",
+                        "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
+                        "normalization_attempted": False,
+                        "normalization_policy": normalization_policy,
+                        "normalization_status": "DERIVED_PARSED_VALID_REUSED",
+                        "offending_item_count": 1,
+                        "dropped_property_count": "RECORDED_IN_DERIVED_MANIFEST",
+                        "derived_schema_status": "VALID_AFTER_DETERMINISTIC_PROJECTION",
+                        "derived_response_sha": hashlib.sha256((json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest() if isinstance(value, dict) else None,
+                        "model_call_delta": 0,
+                        "retry_delta": 0,
+                    })
+                else:
+                    observation.update({
+                        "raw_schema_status": "VALID",
+                        "raw_noncompliance_class": "NONE",
+                        "normalization_attempted": False,
+                        "normalization_policy": normalization_policy,
+                        "normalization_status": "NOT_NEEDED",
+                        "offending_item_count": 0,
+                        "dropped_property_count": 0,
+                        "derived_schema_status": "NOT_CREATED",
+                        "derived_response_sha": None,
+                        "model_call_delta": 0,
+                        "retry_delta": 0,
+                    })
             found, issues = validate_response(value, events)
+            if normalized and issues:
+                raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(issues))
             observation["json_valid"] = True
             observation["structural_issues"] = issues
             if durable_call is not None:
-                durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
-                observation["durable_state"] = "PARSED_VALID" if not issues else "PARSED_INVALID"
+                if durable_call.state() not in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"}:
+                    durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
+                observation["durable_state"] = durable_call.state()
             observation["elapsed_client_seconds"] = time.perf_counter() - started
             observation["duration_seconds"] = observation["elapsed_client_seconds"]
             self.calls.append(observation)

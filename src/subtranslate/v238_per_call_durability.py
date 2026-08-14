@@ -30,7 +30,9 @@ STATE_TRANSITIONS = {
     }),
     "RESPONSE_DURABLE": frozenset({"PARSED_VALID", "PARSED_INVALID"}),
     "PARSED_VALID": frozenset(),
-    "PARSED_INVALID": frozenset(),
+    "PARSED_INVALID": frozenset({"DERIVED_NORMALIZATION_RECORDED"}),
+    "DERIVED_NORMALIZATION_RECORDED": frozenset({"DERIVED_PARSED_VALID"}),
+    "DERIVED_PARSED_VALID": frozenset(),
     "CANCELLED_CONFIRMED": frozenset(),
     "TRANSPORT_FAILED_CONFIRMED": frozenset(),
     "TRANSPORT_OUTCOME_UNKNOWN": frozenset(),
@@ -39,7 +41,7 @@ STATE_TRANSITIONS = {
 }
 STATES = frozenset(STATE_TRANSITIONS)
 TERMINAL_STATES = frozenset({
-    "PARSED_VALID", "PARSED_INVALID", "CANCELLED_CONFIRMED",
+    "PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "CANCELLED_CONFIRMED",
     "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN",
     "CORRUPT_CAPTURE", "RESERVATION_FAILED",
 })
@@ -776,6 +778,78 @@ class DurableV226Call:
             handle.close()
         self._fault("after_parse")
         return value
+
+    def load_derived_response(self) -> bytes:
+        """Load and verify the private normalized response, never the raw one."""
+        response_path = self.call_dir / "derived_response.json"
+        manifest_path = self.call_dir / "derived_normalization.json"
+        if not response_path.is_file() or not manifest_path.is_file():
+            raise DurableCallError("V238_DERIVED_RESPONSE_MISSING")
+        try:
+            raw = response_path.read_bytes()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("normalized_response_sha256") != sha256_bytes(raw):
+                raise DurableCallError("V238_DERIVED_RESPONSE_HASH_MISMATCH")
+            if manifest.get("source_response_sha256") != self._state().get("response_sha256"):
+                raise DurableCallError("V238_DERIVED_SOURCE_RESPONSE_MISMATCH")
+            if manifest.get("policy") != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
+                raise DurableCallError("V238_DERIVED_POLICY_MISMATCH")
+            json.loads(raw.decode("utf-8"))
+            return raw
+        except DurableCallError:
+            raise
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DurableCallError("V238_DERIVED_RESPONSE_CORRUPT") from exc
+
+    def record_derived_normalization(self, normalized_value: Mapping[str, Any], audit: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist and promote a deterministic projection after PARSED_INVALID.
+
+        The raw response and its PARSED_INVALID history remain untouched.  The
+        derived response is private, atomically written and independently
+        hash-checked on every restart.
+        """
+        current = self._state()
+        if current.get("state") == "DERIVED_PARSED_VALID":
+            self.load_derived_response()
+            return current
+        if current.get("state") == "DERIVED_NORMALIZATION_RECORDED":
+            self.load_derived_response()
+            return self._transition("DERIVED_PARSED_VALID", derived_replayed_at=_now())
+        if current.get("state") != "PARSED_INVALID":
+            raise DurableCallError("V238_DERIVED_NORMALIZATION_REQUIRES_PARSED_INVALID")
+        policy = str(audit.get("policy") or "")
+        if policy != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
+            raise DurableCallError("V238_DERIVED_POLICY_INVALID")
+        derived_bytes = canonical_bytes(normalized_value)
+        source_sha = str(current.get("response_sha256") or "")
+        if not source_sha:
+            raise DurableCallError("V238_DERIVED_SOURCE_RESPONSE_SHA_MISSING")
+        derived_sha = sha256_bytes(derived_bytes)
+        manifest = {
+            **dict(audit),
+            "source_response_sha256": source_sha,
+            "normalized_response_sha256": derived_sha,
+            "created_at": _now(),
+            "candidate_commit": self.context.get("candidate_commit"),
+            "logical_call_id": self.logical_call_id,
+            "physical_attempt_id": self.physical_attempt_id,
+            "family_id": self.family_contract.get("episode_family_id"),
+            "identity": self.identity,
+        }
+        self._fault("before_derived_manifest")
+        _atomic_bytes(self.call_dir / "derived_response.json", derived_bytes)
+        self._fault("after_derived_response")
+        _atomic_json(self.call_dir / "derived_normalization.json", manifest)
+        self._fault("after_derived_manifest")
+        recorded = self._transition(
+            "DERIVED_NORMALIZATION_RECORDED",
+            derived_response_sha256=derived_sha,
+            derived_manifest_sha256=sha256_bytes(canonical_bytes(manifest)),
+            normalization_policy=policy,
+            derived_normalization_at=_now(),
+        )
+        self._fault("after_derived_recorded")
+        return self._transition("DERIVED_PARSED_VALID", derived_parsed_at=_now())
 
 
 __all__ = ["DurableCallError", "DurableCallOutcomeUnknown", "DurableCallFault", "DurableV226Call", "EpisodeBudgetLedger", "STATE_TRANSITIONS", "STATES"]
