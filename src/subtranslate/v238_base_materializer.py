@@ -138,10 +138,24 @@ class CanonicalV226LiveMaterializer:
                     "checkpoint_reused": 1, "checkpoint_created": 0, "base_sha256": manifest["base_sha256"],
                     "event_count": manifest.get("cardinality", 0), "parse_status": "PASS", "validation_status": "PASS",
                     "lineage": manifest.get("lineage_reference"), "metrics": manifest.get("metrics", _normal_metrics({}))}
+        claim_path = checkpoint / "CLAIM"
+        if any(path.exists() for path in (claim_path, base_path, manifest_path)):
+            raise BaseTranslationMaterializerError("V238_CHECKPOINT_PARTIAL_OR_CONCURRENT_CLAIM")
+        try:
+            claim_fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(claim_fd, (identity["identity_sha256"] + "\n").encode("ascii"))
+            os.fsync(claim_fd)
+            os.close(claim_fd)
+        except FileExistsError as exc:
+            raise BaseTranslationMaterializerError("V238_CHECKPOINT_CONCURRENT_CLAIM") from exc
         base_kwargs = {key: context.get(key) for key in ("glossary", "memory_root", "anime_series_id", "episode_id", "job_id") if context.get(key) is not None}
         fd, raw = tempfile.mkstemp(prefix=".v238-base-", suffix=".ass", dir=str(checkpoint))
         os.close(fd)
         temporary = Path(raw)
+        saved_budget = os.environ.get("V213_HARD_STOP_CALLS")
+        configured_budget = context.get("hard_call_budget")
+        if configured_budget is not None:
+            os.environ["V213_HARD_STOP_CALLS"] = str(int(configured_budget))
         try:
             summary = translate_subtitle_file_v2_2_6(source_path, temporary, **base_kwargs)
             if not temporary.is_file():
@@ -160,6 +174,7 @@ class CanonicalV226LiveMaterializer:
                         "metrics": _normal_metrics(summary), "lineage_reference": {"source_sha256": identity["source_sha256"], "pipeline": identity["pipeline_id"], "stage": identity["stage_id"]}}
             manifest_path.write_bytes(_canonical_bytes(manifest)); _fsync_file(manifest_path)
             complete_path.write_text("COMPLETE\n", encoding="utf-8"); _fsync_file(complete_path); _fsync_dir(checkpoint)
+            claim_path.unlink(missing_ok=True); _fsync_dir(checkpoint)
             _atomic_copy(base_path, output_path)
             return {"mode": self.mode, "checkpoint": str(checkpoint), "checkpoint_identity": identity,
                     "checkpoint_reused": 0, "checkpoint_created": 1, "base_sha256": base_sha,
@@ -170,6 +185,11 @@ class CanonicalV226LiveMaterializer:
         except Exception as exc:
             raise BaseTranslationMaterializerError("V238_V226_CHECKPOINT_CREATION_FAILED") from exc
         finally:
+            if configured_budget is not None:
+                if saved_budget is None:
+                    os.environ.pop("V213_HARD_STOP_CALLS", None)
+                else:
+                    os.environ["V213_HARD_STOP_CALLS"] = saved_budget
             temporary.unlink(missing_ok=True)
 
 

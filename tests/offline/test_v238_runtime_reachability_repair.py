@@ -12,7 +12,7 @@ from pipeline_orchestrator import execute_pipeline_plan
 from v238_full_translation_stage import execute_v238_stage
 from v238_response_provider import DurableResponseProvider, ResponseProviderError
 from v238_base_materializer import CanonicalV226LiveMaterializer, BaseTranslationMaterializerError
-from v238_llama_policy import LlamaPolicyError, run_single_fallback_phase, review_suspect_qwen_outputs
+from v238_llama_policy import LlamaPolicyError, enforce_v238_runtime_context, run_single_fallback_phase, review_suspect_qwen_outputs
 
 
 ASS = """[Script Info]
@@ -234,6 +234,16 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             bad = dict(context, episode_id="OTHER")
             with self.assertRaises(BaseTranslationMaterializerError):
                 materializer.materialize(source, root / "bad.ass", context=bad)
+            partial = root / "state" / "v238-base-checkpoints" / "op-partial"
+            partial.mkdir(parents=True)
+            (partial / "base.ass").write_bytes(b"partial")
+            with self.assertRaises(BaseTranslationMaterializerError):
+                materializer.materialize(source, root / "partial.ass", context=dict(context, operation_id="op-partial"))
+            concurrent = root / "state" / "v238-base-checkpoints" / "op-concurrent"
+            concurrent.mkdir(parents=True)
+            (concurrent / "CLAIM").write_text("claimed\n")
+            with self.assertRaises(BaseTranslationMaterializerError):
+                materializer.materialize(source, root / "concurrent.ass", context=dict(context, operation_id="op-concurrent"))
 
     def test_selective_llama_policy_is_single_phase_and_nonpublishable(self):
         calls = []
@@ -242,13 +252,44 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             {"canonical_unit_id": "u1", "status": "SUSPECT", "reason_code": "DETERMINISTIC_SUSPECT_FLAG", "episode_id": "e", "source_object": "s"},
             {"canonical_unit_id": "u1", "status": "BLOCKED", "reason_code": "PRIMARY_SCHEMA_REJECTED", "episode_id": "e", "source_object": "s"},
         ]
-        phase = run_single_fallback_phase(ledger, lambda request: calls.append(request) or {"text": "candidate"}, model_tag="llama", model_digest="digest", batch_size=1)
+        phase = run_single_fallback_phase(ledger, lambda request: calls.append(request) or {"candidates": [{"canonical_unit_id": unit["canonical_unit_id"], "text": "candidate"} for unit in request["units"]]}, model_tag="llama", model_digest="digest", capture_root=Path(tempfile.mkdtemp(prefix="llama-capture-")), unload=lambda: calls.append({"operation": "unload"}))
         self.assertEqual(phase["phase_count"], 1)
-        self.assertEqual(phase["calls"], 2)
+        self.assertEqual(phase["calls"], 1)
+        self.assertEqual(phase["batches"], 1)
+        self.assertTrue(phase["unload_requested"])
+        self.assertEqual(phase["unload_status"], "PASS")
         self.assertTrue(all(row["state"] == "FALLBACK_CANDIDATE_ONLY" and not row["publication_authorization"] for row in phase["results"]))
         with self.assertRaises(LlamaPolicyError):
             run_single_fallback_phase([{"canonical_unit_id": "bad", "status": "BLOCKED"}], lambda _: {}, model_tag="llama", model_digest="digest")
+        with self.assertRaises(LlamaPolicyError):
+            enforce_v238_runtime_context({"fallback_translator": object()})
+        self.assertEqual(enforce_v238_runtime_context({})["legacy_fallback_enabled"], False)
         self.assertEqual(review_suspect_qwen_outputs([{"canonical_unit_id": "u1", "status": "SUSPECT", "role": "PRIMARY"}], lambda _: {"verdict": "REVIEWER_NO_OBJECTION"})[0]["advisory"], True)
+
+    def test_llama_unload_is_finally_even_when_group_request_fails(self):
+        calls = []
+        def failing(_request):
+            raise RuntimeError("fake transport failure")
+        with self.assertRaises(RuntimeError):
+            run_single_fallback_phase(
+                [{"canonical_unit_id": "u1", "status": "BLOCKED", "reason_code": "PRIMARY_SCHEMA_REJECTED"}],
+                failing,
+                model_tag="llama",
+                model_digest="digest",
+                unload=lambda: calls.append("unload"),
+            )
+        self.assertEqual(calls, ["unload"])
+
+    def test_v238_rejects_legacy_fallback_injection(self):
+        with tempfile.TemporaryDirectory(prefix="v238-legacy-fallback-") as raw:
+            root = Path(raw)
+            source, output = self._source(root), root / "final.ass"
+            provider = DurableResponseProvider("TEST_FAKE")
+            with self.assertRaises(LlamaPolicyError):
+                execute_pipeline_plan(
+                    "v2_3_8", source, output,
+                    {"response_provider": provider, "base_materializer": self.FixtureMaterializer(), "execution_mode": "TEST_FAKE", "fallback_translator": object()},
+                )
 
 
 if __name__ == "__main__":

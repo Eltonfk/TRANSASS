@@ -14,6 +14,7 @@ from v238_base_materializer import (
     require_materializer,
 )
 from v238_full_translation_stage import PIPELINE_ID, STAGE_ID, execute_v238_stage
+from v238_llama_policy import enforce_v238_runtime_context
 
 
 APPROVED_PIPELINE = PIPELINE_ID
@@ -26,6 +27,7 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     provider = execution_context.get("response_provider")
     if provider is None:
         raise RuntimeError("V238_EXECUTION_CONTEXT_REQUIRED")
+    execution_context.update(enforce_v238_runtime_context(execution_context))
 
     # Every mode traverses the same materializer protocol.  Live execution
     # receives the canonical V226 implementation; replay and fixture modes
@@ -47,6 +49,8 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
         "stage_id": STAGE_ID,
         "publishable": False,
         "durable_intermediate": True,
+        "legacy_fallback_enabled": False,
+        "llama_policy": "OBJECTIVE_SINGLE_GROUP_PHASE",
     })
     return result
 
