@@ -115,50 +115,47 @@ class V225MemoryClient(V223MemoryClient):
         super().__init__(*args, **kwargs)
         self.persistent_source_copy_retry = False
 
-    def call(self, units, events, contexts, simplified=False, phase="main"):
+    def finalize_request_payload(self, payload, units, phase):
+        payload = super().finalize_request_payload(payload, units, phase)
         if not self.persistent_source_copy_retry:
-            return super().call(units, events, contexts, simplified=simplified, phase=phase)
-
-        original_post = frozen_pipeline.requests.post
-
-        def patched_post(url, **kwargs):
-            payload = dict(kwargs.get("json") or {})
-            messages = list(payload.get("messages") or [])
-            if messages:
-                first = dict(messages[0])
-                analysis = []
-                for unit in units:
-                    for event in unit.events:
-                        view = normalize_short_fragment_for_detection(event.clean_text)
-                        analysis.append({
-                            "id": event.id,
-                            "lexical_core": " ".join(view.get("words", [])),
-                            "leading_stutter": bool(view.get("stuttered")),
-                            "interrupted": bool(view.get("interrupted")),
-                        })
-                content = str(first.get("content") or "")
+            return payload
+        payload = dict(payload)
+        messages = list(payload.get("messages") or [])
+        if messages:
+            first = dict(messages[0])
+            analysis = []
+            for unit in units:
+                for event in unit.events:
+                    view = normalize_short_fragment_for_detection(event.clean_text)
+                    analysis.append({
+                        "id": event.id,
+                        "lexical_core": " ".join(view.get("words", [])),
+                        "leading_stutter": bool(view.get("stuttered")),
+                        "interrupted": bool(view.get("interrupted")),
+                    })
+            content = str(first.get("content") or "")
                 # For this last escalation only, hide presentation noise from
                 # the model while retaining it as explicit metadata.  The
                 # canonical ASS source remains untouched and reconstruction
                 # still receives the original Event object.
-                target_match = re.search(r"TARGET: (\[.*?\])\nGLOSSARY:", content, flags=re.DOTALL)
-                if target_match:
-                    try:
-                        targets = json.loads(target_match.group(1))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        targets = None
-                    if isinstance(targets, list):
-                        by_id = {item["id"]: item for item in analysis}
-                        for target in targets:
-                            info = by_id.get(target.get("id"))
-                            if info:
-                                target["text"] = info["lexical_core"]
-                                target["speech_features"] = {
-                                    "leading_stutter": info["leading_stutter"],
-                                    "interrupted": info["interrupted"],
-                                }
-                        content = content[:target_match.start(1)] + json.dumps(targets, ensure_ascii=False) + content[target_match.end(1):]
-                auxiliary = (
+            target_match = re.search(r"TARGET: (\[.*?\])\nGLOSSARY:", content, flags=re.DOTALL)
+            if target_match:
+                try:
+                    targets = json.loads(target_match.group(1))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    targets = None
+                if isinstance(targets, list):
+                    by_id = {item["id"]: item for item in analysis}
+                    for target in targets:
+                        info = by_id.get(target.get("id"))
+                        if info:
+                            target["text"] = info["lexical_core"]
+                            target["speech_features"] = {
+                                "leading_stutter": info["leading_stutter"],
+                                "interrupted": info["interrupted"],
+                            }
+                    content = content[:target_match.start(1)] + json.dumps(targets, ensure_ascii=False) + content[target_match.end(1):]
+            auxiliary = (
                     "\n\nAUXILIARY SPEECH ANALYSIS (not a translation): "
                     + json.dumps(analysis, ensure_ascii=False)
                     + ". Translate the lexical_core's meaning; the leading stutter "
@@ -169,24 +166,21 @@ class V225MemoryClient(V223MemoryClient):
                     "as a word-by-word label. The result is invalid if any source "
                     "lexical word is repeated unchanged. Do not return the English lexical_core."
                 )
-                first["content"] = content + PERSISTENT_SOURCE_COPY_RETRY_INSTRUCTION + auxiliary
-                messages[0] = first
-                payload["messages"] = messages
-            kwargs["json"] = payload
-            return original_post(url, **kwargs)
+            first["content"] = content + PERSISTENT_SOURCE_COPY_RETRY_INSTRUCTION + auxiliary
+            messages[0] = first
+            payload["messages"] = messages
+        return payload
 
-        frozen_pipeline.requests.post = patched_post
-        try:
-            found, issues, observation = super().call(
-                units, events, contexts, simplified=simplified, phase=phase
-            )
+    def call(self, units, events, contexts, simplified=False, phase="main"):
+        found, issues, observation = super().call(
+            units, events, contexts, simplified=simplified, phase=phase
+        )
+        if self.persistent_source_copy_retry:
             observation["retry_specialization"] = PERSISTENT_SOURCE_COPY_RETRY
             observation["retry_instruction_chars"] = len(
                 INTERRUPTED_DIALOGUE_RETRY_INSTRUCTION + PERSISTENT_SOURCE_COPY_RETRY_INSTRUCTION
             )
-            return found, issues, observation
-        finally:
-            frozen_pipeline.requests.post = original_post
+        return found, issues, observation
 
 
 class V225MemoryRunner(V224MemoryRunner):
@@ -281,6 +275,8 @@ class V225MemoryRunner(V224MemoryRunner):
                 simplified=False,
                 phase="retry_persistent_source_copy",
                 parent_call_id=self._last_parent_call(event.id),
+                attempt_type="RETRY",
+                logical_batch_id=f"v226-persistent-source-copy-{event.id}",
             )
         finally:
             self.client.persistent_source_copy_retry = False

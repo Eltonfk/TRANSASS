@@ -271,11 +271,18 @@ class V224MemoryRunner(V223MemoryRunner):
         simplified: bool = False,
         phase: str = "main",
         parent_call_id: str | None = None,
+        *,
+        attempt_type: str | None = None,
+        logical_batch_id: str | None = None,
+        batch_index: int | None = None,
     ) -> tuple[set[int], list[str]]:
         before = self._budget_snapshot(self)
         calls_before = len(self.calls)
         try:
-            return super()._attempt(units, simplified, phase, parent_call_id)
+            return super()._attempt(
+                units, simplified, phase, parent_call_id,
+                attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
+            )
         finally:
             after = self._budget_snapshot(self)
             if self.failure_ledger is not None:

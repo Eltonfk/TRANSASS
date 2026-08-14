@@ -121,6 +121,9 @@ class Config:
     # Opt-in V2.3.8 per-call durability context. Legacy callers leave this
     # unset and retain the historical request path byte-for-byte.
     durable_context: Any = None
+    # Explicit per-attempt taxonomy/identity, installed by Runner._attempt.
+    # Textual phase names are diagnostics only and never budget authority.
+    durable_attempt_contract: Any = None
 
     @classmethod
     def from_file(cls, path: Path) -> "Config":
@@ -1302,6 +1305,14 @@ class Client:
         self.glossary = glossary or {}
         self.model = model or config.model
 
+    def finalize_request_payload(self, payload: dict[str, Any], units: list[Unit], phase: str) -> dict[str, Any]:
+        """Return the exact transport payload before the durable boundary.
+
+        Adapter specializations override this hook instead of intercepting
+        ``requests.post`` after the request has already been captured.
+        """
+        return payload
+
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
         durable_context = getattr(self.config, "durable_context", None)
@@ -1392,6 +1403,7 @@ class Client:
             "options": {"temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict},
             "keep_alive": self.config.keep_alive,
         }
+        payload = self.finalize_request_payload(payload, units, phase)
         started = time.perf_counter()
         observation: dict[str, Any] = {
             "call_id": call_id, "model": self.model, "event_ids": ids,
@@ -1406,14 +1418,21 @@ class Client:
         durable_call = None
         if durable_context:
             from v238_per_call_durability import DurableV226Call
+            attempt_contract = getattr(self.config, "durable_attempt_contract", None)
+            if not isinstance(attempt_contract, dict):
+                from v238_per_call_durability import DurableCallError
+                raise DurableCallError("V238_DURABLE_ATTEMPT_CONTRACT_REQUIRED")
             membership = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode("utf-8")).hexdigest()
             durable_call = DurableV226Call(
                 durable_context,
                 payload,
                 {
                     "phase": phase,
-                    "batch_index": len(self.calls),
-                    "attempt_ordinal": len(self.calls) + 1,
+                    "attempt_type": attempt_contract.get("attempt_type"),
+                    "logical_batch_id": attempt_contract.get("logical_batch_id"),
+                    "attempt_ordinal": attempt_contract.get("attempt_ordinal"),
+                    "parent_attempt_id": attempt_contract.get("parent_attempt_id"),
+                    "batch_index": attempt_contract.get("batch_index"),
                     "unit_ids": ids,
                     "event_count": len(ids),
                     "unit_membership_sha256": membership,
@@ -1426,6 +1445,11 @@ class Client:
             )
             observation["call_id"] = durable_call.request_id
             observation["durable_request_id"] = durable_call.request_id
+            observation["logical_call_id"] = durable_call.logical_call_id
+            observation["physical_attempt_id"] = durable_call.physical_attempt_id
+            observation["durable_attempt_type"] = durable_call.metadata.get("attempt_type")
+            observation["durable_attempt_ordinal"] = durable_call.metadata.get("attempt_ordinal")
+            observation["parent_attempt_id"] = durable_call.metadata.get("parent_attempt_id")
             observation["unit_membership_sha256"] = membership
         try:
             body = None
@@ -1443,7 +1467,9 @@ class Client:
                 else:
                     durable_call.begin_transport()
                     observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
+                    durable_call._fault("before_post")
                     response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                    durable_call._fault("after_response_received_before_capture")
                     status_code = int(response.status_code)
                     observation["http_status"] = status_code
                     raw_body = getattr(response, "content", None)
@@ -1483,6 +1509,8 @@ class Client:
                 if key in body: observation[key] = body[key]
             for key in ("prompt_eval_duration", "eval_duration", "load_duration", "total_duration"):
                 if key in body: observation[key + "_seconds"] = body[key] / 1_000_000_000
+            if durable_call is not None:
+                durable_call._fault("before_parse")
             value = strict_json(content) if self.config.strict_json else json.loads(content)
             found, issues = validate_response(value, events)
             observation["json_valid"] = True
@@ -1500,7 +1528,7 @@ class Client:
                     if durable_call.state() == "TRANSPORT_IN_PROGRESS":
                         durable_call.mark_unknown(exc)
                         observation["durable_state"] = "TRANSPORT_OUTCOME_UNKNOWN"
-                    elif durable_call.state() == "RESPONSE_DURABLE":
+                    elif durable_call.state() == "RESPONSE_DURABLE" and not getattr(exc, "durability_stop", False):
                         durable_call.mark_parsed(valid=False, error=f"{type(exc).__name__}: {exc}")
                         observation["durable_state"] = "PARSED_INVALID"
                 except Exception as durability_exc:
@@ -1530,6 +1558,7 @@ class Runner:
         self.retry_budget = RetryBudget(max(0, int(config.retry_budget_calls)))
         self._last_call_id: str | None = None
         self._call_sequence = 0
+        self._durable_attempt_ordinals: dict[str, int] = {}
 
     def _set_model_result(self, event: Event, response: dict[str, Any], model: str) -> bool:
         text, flags = reconstruct_event(event, response)
@@ -1593,7 +1622,9 @@ class Runner:
         result.failure_reason = ""
         return True
 
-    def _attempt(self, units: list[Unit], simplified: bool = False, phase: str = "main", parent_call_id: str | None = None) -> tuple[set[int], list[str]]:
+    def _attempt(self, units: list[Unit], simplified: bool = False, phase: str = "main",
+                 parent_call_id: str | None = None, *, attempt_type: str | None = None,
+                 logical_batch_id: str | None = None, batch_index: int | None = None) -> tuple[set[int], list[str]]:
         expected = {event.id: event for unit in units for event in unit.events}
         self._diagnostic_phase = phase
         retry_call = phase != "initial"
@@ -1607,6 +1638,26 @@ class Runner:
         # parent from _process_units; falling back to the previous call is
         # useful only for a localized retry chain within one unit.
         effective_parent_call_id = parent_call_id if parent_call_id is not None else (self._last_call_id if retry_call else None)
+        previous_attempt_contract = getattr(self.config, "durable_attempt_contract", None)
+        if getattr(self.config, "durable_context", None):
+            normalized_attempt_type = str(attempt_type or "").upper()
+            if normalized_attempt_type not in {"INITIAL", "RETRY"}:
+                from v238_per_call_durability import DurableCallError
+                raise DurableCallError("V238_DURABLE_ATTEMPT_TYPE_REQUIRED")
+            if not logical_batch_id:
+                from v238_per_call_durability import DurableCallError
+                raise DurableCallError("V238_DURABLE_LOGICAL_BATCH_ID_REQUIRED")
+            parent_ordinal = int(getattr(self, "_durable_attempt_ordinals", {}).get(effective_parent_call_id, 0))
+            if normalized_attempt_type == "RETRY" and (not effective_parent_call_id or parent_ordinal <= 0):
+                from v238_per_call_durability import DurableCallError
+                raise DurableCallError("V238_DURABLE_RETRY_PARENT_IDENTITY_REQUIRED")
+            self.config.durable_attempt_contract = {
+                "attempt_type": normalized_attempt_type,
+                "logical_batch_id": str(logical_batch_id),
+                "attempt_ordinal": 1 if normalized_attempt_type == "INITIAL" else parent_ordinal + 1,
+                "parent_attempt_id": effective_parent_call_id if normalized_attempt_type == "RETRY" else None,
+                "batch_index": batch_index,
+            }
         try:
             found, issues, observation = self.client.call(units, expected, self.contexts, simplified, phase)
             if self.calls:
@@ -1628,6 +1679,8 @@ class Runner:
                     "success": bool(found) and not issues,
                 })
                 self._last_call_id = observation.get("call_id")
+                if observation.get("durable_attempt_ordinal") is not None:
+                    self._durable_attempt_ordinals[observation.get("call_id")] = int(observation["durable_attempt_ordinal"])
                 self._call_sequence += 1
             valid: set[int] = set()
             for event_id, response in found.items():
@@ -1661,12 +1714,18 @@ class Runner:
                 self._last_call_id = observation.get("call_id")
                 self._call_sequence += 1
             return set(), [f"{type(exc).__name__}: {str(exc)[:300]}"]
+        finally:
+            self.config.durable_attempt_contract = previous_attempt_contract
 
-    def _process_units(self, units: list[Unit], phase: str = "initial", parent_call_id: str | None = None) -> None:
+    def _process_units(self, units: list[Unit], phase: str = "initial", parent_call_id: str | None = None,
+                       *, attempt_type: str, logical_batch_id: str, batch_index: int | None = None) -> None:
         if not units:
             return
         ids = [event.id for unit in units for event in unit.events]
-        valid, issues = self._attempt(units, phase=phase, parent_call_id=parent_call_id)
+        valid, issues = self._attempt(
+            units, phase=phase, parent_call_id=parent_call_id,
+            attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
+        )
         current_call_id = self._last_call_id
         if any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT")):
             failure = "; ".join(issues)
@@ -1685,8 +1744,13 @@ class Runner:
         # rejected.  Only an actual Ollama retry below consumes budget.
         if len(missing) > 1:
             midpoint = max(1, len(missing) // 2)
-            self._process_units(missing[:midpoint], "split_isolation", current_call_id)
-            self._process_units(missing[midpoint:], "split_isolation", current_call_id)
+            for label, subset in (("left", missing[:midpoint]), ("right", missing[midpoint:])):
+                member_ids = [event.id for unit in subset for event in unit.events]
+                member_hash = hashlib.sha256(json.dumps(member_ids, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+                self._process_units(
+                    subset, "split_isolation", current_call_id, attempt_type="RETRY",
+                    logical_batch_id=f"{logical_batch_id}/split-{label}-{member_hash}",
+                )
             return
         unit = missing[0]
         event = unit.events[0] if len(unit.events) == 1 else None
@@ -1694,7 +1758,10 @@ class Runner:
             # A grouped sign is split conservatively if its combined response
             # fails; members become independent units.
             for member in unit.events:
-                self._process_units([Unit(f"event-{member.id}", [member])], "split_isolation", current_call_id)
+                self._process_units(
+                    [Unit(f"event-{member.id}", [member])], "split_isolation", current_call_id,
+                    attempt_type="RETRY", logical_batch_id=f"{logical_batch_id}/event-{member.id}",
+                )
             return
         result = self.results[event.id]
         retry_parent = current_call_id
@@ -1702,7 +1769,10 @@ class Runner:
             simplified = retry >= 1
             retry_phase = "retry_simplified" if simplified else "retry_local"
             result.retry_count += 1
-            valid_retry, retry_issues = self._attempt([Unit(f"event-{event.id}", [event])], simplified, retry_phase, retry_parent)
+            valid_retry, retry_issues = self._attempt(
+                [Unit(f"event-{event.id}", [event])], simplified, retry_phase, retry_parent,
+                attempt_type="RETRY", logical_batch_id=f"{logical_batch_id}/retry-{retry + 1}",
+            )
             retry_parent = self._last_call_id or retry_parent
             result.attempts.append({"model": self.config.model, "phase": retry_phase, "retry_type": "RETRY_SEGMENTED_EVENT" if is_multi_speaker(event) else "RETRY_NORMAL_EVENT", "event_id": event.id, "reason": "; ".join(retry_issues)})
             if event.id in valid_retry:
@@ -1712,22 +1782,22 @@ class Runner:
             result.status = "failed"
             result.failure_reason = "; ".join(issues) or result.failure_reason or "falha definitiva experimental"
 
-    def run(self) -> dict[str, Any]:
+    def plan_initial_batches(self) -> list[list[Unit]]:
+        """Return the canonical deterministic initial V226 request groups."""
         pending_units: list[Unit] = []
         for event in self.events:
             result = self.results[event.id]
             uncertain_romaji_is_english = event.classification == "ROMAJI_PRESERVED" and likely_english_sentence_source(event, self.english_dictionary)
             if event.classification == "SONG_LYRICS_PRESERVED":
-                result.status = "resolved"
-                result.final_text = event.original_text
-                result.final_model = "song-preserve"
-                result.flags.append("SONG_LYRICS_PRESERVED")
+                result.status = "resolved"; result.final_text = event.original_text; result.final_model = "song-preserve"
+                if "SONG_LYRICS_PRESERVED" not in result.flags:
+                    result.flags.append("SONG_LYRICS_PRESERVED")
                 continue
             if event.classification in {"TECHNICAL_OR_EMPTY", "MUSIC_OR_KARAOKE"} or (event.classification == "ROMAJI_PRESERVED" and not uncertain_romaji_is_english):
                 result.status = "resolved"
                 result.final_text = event.original_text
                 result.final_model = "romaji-preserve" if event.classification == "ROMAJI_PRESERVED" else "deterministic-preserve"
-                if event.classification == "ROMAJI_PRESERVED":
+                if event.classification == "ROMAJI_PRESERVED" and "ROMAJI_PRESERVED" not in result.flags:
                     result.flags.append("ROMAJI_PRESERVED")
                 continue
             if event.classification == "SDH" and self.config.sdh_deterministic_enabled:
@@ -1736,7 +1806,9 @@ class Runner:
                     result.status = "resolved"
                     result.final_text = translated
                     result.final_model = "deterministic-sdh"
-                    result.flags.append("SDH_DETERMINISTIC:" + rule)
+                    marker = "SDH_DETERMINISTIC:" + rule
+                    if marker not in result.flags:
+                        result.flags.append(marker)
                     continue
             pending_units.extend(unit for unit in self.units if event in unit.events and unit not in pending_units)
         # batch_target_size is measured in target events, not Unit objects.
@@ -1757,8 +1829,15 @@ class Runner:
             current_kind = unit_kind
         if current:
             packed.append(current)
-        for batch in packed:
-            self._process_units(batch, "initial")
+        return packed
+
+    def run(self) -> dict[str, Any]:
+        packed = self.plan_initial_batches()
+        for batch_index, batch in enumerate(packed):
+            self._process_units(
+                batch, "initial", attempt_type="INITIAL",
+                logical_batch_id=f"v226-initial-{batch_index:06d}", batch_index=batch_index,
+            )
         eligible = all(result.status == "resolved" for result in self.results.values())
         critical_flags = sorted({flag.split(":", 1)[0] for result in self.results.values() for flag in result.flags if flag.split(":", 1)[0] in CRITICAL_FLAGS})
         flag_counts = dict(Counter(flag.split(":", 1)[0] for result in self.results.values() for flag in result.flags))

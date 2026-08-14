@@ -372,34 +372,28 @@ class V226MemoryClient(V225MemoryClient):
         super().__init__(*args, **kwargs)
         self.sign_group_translation = False
 
-    def call(self, units, events, contexts, simplified=False, phase="main"):
+    def finalize_request_payload(self, payload, units, phase):
+        payload = super().finalize_request_payload(payload, units, phase)
         if not self.sign_group_translation:
-            return super().call(units, events, contexts, simplified=simplified, phase=phase)
-        import pipeline_v2_1_3 as frozen_pipeline
-        original_post = frozen_pipeline.requests.post
+            return payload
+        payload = dict(payload)
+        messages = list(payload.get("messages") or [])
+        if messages:
+            first = dict(messages[0])
+            first["content"] = str(first.get("content") or "") + (
+                "\n\nSIGN_GROUP_TRANSLATION: este TARGET é texto linguístico de uma placa/card. "
+                "Traduza uma única vez para PT-BR natural. Não devolva desenho, tags ASS, "
+                "timestamps ou estrutura; não copie o inglês quando houver tradução possível."
+            )
+            messages[0] = first
+            payload["messages"] = messages
+        return payload
 
-        def patched_post(url, **kwargs):
-            payload = dict(kwargs.get("json") or {})
-            messages = list(payload.get("messages") or [])
-            if messages:
-                first = dict(messages[0])
-                first["content"] = str(first.get("content") or "") + (
-                    "\n\nSIGN_GROUP_TRANSLATION: este TARGET é texto linguístico de uma placa/card. "
-                    "Traduza uma única vez para PT-BR natural. Não devolva desenho, tags ASS, "
-                    "timestamps ou estrutura; não copie o inglês quando houver tradução possível."
-                )
-                messages[0] = first
-                payload["messages"] = messages
-            kwargs["json"] = payload
-            return original_post(url, **kwargs)
-
-        frozen_pipeline.requests.post = patched_post
-        try:
-            found, issues, observation = super().call(units, events, contexts, simplified=simplified, phase=phase)
+    def call(self, units, events, contexts, simplified=False, phase="main"):
+        found, issues, observation = super().call(units, events, contexts, simplified=simplified, phase=phase)
+        if self.sign_group_translation:
             observation["retry_reason"] = SIGN_GROUP_TRANSLATION_RETRY
-            return found, issues, observation
-        finally:
-            frozen_pipeline.requests.post = original_post
+        return found, issues, observation
 
 
 class V226MemoryRunner(V225MemoryRunner):
@@ -421,7 +415,11 @@ class V226MemoryRunner(V225MemoryRunner):
             return None
         self.client.sign_group_translation = True
         try:
-            self._attempt([Unit(f"sign-semantic-{event.id}", [event])], phase="retry_sign_group_translation", parent_call_id=self._last_call_id)
+            self._attempt(
+                [Unit(f"sign-semantic-{event.id}", [event])],
+                phase="retry_sign_group_translation", parent_call_id=self._last_call_id,
+                attempt_type="RETRY", logical_batch_id=f"v226-sign-semantic-{event.id}",
+            )
         finally:
             self.client.sign_group_translation = False
         value = result.final_text or ""

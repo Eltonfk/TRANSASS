@@ -301,6 +301,10 @@ class V223MemoryRunner(V222MemoryRunner):
         simplified: bool = False,
         phase: str = "main",
         parent_call_id: str | None = None,
+        *,
+        attempt_type: str | None = None,
+        logical_batch_id: str | None = None,
+        batch_index: int | None = None,
     ) -> tuple[set[int], list[str]]:
         short_retry_ids = {
             event.id
@@ -321,7 +325,10 @@ class V223MemoryRunner(V222MemoryRunner):
         calls_before = len(self.calls)
         self.client.interrupted_dialogue_retry = interrupted
         try:
-            outcome = super()._attempt(units, simplified, phase, parent_call_id)
+            outcome = super()._attempt(
+                units, simplified, phase, parent_call_id,
+                attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
+            )
         finally:
             self.client.interrupted_dialogue_retry = False
         if short_retry_ids and phase != "initial":
@@ -402,35 +409,27 @@ class V223MemoryClient(MemoryClient):
         super().__init__(*args, **kwargs)
         self.interrupted_dialogue_retry = False
 
-    def call(self, units, events, contexts, simplified=False, phase="main"):
+    def finalize_request_payload(self, payload, units, phase):
+        payload = super().finalize_request_payload(payload, units, phase)
         if not self.interrupted_dialogue_retry:
-            return super().call(units, events, contexts, simplified=simplified, phase=phase)
+            return payload
+        payload = dict(payload)
+        messages = list(payload.get("messages") or [])
+        if messages:
+            first = dict(messages[0])
+            first["content"] = str(first.get("content") or "") + INTERRUPTED_DIALOGUE_RETRY_INSTRUCTION
+            messages[0] = first
+            payload["messages"] = messages
+        return payload
 
-        import pipeline_v2_1_3 as frozen_pipeline
-
-        original_post = frozen_pipeline.requests.post
-
-        def patched_post(url, **kwargs):
-            payload = dict(kwargs.get("json") or {})
-            messages = list(payload.get("messages") or [])
-            if messages:
-                first = dict(messages[0])
-                first["content"] = str(first.get("content") or "") + INTERRUPTED_DIALOGUE_RETRY_INSTRUCTION
-                messages[0] = first
-                payload["messages"] = messages
-            kwargs["json"] = payload
-            return original_post(url, **kwargs)
-
-        frozen_pipeline.requests.post = patched_post
-        try:
-            found, issues, observation = super().call(
-                units, events, contexts, simplified=simplified, phase=phase
-            )
+    def call(self, units, events, contexts, simplified=False, phase="main"):
+        found, issues, observation = super().call(
+            units, events, contexts, simplified=simplified, phase=phase
+        )
+        if self.interrupted_dialogue_retry:
             observation["retry_specialization"] = "SHORT_INTERRUPTED_DIALOGUE_RETRY"
             observation["retry_instruction_chars"] = len(INTERRUPTED_DIALOGUE_RETRY_INSTRUCTION)
-            return found, issues, observation
-        finally:
-            frozen_pipeline.requests.post = original_post
+        return found, issues, observation
 
 
 def translate_subtitle_file_v2_2_3(

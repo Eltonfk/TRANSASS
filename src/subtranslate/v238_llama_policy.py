@@ -52,7 +52,16 @@ class OperationCallBudget:
         self.llama_reserved = 0
         self.reservations: list[dict[str, Any]] = []
 
-    def reserve(self, *, model_tag: str, model_digest: str | None, phase: str) -> dict[str, Any]:
+    def reserve(self, *, model_tag: str, model_digest: str | None, phase: str,
+                reservation_id: str | None = None) -> dict[str, Any]:
+        if reservation_id:
+            existing = next((row for row in self.reservations if row.get("reservation_id") == str(reservation_id)), None)
+            if existing is not None:
+                expected = (str(model_tag), model_digest, str(phase or "").upper())
+                actual = (existing.get("model_tag"), existing.get("model_digest"), existing.get("phase"))
+                if actual != expected:
+                    raise LlamaPolicyError("V238_SHARED_BUDGET_RESERVATION_IDENTITY_MISMATCH")
+                return {**existing, "reused": True}
         token = str(phase or "").upper()
         is_llama = "LLAMA" in token or str(model_tag).casefold().startswith("llama")
         if is_llama:
@@ -67,6 +76,7 @@ class OperationCallBudget:
         reservation = {
             "model_tag": str(model_tag), "model_digest": model_digest,
             "phase": token, "attempt": self.total_reserved,
+            "reservation_id": str(reservation_id) if reservation_id else None,
         }
         self.reservations.append(reservation)
         return reservation
