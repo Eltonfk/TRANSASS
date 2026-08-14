@@ -218,6 +218,15 @@ class CanonicalV226LiveMaterializer:
         if not source_path.is_file():
             raise BaseTranslationMaterializerError("V238_BASE_SOURCE_MISSING")
         identity = self._identity(source_path, context)
+        context_memory_db_root = context.get("memory_db_root")
+        context_memory_root = context.get("memory_root")
+        if context_memory_db_root is not None and context_memory_root is not None:
+            try:
+                if Path(context_memory_db_root).resolve() != Path(context_memory_root).resolve():
+                    raise BaseTranslationMaterializerError("V238_MEMORY_ROOTS_DIVERGE")
+            except OSError as exc:
+                raise BaseTranslationMaterializerError("V238_MEMORY_ROOT_RESOLUTION_FAILED") from exc
+        memory_db_root = context_memory_db_root if context_memory_db_root is not None else context_memory_root
         root = Path(context.get("checkpoint_root") or context.get("state_root") or os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/tmp"))
         checkpoint = root / "v238-base-checkpoints" / identity["operation_id"]
         checkpoint.mkdir(parents=True, exist_ok=True)
@@ -306,11 +315,20 @@ class CanonicalV226LiveMaterializer:
             os.close(claim_fd)
         except FileExistsError as exc:
             raise BaseTranslationMaterializerError("V238_CHECKPOINT_CONCURRENT_CLAIM") from exc
-        base_kwargs = {key: context.get(key) for key in ("glossary", "memory_root", "anime_series_id", "episode_id", "job_id") if context.get(key) is not None}
+        # The frozen V2.2.5 seam names its Translation Memory root
+        # ``memory_db_root``.  Keep the V2.3.8 context spelling flexible, but
+        # never forward the historical ``memory_root`` keyword to V2.2.5.
+        base_kwargs = {key: context.get(key) for key in ("glossary", "anime_series_id", "episode_id", "job_id") if context.get(key) is not None}
+        if memory_db_root is not None:
+            base_kwargs["memory_db_root"] = memory_db_root
         base_kwargs["execution_context"] = dict(context)
         fd, raw = tempfile.mkstemp(prefix=".v238-base-", suffix=".ass", dir=str(checkpoint))
         os.close(fd)
         temporary = Path(raw)
+        # The frozen V2.2.5 adapter atomically creates its output and rejects
+        # an already-existing destination.  mkstemp gives us a collision-free
+        # name, but its placeholder must not be forwarded as an existing file.
+        temporary.unlink(missing_ok=True)
         saved_budget = os.environ.get("V213_HARD_STOP_CALLS")
         configured_budget = context.get("hard_call_budget")
         if configured_budget is not None:

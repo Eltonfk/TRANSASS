@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
+import os
+import re
 from pathlib import Path
 
 from pipeline_orchestrator import execute_pipeline_plan
@@ -218,6 +221,108 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
                      "llama_provider": LlamaSpy(), "operation_budget": OperationCallBudget(llama_generation_maximum=0),
                      "execution_mode": "TEST_FAKE"},
                 )
+
+    def test_memory_root_alias_reaches_real_v226_chain_without_model_transport(self):
+        """The repaired V2.3.8 caller must cross the frozen seam and client."""
+        with tempfile.TemporaryDirectory(prefix="v238-memory-seam-") as raw:
+            root = Path(raw)
+            source = root / "source.ass"
+            source.write_text(ASS.split("Dialogue:", 1)[0] +
+                              "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello\n", encoding="utf-8")
+            memory = root / "memory" / "db"
+            memory.mkdir(parents=True)
+            import sqlite3
+            sqlite3.connect(memory / "subtitle_library.sqlite3").close()
+            import production_v2_2_5_adapter as frozen_v225
+            import pipeline_v2_1_3 as pipeline
+            from unittest.mock import patch
+            seam_kwargs = {}
+            client_calls = {"count": 0}
+
+            original_seam = frozen_v225.translate_subtitle_file_v2_2_5
+            def seam_wrapper(*args, **kwargs):
+                seam_kwargs.update(kwargs)
+                return original_seam(*args, **kwargs)
+
+            original_client = frozen_v225.V225MemoryClient.call
+            def client_wrapper(self, *args, **kwargs):
+                client_calls["count"] += 1
+                return original_client(self, *args, **kwargs)
+
+            class Response:
+                status_code = 200
+                def raise_for_status(self):
+                    return None
+                def json(self):
+                    return self.body
+
+            def fake_post(url, **kwargs):
+                content = kwargs["json"]["messages"][0]["content"]
+                match = re.search(r"TARGET: (\[.*?\])\nGLOSSARY:", content, re.S)
+                targets = json.loads(match.group(1))
+                translations = [{"id": item["id"], "text": "olá"} for item in targets]
+                response = Response()
+                response.body = {"message": {"content": json.dumps({"translations": translations})}}
+                return response
+
+            old_url, old_model = os.environ.get("TRANSLATOR_OLLAMA_URL"), os.environ.get("TRANSLATOR_OLLAMA_MODEL")
+            os.environ["TRANSLATOR_OLLAMA_URL"] = "http://offline-fake"
+            os.environ["TRANSLATOR_OLLAMA_MODEL"] = "qwen3.5:9b"
+            try:
+                context = {
+                    "execution_mode": "TEST_FAKE", "operation_id": "op-memory-seam",
+                    "checkpoint_root": root / "state", "memory_root": memory.parent,
+                    "episode_id": 79, "anime_series_id": 1, "model": "qwen3.5:9b",
+                    "candidate_commit": "candidate", "hard_call_budget": 242,
+                }
+                with patch.object(frozen_v225, "translate_subtitle_file_v2_2_5", seam_wrapper), \
+                     patch.object(frozen_v225.V225MemoryClient, "call", client_wrapper), \
+                     patch.object(pipeline.requests, "post", fake_post):
+                    result = CanonicalV226LiveMaterializer().materialize(source, root / "base.ass", context=context)
+            finally:
+                if old_url is None:
+                    os.environ.pop("TRANSLATOR_OLLAMA_URL", None)
+                else:
+                    os.environ["TRANSLATOR_OLLAMA_URL"] = old_url
+                if old_model is None:
+                    os.environ.pop("TRANSLATOR_OLLAMA_MODEL", None)
+                else:
+                    os.environ["TRANSLATOR_OLLAMA_MODEL"] = old_model
+            self.assertEqual(client_calls["count"], 1)
+            self.assertEqual(Path(seam_kwargs["memory_db_root"]).resolve(), memory.parent.resolve())
+            self.assertNotIn("memory_root", seam_kwargs)
+            self.assertTrue((Path(result["checkpoint"]) / "COMPLETE").is_file())
+
+    def test_memory_root_conflict_fails_closed_and_context_is_preserved(self):
+        with tempfile.TemporaryDirectory(prefix="v238-memory-roots-") as raw:
+            root = Path(raw)
+            source = root / "source.ass"
+            source.write_text(ASS, encoding="utf-8")
+            calls = []
+
+            def fake_v226(src, dst, **kwargs):
+                calls.append(kwargs)
+                Path(dst).write_bytes(Path(src).read_bytes())
+                return {"model": "qwen3.5:9b", "calls": [], "results": [{"id": 0, "status": "resolved"}]}
+
+            from unittest.mock import patch
+            materializer = CanonicalV226LiveMaterializer()
+            common = {"execution_mode": "TEST_FAKE", "operation_id": "op-memory-roots",
+                      "checkpoint_root": root / "state", "episode_id": 79,
+                      "anime_series_id": 1, "model": "qwen3.5:9b",
+                      "candidate_commit": "candidate", "model_digest": "qwen-digest",
+                      "operation_budget": "budget-object"}
+            with patch("v238_base_materializer.translate_subtitle_file_v2_2_6", fake_v226):
+                with self.assertRaises(BaseTranslationMaterializerError) as error:
+                    materializer.materialize(source, root / "diverged.ass", context={**common, "memory_root": root / "a", "memory_db_root": root / "b"})
+                self.assertIn("V238_MEMORY_ROOTS_DIVERGE", str(error.exception))
+                result = materializer.materialize(source, root / "equal.ass", context={**common, "memory_root": root / "same", "memory_db_root": root / "same"})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(Path(calls[0]["memory_db_root"]).resolve(), (root / "same").resolve())
+            self.assertNotIn("memory_root", calls[0])
+            self.assertEqual(calls[0]["execution_context"]["operation_budget"], "budget-object")
+            self.assertEqual(calls[0]["execution_context"]["model_digest"], "qwen-digest")
+            self.assertEqual(result["checkpoint_created"], 1)
 
 
 if __name__ == "__main__":
