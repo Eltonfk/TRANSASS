@@ -1465,30 +1465,40 @@ class Client:
                     from v238_per_call_durability import DurableCallError
                     raise DurableCallError("V238_DURABLE_CALL_TERMINAL_RECONCILIATION_REQUIRED:" + str(state.get("state")))
                 else:
-                    durable_call.begin_transport()
-                    observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
-                    durable_call._fault("before_post")
-                    response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
-                    durable_call._fault("after_response_received_before_capture")
-                    status_code = int(response.status_code)
-                    observation["http_status"] = status_code
-                    raw_body = getattr(response, "content", None)
-                    if raw_body is None:
-                        text_body = getattr(response, "text", None)
-                        if isinstance(text_body, str):
-                            raw_body = text_body.encode("utf-8")
+                    # The interprocess claim spans the state check, the POST,
+                    # exact response capture, and durable state promotion.  A
+                    # waiter either reuses the captured response or stops; it
+                    # can never become a second transport owner.
+                    with durable_call.exclusive_transport_claim() as transport_owner:
+                        if not transport_owner:
+                            raw_body = durable_call.load_raw()
+                            body = json.loads(raw_body.decode("utf-8"))
+                            observation["reused_durable_response"] = True
+                            observation["physical_transport"] = False
                         else:
-                            raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
-                    durable_call.record_response(bytes(raw_body), status_code=status_code)
-                    observation["physical_transport"] = True
-                    if status_code != 200:
-                        # The response/status is already durable.  Do not let
-                        # the legacy Runner interpret this as an ordinary
-                        # retryable exception: a retry requires an explicit
-                        # policy decision after reconciliation.
-                        from v238_per_call_durability import DurableCallError
-                        raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
-                    body = json.loads(bytes(raw_body).decode("utf-8"))
+                            durable_call.begin_transport()
+                            observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
+                            durable_call._fault("before_post")
+                            response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                            durable_call._fault("after_response_received_before_capture")
+                            status_code = int(response.status_code)
+                            observation["http_status"] = status_code
+                            raw_body = getattr(response, "content", None)
+                            if raw_body is None:
+                                text_body = getattr(response, "text", None)
+                                if isinstance(text_body, str):
+                                    raw_body = text_body.encode("utf-8")
+                                else:
+                                    raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
+                            durable_call.record_response(bytes(raw_body), status_code=status_code)
+                            observation["physical_transport"] = True
+                            if status_code != 200:
+                                # The response/status is already durable.  Do
+                                # not let the legacy Runner treat this as an
+                                # ordinary retryable exception.
+                                from v238_per_call_durability import DurableCallError
+                                raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
+                            body = json.loads(bytes(raw_body).decode("utf-8"))
             else:
                 response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
                 observation["http_status"] = response.status_code

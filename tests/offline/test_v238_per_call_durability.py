@@ -1,7 +1,9 @@
 import json
+import multiprocessing
 import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -65,8 +67,10 @@ class PerCallDurabilityTests(unittest.TestCase):
     def complete(self, call, raw=None):
         call.reserve()
         call.prepare_request()
-        call.begin_transport()
-        call.record_response(raw or b'{"message":{"content":"{}"}}', status_code=200)
+        with call.exclusive_transport_claim() as owner:
+            self.assertTrue(owner)
+            call.begin_transport()
+            call.record_response(raw or b'{"message":{"content":"{}"}}', status_code=200)
         call.mark_parsed(valid=True)
 
     def test_request_and_response_are_atomic_and_private(self):
@@ -79,8 +83,10 @@ class PerCallDurabilityTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(call.call_dir.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE((call.call_dir / "request_payload.json").stat().st_mode), 0o600)
-            call.begin_transport()
-            call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                call.begin_transport()
+                call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
             self.assertEqual(call.state(), "RESPONSE_DURABLE")
             self.assertEqual(stat.S_IMODE((call.call_dir / "response.body").stat().st_mode), 0o600)
             call.mark_parsed(valid=True)
@@ -94,8 +100,11 @@ class PerCallDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = DurableV226Call(self.context(root), self.payload(), self.metadata())
-            first.reserve(); first.prepare_request(); first.begin_transport()
-            first.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+            first.reserve(); first.prepare_request()
+            with first.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                first.begin_transport()
+                first.record_response(b'{"message":{"content":"{}"}}', status_code=200)
             second = DurableV226Call(self.context(root), self.payload(), self.metadata())
             self.assertEqual(second.state(), "RESPONSE_DURABLE")
             self.assertEqual(second.load_raw(), b'{"message":{"content":"{}"}}')
@@ -107,14 +116,16 @@ class PerCallDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             first = DurableV226Call(self.context(root), self.payload(), self.metadata())
-            first.reserve(); first.prepare_request(); first.begin_transport()
+            first.reserve(); first.prepare_request()
+            with first.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                first.begin_transport()
             second = DurableV226Call(self.context(root), self.payload(), self.metadata())
             with self.assertRaises(DurableCallOutcomeUnknown):
-                second.begin_transport()
-            second.mark_unknown(RuntimeError("fault"))
+                second.prepare_request()
             self.assertEqual(second.state(), "TRANSPORT_OUTCOME_UNKNOWN")
             with self.assertRaises(DurableCallOutcomeUnknown):
-                second.begin_transport()
+                second.prepare_request()
             self.assertEqual(second.budget_ledger.snapshot()["unknown_outcomes"], 1)
 
     def test_budget_overflow_is_before_transport(self):
@@ -134,9 +145,12 @@ class PerCallDurabilityTests(unittest.TestCase):
             root = Path(directory)
             fault_context = self.context(root, durability_fault_point="after_response_durable")
             first = DurableV226Call(fault_context, self.payload(), self.metadata())
-            first.reserve(); first.prepare_request(); first.begin_transport()
+            first.reserve(); first.prepare_request()
             with self.assertRaises(DurableCallFault):
-                first.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+                with first.exclusive_transport_claim() as owner:
+                    self.assertTrue(owner)
+                    first.begin_transport()
+                    first.record_response(b'{"message":{"content":"{}"}}', status_code=200)
             self.assertEqual(first.state(), "RESPONSE_DURABLE")
             resume = DurableV226Call(self.context(root), self.payload(), self.metadata())
             self.assertEqual(resume.load_raw(), b'{"message":{"content":"{}"}}')
@@ -147,9 +161,12 @@ class PerCallDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             call = DurableV226Call(self.context(root), self.payload(), self.metadata())
-            call.reserve(); call.prepare_request(); call.begin_transport()
+            call.reserve(); call.prepare_request()
             raw = b"not-json"
-            call.record_response(raw, status_code=200)
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                call.begin_transport()
+                call.record_response(raw, status_code=200)
             call.mark_parsed(valid=False, error="JSON_DECODE")
             self.assertEqual(call.state(), "PARSED_INVALID")
             self.assertEqual(call.load_raw(), raw)
@@ -420,30 +437,43 @@ class PerCallDurabilityTests(unittest.TestCase):
             resumed = DurableV226Call(self.context(root, operation_id="RESTART"), self.payload(), self.metadata())
             self.assertEqual(resumed.prepare_request()["state"], "REQUEST_DURABLE")
 
-        # Raw body/metadata without authoritative RESPONSE_DURABLE remain an
-        # unknown in-flight outcome; RESPONSE_DURABLE itself is reusable.
-        for point, file_name in (("after_response_body_fsync", "response.body"), ("after_response_metadata_fsync", "response_metadata.json")):
-            with self.subTest(point=point), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                call = DurableV226Call(self.context(root), self.payload(), self.metadata())
-                call.reserve(); call.prepare_request(); call.begin_transport()
-                call._fault_point = point
-                with self.assertRaises(DurableCallFault):
-                    call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
-                self.assertEqual(call.state(), "TRANSPORT_IN_PROGRESS")
-                self.assertTrue((call.call_dir / file_name).is_file())
-                call._fault_point = ""
-                call.mark_unknown(RuntimeError("crash"))
-                with self.assertRaises(DurableCallOutcomeUnknown):
+        # Body alone is incomplete and becomes UNKNOWN.  Body plus valid
+        # metadata is a complete capture and is promoted locally even when the
+        # process faults before the state marker is written.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.reserve(); call.prepare_request(); call._fault_point = "after_response_body_fsync"
+            with self.assertRaises(DurableCallFault):
+                with call.exclusive_transport_claim() as owner:
+                    self.assertTrue(owner)
                     call.begin_transport()
+                    call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+            self.assertEqual(call.state(), "TRANSPORT_OUTCOME_UNKNOWN")
+            self.assertTrue((call.call_dir / "response.body").is_file())
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             call = DurableV226Call(self.context(root), self.payload(), self.metadata())
-            call.reserve(); call.prepare_request(); call.begin_transport()
-            call._fault_point = "after_state_before_alias"
+            call.reserve(); call.prepare_request(); call._fault_point = "after_response_metadata_fsync"
             with self.assertRaises(DurableCallFault):
-                call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+                with call.exclusive_transport_claim() as owner:
+                    self.assertTrue(owner)
+                    call.begin_transport()
+                    call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+            self.assertEqual(call.state(), "RESPONSE_DURABLE")
+            self.assertTrue((call.call_dir / "response_metadata.json").is_file())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.reserve(); call.prepare_request()
+            with self.assertRaises(DurableCallFault):
+                with call.exclusive_transport_claim() as owner:
+                    self.assertTrue(owner)
+                    call.begin_transport()
+                    call._fault_point = "after_state_before_alias"
+                    call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
             resumed = DurableV226Call(self.context(root, operation_id="RESTART"), self.payload(), self.metadata())
             self.assertEqual(resumed.state(), "RESPONSE_DURABLE")
             self.assertEqual(resumed.load_raw(), b'{"message":{"content":"{}"}}')
@@ -552,6 +582,224 @@ class PerCallDurabilityTests(unittest.TestCase):
                         found, issues, _ = Client(resumed_config, [], {}, model="qwen3.5:9b").call([unit], {1: event}, contexts, phase="main")
                     self.assertEqual(found[1]["text"], "oi")
                     self.assertEqual(issues, [])
+
+    def test_canonical_runner_restart_with_first_batch_inflight_stops_before_retransport(self):
+        from pipeline_v2_1_3 import CleanSegment, Config, Event, Runner
+        from v238_llama_policy import OperationCallBudget
+
+        ctx = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            durable_context = self.context(
+                root, operation_id="CANONICAL_CRASH_OWNER",
+                episode_budget_limits={"planned_initial_calls": 233, "retry_reserve": 9, "physical_ceiling": 242},
+            )
+            events = [
+                Event(number, number, 0, number * 1000, number * 1000 + 900, "Default", "", 0, 0, 0, "", f"source {number}", f"source {number}", f"source {number}", [CleanSegment(0, f"source {number}", f"source {number}")], [], [], False, "MAIN_DIALOGUE")
+                for number in range(1, 234)
+            ]
+
+            def runner_for(operation_id):
+                candidate_context = dict(durable_context, operation_id=operation_id)
+                config = Config("http://local-provider.invalid", model="qwen3.5:9b", strict_json=True, batch_target_size=1, retry_budget_calls=9)
+                config.model_digest = candidate_context["model_digest"]
+                config.durable_context = candidate_context
+                config.operation_budget = OperationCallBudget(qwen_physical_maximum=242, llama_generation_maximum=0)
+                return Runner(events, {}, config, {})
+
+            entered_post = ctx.Event()
+
+            def crash_owner():
+                def hard_crash_post(*args, **kwargs):
+                    entered_post.set()
+                    os._exit(74)
+                with patch("pipeline_v2_1_3.requests.post", side_effect=hard_crash_post):
+                    runner_for("CANONICAL_CRASH_OWNER").run()
+
+            process = ctx.Process(target=crash_owner)
+            process.start()
+            self.assertTrue(entered_post.wait(5))
+            process.join(5)
+            self.assertEqual(process.exitcode, 74)
+
+            repeated_transports = []
+            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *a, **k: repeated_transports.append(1)):
+                with self.assertRaises(DurableCallOutcomeUnknown):
+                    runner_for("CANONICAL_RESTART").run()
+            self.assertEqual(repeated_transports, [])
+            snapshot = json.loads(Path(durable_context["episode_budget_ledger_path"]).read_text())
+            self.assertEqual(snapshot["initial_consumed"], 1)
+            self.assertEqual(snapshot["retry_consumed"], 0)
+            self.assertEqual(snapshot["reservations"][0]["state"], "TRANSPORT_OUTCOME_UNKNOWN")
+
+    def test_transport_state_never_downgrades_and_initial_ordinal_is_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.reserve(); call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                call.begin_transport()
+            with self.assertRaisesRegex(DurableCallError, "STATE_TRANSITION_PROHIBITED"):
+                call._transition("REQUEST_DURABLE")
+            with self.assertRaises(DurableCallOutcomeUnknown):
+                DurableV226Call(
+                    self.context(root, operation_id="RESTART"), self.payload(), self.metadata()
+                ).prepare_request()
+            self.assertEqual(call.state(), "TRANSPORT_OUTCOME_UNKNOWN")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(DurableCallError, "INITIAL_ATTEMPT_ORDINAL_MUST_BE_ONE"):
+                DurableV226Call(
+                    self.context(root), self.payload(),
+                    self.metadata(attempt_type="INITIAL", attempt_ordinal=2),
+                )
+
+    def test_exclusive_interprocess_claim_allows_exactly_one_transport(self):
+        ctx = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, transport_claim_timeout_seconds=3.0)
+            payload = self.payload()
+            metadata = self.metadata()
+            barrier = ctx.Barrier(2)
+            transport_count = ctx.Value("i", 0)
+            results = ctx.Queue()
+
+            def worker(operation_id):
+                try:
+                    call = DurableV226Call(dict(context, operation_id=operation_id), payload, metadata)
+                    call.prepare_request()
+                    barrier.wait(timeout=3)
+                    with call.exclusive_transport_claim() as owner:
+                        if owner:
+                            call.begin_transport()
+                            with transport_count.get_lock():
+                                transport_count.value += 1
+                            time.sleep(0.15)
+                            call.record_response(b'{"message":{"content":"{}"}}', status_code=200)
+                        results.put("OWNER" if owner else "REUSED")
+                except BaseException as exc:
+                    results.put("ERROR:" + type(exc).__name__ + ":" + str(exc))
+
+            workers = [ctx.Process(target=worker, args=(f"WORKER_{number}",)) for number in (1, 2)]
+            for process in workers:
+                process.start()
+            for process in workers:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+            observed = sorted(results.get(timeout=2) for _ in workers)
+            self.assertEqual(transport_count.value, 1)
+            self.assertEqual(observed, ["OWNER", "REUSED"])
+            call = DurableV226Call(self.context(root, operation_id="VERIFY"), payload, metadata)
+            self.assertEqual(call.state(), "RESPONSE_DURABLE")
+
+    def test_real_hard_crash_during_transport_stops_restart_without_post(self):
+        ctx = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root)
+            payload = self.payload()
+            metadata = self.metadata()
+            entered_transport = ctx.Event()
+
+            def crash_worker():
+                call = DurableV226Call(dict(context, operation_id="CRASH_OWNER"), payload, metadata)
+                call.prepare_request()
+                with call.exclusive_transport_claim() as owner:
+                    if not owner:
+                        os._exit(91)
+                    call.begin_transport()
+                    entered_transport.set()
+                    os._exit(73)
+
+            process = ctx.Process(target=crash_worker)
+            process.start()
+            self.assertTrue(entered_transport.wait(5))
+            process.join(5)
+            self.assertEqual(process.exitcode, 73)
+            state_path = next((root / "family" / "calls").iterdir()) / "state.json"
+            self.assertEqual(json.loads(state_path.read_text())["state"], "TRANSPORT_IN_PROGRESS")
+
+            restart_result = ctx.Queue()
+
+            def restart_worker():
+                transports = 0
+                restarted = DurableV226Call(
+                    self.context(root, operation_id="AFTER_HARD_CRASH"), payload, metadata
+                )
+                try:
+                    restarted.prepare_request()
+                    with restarted.exclusive_transport_claim() as owner:
+                        if owner:
+                            transports += 1
+                    restart_result.put({"state": restarted.state(), "transports": transports})
+                except BaseException as exc:
+                    restart_result.put({
+                        "state": restarted.state(), "transports": transports,
+                        "error": type(exc).__name__,
+                    })
+
+            second = ctx.Process(target=restart_worker)
+            second.start(); second.join(5)
+            self.assertEqual(second.exitcode, 0)
+            observed = restart_result.get(timeout=2)
+            self.assertEqual(observed["transports"], 0)
+            self.assertEqual(observed["state"], "TRANSPORT_OUTCOME_UNKNOWN")
+            restarted = DurableV226Call(self.context(root, operation_id="VERIFY_UNKNOWN"), payload, metadata)
+            self.assertEqual(restarted.state(), "TRANSPORT_OUTCOME_UNKNOWN")
+
+    def test_response_capture_restart_reconciliation_complete_incomplete_and_corrupt(self):
+        from v238_per_call_durability import _atomic_bytes, _atomic_json, sha256_bytes
+
+        raw = b'{"message":{"content":"{}"}}'
+
+        # Complete body + metadata are locally promoted without another POST.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner); call.begin_transport()
+                _atomic_bytes(call.call_dir / "response.body", raw)
+                _atomic_json(call.call_dir / "response_metadata.json", {
+                    "http_status": 200, "response_bytes": len(raw),
+                    "response_sha256": sha256_bytes(raw), "received_at": "test",
+                })
+            resumed = DurableV226Call(self.context(root, operation_id="COMPLETE_RESTART"), self.payload(), self.metadata())
+            self.assertEqual(resumed.prepare_request()["state"], "RESPONSE_DURABLE")
+            self.assertEqual(resumed.load_raw(), raw)
+
+        # Body without authoritative metadata is unknown and never retried.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner); call.begin_transport()
+                _atomic_bytes(call.call_dir / "response.body", raw)
+            resumed = DurableV226Call(self.context(root, operation_id="INCOMPLETE_RESTART"), self.payload(), self.metadata())
+            with self.assertRaises(DurableCallOutcomeUnknown):
+                resumed.prepare_request()
+            self.assertEqual(resumed.state(), "TRANSPORT_OUTCOME_UNKNOWN")
+
+        # Mismatched body/metadata are explicitly corrupt and fail closed.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata())
+            call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner); call.begin_transport()
+                _atomic_bytes(call.call_dir / "response.body", raw)
+                _atomic_json(call.call_dir / "response_metadata.json", {
+                    "http_status": 200, "response_bytes": len(raw),
+                    "response_sha256": "0" * 64, "received_at": "test",
+                })
+            resumed = DurableV226Call(self.context(root, operation_id="CORRUPT_RESTART"), self.payload(), self.metadata())
+            with self.assertRaisesRegex(DurableCallError, "CAPTURE_CORRUPT"):
+                resumed.prepare_request()
+            self.assertEqual(resumed.state(), "CORRUPT_CAPTURE")
 
 
 if __name__ == "__main__":

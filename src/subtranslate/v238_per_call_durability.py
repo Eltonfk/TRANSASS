@@ -12,18 +12,37 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
 
-STATES = {
-    "PLANNED", "RESERVED", "REQUEST_DURABLE", "TRANSPORT_IN_PROGRESS",
-    "RESPONSE_DURABLE", "PARSED_VALID", "PARSED_INVALID",
-    "CANCELLED_CONFIRMED", "TRANSPORT_FAILED_CONFIRMED",
-    "TRANSPORT_OUTCOME_UNKNOWN", "RESERVATION_FAILED",
+STATE_TRANSITIONS = {
+    "PLANNED": frozenset({"RESERVED", "RESERVATION_FAILED"}),
+    "RESERVED": frozenset({"REQUEST_DURABLE", "RESERVATION_FAILED"}),
+    "REQUEST_DURABLE": frozenset({"TRANSPORT_CLAIMED"}),
+    "TRANSPORT_CLAIMED": frozenset({"TRANSPORT_IN_PROGRESS", "TRANSPORT_OUTCOME_UNKNOWN", "CORRUPT_CAPTURE"}),
+    "TRANSPORT_IN_PROGRESS": frozenset({
+        "RESPONSE_DURABLE", "CANCELLED_CONFIRMED", "TRANSPORT_FAILED_CONFIRMED",
+        "TRANSPORT_OUTCOME_UNKNOWN", "CORRUPT_CAPTURE",
+    }),
+    "RESPONSE_DURABLE": frozenset({"PARSED_VALID", "PARSED_INVALID"}),
+    "PARSED_VALID": frozenset(),
+    "PARSED_INVALID": frozenset(),
+    "CANCELLED_CONFIRMED": frozenset(),
+    "TRANSPORT_FAILED_CONFIRMED": frozenset(),
+    "TRANSPORT_OUTCOME_UNKNOWN": frozenset(),
+    "CORRUPT_CAPTURE": frozenset(),
+    "RESERVATION_FAILED": frozenset(),
 }
-TERMINAL_STATES = {"PARSED_VALID", "PARSED_INVALID", "CANCELLED_CONFIRMED", "TRANSPORT_FAILED_CONFIRMED"}
+STATES = frozenset(STATE_TRANSITIONS)
+TERMINAL_STATES = frozenset({
+    "PARSED_VALID", "PARSED_INVALID", "CANCELLED_CONFIRMED",
+    "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN",
+    "CORRUPT_CAPTURE", "RESERVATION_FAILED",
+})
 ATTEMPT_TYPES = frozenset({"INITIAL", "RETRY"})
 TERMINAL_RESERVATION_STATES = frozenset({"RESERVATION_FAILED", "RESERVATION_RELEASED"})
 FAMILY_CONTRACT_FIELDS = (
@@ -187,8 +206,12 @@ class EpisodeBudgetLedger:
             raise DurableCallError("V238_DURABLE_ATTEMPT_TYPE_INVALID")
         if attempt_type == "INITIAL" and parent_attempt_id:
             raise DurableCallError("V238_INITIAL_ATTEMPT_HAS_PARENT")
+        if attempt_type == "INITIAL" and int(attempt_ordinal) != 1:
+            raise DurableCallError("V238_INITIAL_ATTEMPT_ORDINAL_MUST_BE_ONE")
         if attempt_type == "RETRY" and not parent_attempt_id:
             raise DurableCallError("V238_RETRY_PARENT_ATTEMPT_REQUIRED")
+        if attempt_type == "RETRY" and int(attempt_ordinal) <= 1:
+            raise DurableCallError("V238_RETRY_ATTEMPT_ORDINAL_INVALID")
         handle = self._locked()
         try:
             value = self._read_unlocked()
@@ -344,6 +367,10 @@ class DurableV226Call:
         if attempt_type == "INITIAL" and parent_attempt_id:
             raise DurableCallError("V238_INITIAL_ATTEMPT_HAS_PARENT")
         attempt_ordinal = int(metadata.get("attempt_ordinal", 1) or 1)
+        if attempt_type == "INITIAL" and attempt_ordinal != 1:
+            raise DurableCallError("V238_INITIAL_ATTEMPT_ORDINAL_MUST_BE_ONE")
+        if attempt_type == "RETRY" and attempt_ordinal <= 1:
+            raise DurableCallError("V238_RETRY_ATTEMPT_ORDINAL_INVALID")
         self.family_contract = _family_contract(context)
         logical_identity = {
             "family_contract_sha256": self.family_contract["family_contract_sha256"],
@@ -377,6 +404,8 @@ class DurableV226Call:
         os.chmod(root, 0o700)
         self.call_dir = root / "calls" / self.request_id
         self.state_path = self.call_dir / "state.json"
+        self.transport_lock_path = self.call_dir / "transport.lock"
+        self._transport_claim_handle = None
         limits = context.get("episode_budget_limits") or {
             "planned_initial_calls": context.get("planned_initial_calls", 0),
             "retry_reserve": context.get("retry_reserve", 0),
@@ -409,6 +438,13 @@ class DurableV226Call:
         if state not in STATES:
             raise DurableCallError("V238_DURABLE_CALL_UNKNOWN_STATE")
         value = self._state()
+        current = str(value["state"])
+        if state == current:
+            # Re-observing an already durable state is idempotent; it is not a
+            # graph transition and must not append conflicting history.
+            return value
+        if state not in STATE_TRANSITIONS[current]:
+            raise DurableCallError(f"V238_DURABLE_STATE_TRANSITION_PROHIBITED:{current}->{state}")
         value["state"] = state
         value.update(facts)
         value.setdefault("history", []).append({"state": state, "at": _now()})
@@ -448,9 +484,11 @@ class DurableV226Call:
         current = self._state()
         if current["state"] == "RESERVATION_FAILED":
             raise DurableCallError("V238_RESERVATION_FAILURE_IS_TERMINAL")
+        if current["state"] == "RESERVED":
+            return current
         if current["state"] in TERMINAL_STATES:
             return current
-        if current["state"] in {"REQUEST_DURABLE", "TRANSPORT_IN_PROGRESS", "RESPONSE_DURABLE", "PARSED_VALID", "PARSED_INVALID", "TRANSPORT_OUTCOME_UNKNOWN"}:
+        if current["state"] in {"REQUEST_DURABLE", "TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS", "RESPONSE_DURABLE", "PARSED_VALID", "PARSED_INVALID", "TRANSPORT_OUTCOME_UNKNOWN", "CORRUPT_CAPTURE"}:
             return current
         attempt_type = str(self.metadata["attempt_type"]).upper()
         reservation = self.budget_ledger.reserve(
@@ -494,10 +532,18 @@ class DurableV226Call:
 
     def prepare_request(self) -> dict[str, Any]:
         current = self.reserve()
+        if current["state"] in {"TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS"}:
+            return self._reconcile_abandoned_transport()
         if current["state"] in {"REQUEST_DURABLE", "RESPONSE_DURABLE"}:
             return current
-        if current["state"] in TERMINAL_STATES or current["state"] == "TRANSPORT_OUTCOME_UNKNOWN":
+        if current["state"] == "TRANSPORT_OUTCOME_UNKNOWN":
+            raise DurableCallOutcomeUnknown("V238_TRANSPORT_OUTCOME_UNKNOWN")
+        if current["state"] == "CORRUPT_CAPTURE":
+            raise DurableCallError("V238_DURABLE_RESPONSE_CAPTURE_CORRUPT")
+        if current["state"] in TERMINAL_STATES:
             return current
+        if current["state"] != "RESERVED":
+            raise DurableCallError("V238_REQUEST_PREPARATION_REQUIRES_RESERVED")
         _atomic_bytes(self.call_dir / "request_payload.json", self.payload_bytes)
         self._fault("after_request_body_fsync")
         _atomic_json(self.call_dir / "request_metadata.json", {**self.metadata, "request_id": self.request_id, "identity": self.identity, "request_sha256": self.payload_sha256})
@@ -511,6 +557,139 @@ class DurableV226Call:
             raise DurableCallError("V238_DURABLE_RESPONSE_MISSING")
         return raw.read_bytes()
 
+    def _open_transport_lock(self):
+        self.call_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.call_dir, 0o700)
+        self.transport_lock_path.touch(mode=0o600, exist_ok=True)
+        os.chmod(self.transport_lock_path, 0o600)
+        return self.transport_lock_path.open("r+")
+
+    def _acquire_transport_lock(self, *, timeout_seconds: float) -> Any:
+        handle = self._open_transport_lock()
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise DurableCallError("V238_EXCLUSIVE_TRANSPORT_CLAIM_BUSY")
+                time.sleep(0.01)
+
+    @staticmethod
+    def _release_transport_lock(handle: Any) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+    def _capture_facts(self) -> tuple[str, dict[str, Any] | None]:
+        body_path = self.call_dir / "response.body"
+        metadata_path = self.call_dir / "response_metadata.json"
+        body_exists = body_path.is_file()
+        metadata_exists = metadata_path.is_file()
+        if not body_exists and not metadata_exists:
+            return "ABSENT", None
+        if not body_exists or not metadata_exists:
+            return "INCOMPLETE", None
+        try:
+            raw = body_path.read_bytes()
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            status_code = int(metadata["http_status"])
+            expected_bytes = int(metadata["response_bytes"])
+            expected_sha = str(metadata["response_sha256"])
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return "CORRUPT", None
+        actual_sha = sha256_bytes(raw)
+        if expected_bytes != len(raw) or expected_sha != actual_sha:
+            return "CORRUPT", None
+        return "COMPLETE", {
+            "http_status": status_code,
+            "response_bytes": len(raw),
+            "response_sha256": actual_sha,
+            "response_durable_at": metadata.get("received_at") or _now(),
+        }
+
+    def _promote_capture(self, facts: Mapping[str, Any]) -> dict[str, Any]:
+        status_code = int(facts["http_status"])
+        state = "RESPONSE_DURABLE" if status_code == 200 else (
+            "CANCELLED_CONFIRMED" if status_code == 499 else "TRANSPORT_FAILED_CONFIRMED"
+        )
+        value = self._transition(state, **dict(facts), capture_reconciled=True)
+        self.budget_ledger.update_attempt(
+            self.request_id, state=value["state"], response_sha256=value.get("response_sha256"),
+            http_status=status_code,
+        )
+        return value
+
+    def _reconcile_capture_locked(self, *, incomplete_to_unknown: bool) -> dict[str, Any]:
+        current = self._state()
+        if current["state"] not in {"TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS"}:
+            return current
+        capture_status, facts = self._capture_facts()
+        if capture_status == "COMPLETE" and facts is not None:
+            return self._promote_capture(facts)
+        if capture_status == "CORRUPT":
+            value = self._transition("CORRUPT_CAPTURE", capture_reconciliation="BODY_METADATA_MISMATCH")
+            self.budget_ledger.update_attempt(self.request_id, state=value["state"])
+            raise DurableCallError("V238_DURABLE_RESPONSE_CAPTURE_CORRUPT")
+        if incomplete_to_unknown:
+            return self.mark_unknown(DurableCallOutcomeUnknown(
+                "V238_TRANSPORT_CAPTURE_INCOMPLETE" if capture_status == "INCOMPLETE" else "V238_TRANSPORT_OWNER_TERMINATED"
+            ))
+        return current
+
+    def _reconcile_abandoned_transport(self) -> dict[str, Any]:
+        # A live owner keeps this lock across state validation, POST, response
+        # capture, and durable promotion.  Only an abandoned owner permits a
+        # restart to classify an incomplete in-flight state as unknown.
+        handle = self._acquire_transport_lock(timeout_seconds=0.0)
+        try:
+            value = self._reconcile_capture_locked(incomplete_to_unknown=True)
+            if value.get("state") == "TRANSPORT_OUTCOME_UNKNOWN":
+                raise DurableCallOutcomeUnknown("V238_TRANSPORT_OUTCOME_UNKNOWN")
+            return value
+        finally:
+            self._release_transport_lock(handle)
+
+    @contextmanager
+    def exclusive_transport_claim(self):
+        timeout_seconds = float(self.context.get("transport_claim_timeout_seconds", 5.0))
+        handle = self._acquire_transport_lock(timeout_seconds=timeout_seconds)
+        self._transport_claim_handle = handle
+        owner = False
+        try:
+            current = self._reconcile_capture_locked(incomplete_to_unknown=True)
+            if current["state"] in {"RESPONSE_DURABLE", "PARSED_VALID", "PARSED_INVALID"}:
+                yield False
+                return
+            if current["state"] in TERMINAL_STATES:
+                raise DurableCallError("V238_DURABLE_CALL_TERMINAL_RECONCILIATION_REQUIRED:" + str(current["state"]))
+            if current["state"] != "REQUEST_DURABLE":
+                raise DurableCallError("V238_TRANSPORT_CLAIM_REQUIRES_REQUEST_DURABLE")
+            claim_token = sha256_bytes(canonical_bytes({
+                "physical_attempt_id": self.physical_attempt_id,
+                "operation_id": str(self.context["operation_id"]),
+                "pid": os.getpid(),
+            }))
+            value = self._transition(
+                "TRANSPORT_CLAIMED", transport_claim_token=claim_token,
+                transport_claimed_by_pid=os.getpid(), transport_claimed_at=_now(),
+            )
+            self.budget_ledger.update_attempt(self.request_id, state=value["state"])
+            owner = True
+            try:
+                yield True
+            except BaseException as exc:
+                current_state = self.state()
+                if current_state in {"TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS"}:
+                    reconciled = self._reconcile_capture_locked(incomplete_to_unknown=False)
+                    if reconciled.get("state") in {"TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS"}:
+                        self.mark_unknown(exc)
+                raise
+        finally:
+            self._transport_claim_handle = None
+            self._release_transport_lock(handle)
+
     def begin_transport(self) -> dict[str, Any]:
         current = self._state()
         if current["state"] == "TRANSPORT_IN_PROGRESS":
@@ -519,13 +698,20 @@ class DurableV226Call:
             raise DurableCallOutcomeUnknown("V238_TRANSPORT_OUTCOME_UNKNOWN")
         if current["state"] in TERMINAL_STATES or current["state"] == "RESPONSE_DURABLE":
             return current
-        if current["state"] != "REQUEST_DURABLE":
-            raise DurableCallError("V238_TRANSPORT_REQUIRES_REQUEST_DURABLE")
+        if self._transport_claim_handle is None:
+            raise DurableCallError("V238_TRANSPORT_REQUIRES_EXCLUSIVE_CLAIM")
+        if current["state"] != "TRANSPORT_CLAIMED":
+            raise DurableCallError("V238_TRANSPORT_REQUIRES_CLAIMED_STATE")
         value = self._transition("TRANSPORT_IN_PROGRESS", transport_started_at=_now())
+        self.budget_ledger.update_attempt(self.request_id, state=value["state"])
         self._fault("during_transport")
         return value
 
     def record_response(self, raw: bytes, *, status_code: int) -> dict[str, Any]:
+        if self._transport_claim_handle is None:
+            raise DurableCallError("V238_RESPONSE_CAPTURE_REQUIRES_EXCLUSIVE_CLAIM")
+        if self.state() != "TRANSPORT_IN_PROGRESS":
+            raise DurableCallError("V238_RESPONSE_CAPTURE_REQUIRES_TRANSPORT_IN_PROGRESS")
         self.call_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         _atomic_bytes(self.call_dir / "response.body", bytes(raw))
         self._fault("after_response_body_fsync")
@@ -544,6 +730,8 @@ class DurableV226Call:
         current = self._state()
         if current.get("state") == "TRANSPORT_OUTCOME_UNKNOWN":
             return current
+        if current.get("state") not in {"TRANSPORT_CLAIMED", "TRANSPORT_IN_PROGRESS"}:
+            raise DurableCallError("V238_UNKNOWN_OUTCOME_REQUIRES_ACTIVE_TRANSPORT_STATE")
         value = self._transition("TRANSPORT_OUTCOME_UNKNOWN", error=f"{type(exc).__name__}:{exc}"[:1000], outcome_unknown_at=_now())
         self.budget_ledger.update_attempt(self.request_id, state=value["state"], error=value.get("error"))
         handle = self.budget_ledger._locked()
@@ -590,4 +778,4 @@ class DurableV226Call:
         return value
 
 
-__all__ = ["DurableCallError", "DurableCallOutcomeUnknown", "DurableCallFault", "DurableV226Call", "EpisodeBudgetLedger", "STATES"]
+__all__ = ["DurableCallError", "DurableCallOutcomeUnknown", "DurableCallFault", "DurableV226Call", "EpisodeBudgetLedger", "STATE_TRANSITIONS", "STATES"]
