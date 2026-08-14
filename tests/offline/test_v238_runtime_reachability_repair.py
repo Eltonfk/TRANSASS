@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import ast
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pipeline_orchestrator import execute_pipeline_plan
 from v238_full_translation_stage import execute_v238_stage
 from v238_response_provider import DurableResponseProvider, ResponseProviderError
+from v238_base_materializer import CanonicalV226LiveMaterializer, BaseTranslationMaterializerError
+from v238_llama_policy import LlamaPolicyError, run_single_fallback_phase, review_suspect_qwen_outputs
 
 
 ASS = """[Script Info]
@@ -171,6 +176,79 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
                 context={"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "configured", "linguistic_unit_ids": {0: "unit-a", 1: "unit-b"}},
             )
             self.assertEqual(result["component_calls"]["provider_requests"], 2)
+
+    def test_full_stage_metrics_are_non_null_and_atomic(self):
+        with tempfile.TemporaryDirectory(prefix="v238-metrics-") as raw:
+            root = Path(raw)
+            source, output = self._source(root), root / "final.ass"
+            provider = DurableResponseProvider("TEST_FAKE")
+            result = execute_v238_stage(source, output, context={"response_provider": provider, "execution_mode": "TEST_FAKE", "model": "configured"})
+            for key in ("metrics_before", "metrics_after", "metrics_delta", "base_materializer_metrics", "v238_metrics", "aggregated_metrics"):
+                self.assertIsNotNone(result[key])
+            self.assertTrue(output.is_file())
+            self.assertFalse(any(root.glob(".*.ass.*")))
+            self.assertIsInstance(result["aggregated_metrics"]["v226_model_generation_attempts"], int)
+
+    def test_transitive_runtime_modules_are_in_docker_allowlist(self):
+        root = Path(__file__).resolve().parents[2]
+        source_root = root / "src" / "subtranslate"
+        docker = (root / "deploy" / "Dockerfile").read_text(encoding="utf-8")
+        copied = set(re.findall(r"src/subtranslate/([A-Za-z0-9_]+\.py)", docker))
+        roots = {"app.py", "pipeline_registry.py", "pipeline_orchestrator.py", "pipeline_lineage.py", "production_v2_3_8_adapter.py", "v238_full_translation_stage.py", "v238_base_materializer.py", "v238_response_provider.py", "production_v2_3_0_adapter.py", "pipeline_v2_3_0.py", "production_v2_2_6_adapter.py", "production_v2_2_5_adapter.py", "pipeline_v2_1_3.py", "production_v2_1_3_adapter.py", "v238_llama_policy.py"}
+        seen, queue = set(), list(roots)
+        while queue:
+            name = queue.pop()
+            if name in seen or not (source_root / name).is_file():
+                continue
+            seen.add(name)
+            tree = ast.parse((source_root / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                target = None
+                if isinstance(node, ast.Import):
+                    target = node.names[0].name.split(".")[0] + ".py"
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    target = node.module.split(".")[0] + ".py"
+                if target and (source_root / target).is_file() and target not in seen:
+                    queue.append(target)
+        missing = sorted(name for name in seen if name not in copied and name not in {"__init__.py"})
+        self.assertEqual(missing, [], f"Docker runtime import closure missing: {missing}")
+
+    def test_canonical_v226_checkpoint_reuse_is_exact(self):
+        with tempfile.TemporaryDirectory(prefix="v238-checkpoint-") as raw:
+            root = Path(raw)
+            source, first, second = self._source(root), root / "base1.ass", root / "base2.ass"
+            calls = {"count": 0}
+            def fake_v226(src, dst, **kwargs):
+                calls["count"] += 1
+                Path(dst).write_bytes(Path(src).read_bytes())
+                return {"calls": 1, "retry_calls": 0, "elapsed_client_seconds": 0.1}
+            materializer = CanonicalV226LiveMaterializer()
+            context = {"checkpoint_root": root / "state", "operation_id": "op-1", "episode_id": "E99", "model": "configured", "candidate_commit": "candidate"}
+            with patch("v238_base_materializer.translate_subtitle_file_v2_2_6", fake_v226):
+                created = materializer.materialize(source, first, context=context)
+                reused = materializer.materialize(source, second, context=context)
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual(created["checkpoint_created"], 1)
+            self.assertEqual(reused["checkpoint_reused"], 1)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            bad = dict(context, episode_id="OTHER")
+            with self.assertRaises(BaseTranslationMaterializerError):
+                materializer.materialize(source, root / "bad.ass", context=bad)
+
+    def test_selective_llama_policy_is_single_phase_and_nonpublishable(self):
+        calls = []
+        ledger = [
+            {"canonical_unit_id": "u2", "status": "BLOCKED", "reason_code": "PRIMARY_SCHEMA_REJECTED", "episode_id": "e", "source_object": "s"},
+            {"canonical_unit_id": "u1", "status": "SUSPECT", "reason_code": "DETERMINISTIC_SUSPECT_FLAG", "episode_id": "e", "source_object": "s"},
+            {"canonical_unit_id": "u1", "status": "BLOCKED", "reason_code": "PRIMARY_SCHEMA_REJECTED", "episode_id": "e", "source_object": "s"},
+        ]
+        phase = run_single_fallback_phase(ledger, lambda request: calls.append(request) or {"text": "candidate"}, model_tag="llama", model_digest="digest", batch_size=1)
+        self.assertEqual(phase["phase_count"], 1)
+        self.assertEqual(phase["calls"], 2)
+        self.assertTrue(all(row["state"] == "FALLBACK_CANDIDATE_ONLY" and not row["publication_authorization"] for row in phase["results"]))
+        with self.assertRaises(LlamaPolicyError):
+            run_single_fallback_phase([{"canonical_unit_id": "bad", "status": "BLOCKED"}], lambda _: {}, model_tag="llama", model_digest="digest")
+        self.assertEqual(review_suspect_qwen_outputs([{"canonical_unit_id": "u1", "status": "SUSPECT", "role": "PRIMARY"}], lambda _: {"verdict": "REVIEWER_NO_OBJECTION"})[0]["advisory"], True)
 
 
 if __name__ == "__main__":

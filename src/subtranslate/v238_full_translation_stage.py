@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import os
 import re
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -58,6 +62,102 @@ def _metric_delta(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[s
         elif old != new:
             delta[key] = {"before": old, "after": new}
     return delta
+
+
+def _sync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _sync_dir(path: Path) -> None:
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_stage_write(candidate: pysubs2.SSAFile, output_path: Path, source_path: Path, context: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a sibling file before making it authoritative."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{output_path.name}.", suffix=output_path.suffix, dir=str(output_path.parent))
+    os.close(fd)
+    temporary = Path(raw)
+    try:
+        candidate.save(str(temporary), encoding="utf-8")
+        _sync_file(temporary)
+        validation = validate_v238_candidate(source_path, temporary)
+        os.replace(temporary, output_path)
+        _sync_dir(output_path.parent)
+        marker_root = context.get("stage_completion_root")
+        if marker_root:
+            marker_dir = Path(marker_root)
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            marker = marker_dir / f"{output_path.name}.complete.json"
+            marker.write_text(json.dumps({"state": "COMPLETE", "sha256": _sha256(output_path), "validation": validation}, sort_keys=True) + "\n", encoding="utf-8")
+            _sync_file(marker)
+            _sync_dir(marker_dir)
+        return validation
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+_FULL_METRIC_KEYS = (
+    "v226_primary_requests", "v226_physical_attempts", "v226_model_generation_attempts",
+    "v226_successful_generations", "v226_retries", "v226_transport_failures",
+    "v226_schema_failures", "v226_validation_failures", "v226_prompt_tokens",
+    "v226_completion_tokens", "v226_elapsed_seconds", "v238_semantic_requests",
+    "v238_model_attempts", "v238_replay_reads", "v238_deterministic_counters",
+    "checkpoint_created", "checkpoint_reused", "total_elapsed_seconds",
+)
+
+
+def _full_metric_map(base: Mapping[str, Any], provider_delta: Mapping[str, Any], counters: Mapping[str, Any], elapsed: float) -> dict[str, int | float]:
+    base = base if isinstance(base, Mapping) else {}
+    provider_delta = provider_delta if isinstance(provider_delta, Mapping) else {}
+    result: dict[str, int | float] = {key: 0 for key in _FULL_METRIC_KEYS}
+    result.update({
+        "v226_primary_requests": int(base.get("primary_requests", base.get("provider_requests", base.get("calls", 0))) or 0),
+        "v226_physical_attempts": int(base.get("physical_attempts", base.get("physical_client_calls", base.get("calls", 0))) or 0),
+        "v226_model_generation_attempts": int(base.get("model_generation_attempts", base.get("model_generation_calls", base.get("ollama_calls", 0))) or 0),
+        "v226_successful_generations": int(base.get("successful_generations", base.get("resolved", 0)) or 0),
+        "v226_retries": int(base.get("retries", base.get("retry_calls", 0)) or 0),
+        "v226_transport_failures": int(base.get("transport_failures", 0) or 0),
+        "v226_schema_failures": int(base.get("schema_failures", 0) or 0),
+        "v226_validation_failures": int(base.get("validation_failures", base.get("failed", 0)) or 0),
+        "v226_prompt_tokens": int(base.get("prompt_tokens", 0) or 0),
+        "v226_completion_tokens": int(base.get("completion_tokens", 0) or 0),
+        "v226_elapsed_seconds": float(base.get("elapsed_seconds", base.get("elapsed_client_seconds", 0.0)) or 0.0),
+        "v238_semantic_requests": int(provider_delta.get("provider_requests", 0) or 0),
+        "v238_model_attempts": int(provider_delta.get("model_generation_calls", 0) or 0),
+        "v238_replay_reads": int(provider_delta.get("offline_replay_reads", 0) or 0),
+        "v238_deterministic_counters": int(sum(int(value) for value in counters.values() if isinstance(value, (int, float)))),
+        "total_elapsed_seconds": float(elapsed),
+    })
+    return result
+
+
+def _base_metric_map(summary: Mapping[str, Any] | None) -> dict[str, int | float]:
+    """Normalize both the live V226 summary and grouped replay summary."""
+    summary = summary if isinstance(summary, Mapping) else {}
+    def number(*keys: str) -> int | float:
+        for key in keys:
+            if isinstance(summary.get(key), (int, float)):
+                return summary[key]
+        return 0
+    return {
+        "primary_requests": int(number("primary_requests", "provider_requests", "calls", "valid_attempts")),
+        "physical_attempts": int(number("physical_attempts", "physical_client_calls", "calls", "valid_attempts")),
+        "model_generation_attempts": int(number("model_generation_attempts", "model_generation_calls", "ollama_calls", "calls")),
+        "successful_generations": int(number("successful_generations", "resolved", "valid_attempts")),
+        "retries": int(number("retries", "retry_calls", "actual_retry_ollama_calls")),
+        "transport_failures": int(number("transport_failures")),
+        "schema_failures": int(number("schema_failures")),
+        "validation_failures": int(number("validation_failures", "failed")),
+        "prompt_tokens": int(number("prompt_tokens")),
+        "completion_tokens": int(number("completion_tokens")),
+        "elapsed_seconds": float(number("elapsed_seconds", "elapsed_client_seconds")),
+    }
 
 
 def _plain(value: str) -> str:
@@ -335,19 +435,19 @@ def execute_v238_stage(
             # Base V226 already supplies linguistic materialization. V238
             # transforms are deterministic; no artificial provider call.
             target_line.text, _details = _render_event(source_text, target_line.text or "", event_id=index, provider=provider, model=model, counters=counters, ownership_cache=ownership_cache)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    candidate.save(str(output_path), encoding="utf-8")
-    validation = validate_v238_candidate(source_path, output_path)
+    started = time.perf_counter()
+    validation = _atomic_stage_write(candidate, output_path, source_path, context)
     provider_metrics = copy.deepcopy(getattr(provider, "metrics", {}))
     metrics_delta = _metric_delta(metrics_before, provider_metrics)
     base_summary = context.get("base_materializer_summary")
-    base_metrics = {}
+    base_metrics: dict[str, Any] = _base_metric_map(base_summary)
     if isinstance(base_summary, Mapping) and isinstance(base_summary.get("metrics"), Mapping):
-        base_metrics = copy.deepcopy(dict(base_summary["metrics"]))
-    aggregate_metrics = dict(metrics_delta)
-    for key, value in base_metrics.items():
-        if isinstance(value, (int, float)):
-            aggregate_metrics[key] = int(aggregate_metrics.get(key, 0)) + int(value)
+        base_metrics.update(_base_metric_map(base_summary["metrics"]))
+    v238_metrics = {key: value for key, value in metrics_delta.items() if isinstance(value, (int, float))}
+    aggregated_metrics = _full_metric_map(base_metrics, metrics_delta, counters, time.perf_counter() - started)
+    if isinstance(base_summary, Mapping):
+        aggregated_metrics["checkpoint_created"] = int(base_summary.get("checkpoint_created", 0) or 0)
+        aggregated_metrics["checkpoint_reused"] = int(base_summary.get("checkpoint_reused", 0) or 0)
     return {
         **validation,
         "response_mode": mode,
@@ -359,9 +459,11 @@ def execute_v238_stage(
         "metrics_before": metrics_before,
         "metrics_after": provider_metrics,
         "metrics_delta": metrics_delta,
-        "aggregated_metrics": aggregate_metrics,
-        "model_calls": aggregate_metrics.get("model_generation_calls", 0),
-        "network_calls": aggregate_metrics.get("application_network_calls", 0),
+        "base_materializer_metrics": base_metrics,
+        "v238_metrics": v238_metrics,
+        "aggregated_metrics": aggregated_metrics,
+        "model_calls": int(aggregated_metrics.get("v226_model_generation_attempts", 0)) + int(aggregated_metrics.get("v238_model_attempts", 0)),
+        "network_calls": int(metrics_delta.get("application_network_calls", 0) or 0),
     }
 
 
