@@ -99,6 +99,8 @@ class Config:
     context_max_chars: int = 2600
     scene_gap_ms: int = 6000
     max_retries: int = 2
+    operation_retry_transport_cap: int | None = None
+    per_event_retry_transport_cap: int | None = None
     series_title: str = ""
     episode_title: str = ""
     glossary_path: str = ""
@@ -1439,7 +1441,9 @@ class Client:
                     "model": self.model,
                     "model_digest": getattr(self.config, "model_digest", None),
                     "timeout_seconds": self.config.timeout_seconds,
-                    "configuration": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive},
+                    "configuration": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive,
+                                       "operation_retry_transport_cap": self.config.operation_retry_transport_cap,
+                                       "per_event_retry_transport_cap": self.config.per_event_retry_transport_cap},
                 },
                 operation_budget=self.config.operation_budget,
             )
@@ -1454,10 +1458,20 @@ class Client:
         try:
             body = None
             derived_body = False
+            subset_reused = False
+            subset_data = None
             if durable_call is not None:
                 state = durable_call.prepare_request()
                 observation["durable_state_before_transport"] = state.get("state")
-                if state.get("state") in {"PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "RESPONSE_DURABLE"}:
+                if state.get("state") in {"VALID_SUBSET_RECORDED", "RETRIES_PENDING", "RETRY_RESPONSE_DURABLE"}:
+                    subset_data = durable_call.load_valid_subset()
+                    body = {"translations": list(subset_data["subset"].get("rows", []))}
+                    subset_reused = True
+                    observation.update({"reused_valid_subset": True, "reused_durable_response": True, "physical_transport": False,
+                                        "valid_subset_ids": subset_data["subset"].get("valid_ids", []),
+                                        "unresolved_ids": subset_data["subset"].get("unresolved_ids", []),
+                                        "model_call_delta": 0, "retry_delta": 0})
+                elif state.get("state") in {"PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "RESPONSE_DURABLE"}:
                     derived_body = state.get("state") in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"}
                     raw_body = durable_call.load_derived_response() if state.get("state") in {"DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID"} else durable_call.load_raw()
                     body = json.loads(raw_body.decode("utf-8"))
@@ -1483,6 +1497,10 @@ class Client:
                             durable_call.begin_transport()
                             observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
                             durable_call._fault("before_post")
+                            durable_call.budget_ledger.assert_retry_cap(
+                                unresolved_ids=[int(item) for item in ids],
+                                attempt_id=durable_call.request_id,
+                            )
                             response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
                             durable_call._fault("after_response_received_before_capture")
                             status_code = int(response.status_code)
@@ -1508,7 +1526,7 @@ class Client:
                 observation["http_status"] = response.status_code
                 response.raise_for_status()
                 body = response.json()
-            content = json.dumps(body, ensure_ascii=False) if derived_body else (body.get("message") or {}).get("content")
+            content = json.dumps(body, ensure_ascii=False) if (derived_body or subset_reused) else (body.get("message") or {}).get("content")
             observation["content_chars"] = len(content) if isinstance(content, str) else None
             observation["content_sha256"] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
             if self.config.diagnostic_capture and isinstance(content, str):
@@ -1525,11 +1543,11 @@ class Client:
                 if key in body: observation[key + "_seconds"] = body[key] / 1_000_000_000
             if durable_call is not None:
                 durable_call._fault("before_parse")
-            value = body if derived_body else (strict_json(content) if self.config.strict_json else json.loads(content))
+            value = body if (derived_body or subset_reused) else (strict_json(content) if self.config.strict_json else json.loads(content))
             normalization_policy = str((durable_context or {}).get("response_normalization_policy") or "") if durable_context else ""
             normalized = False
-            if normalization_policy == "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
-                from v238_response_normalization import NormalizationRejected, POLICY, project_extra_property_response
+            if normalization_policy in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"} and not subset_reused:
+                from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, project_extra_property_response, project_multi_kind_response
                 if durable_call is None:
                     raise NormalizationRejected("V238_NORMALIZATION_REQUIRES_DURABLE_CONTEXT")
                 found_before, issues_before = validate_response(value, events)
@@ -1561,9 +1579,8 @@ class Client:
                         int(event_id): ("id", "segments") if is_multi_speaker(event) else ("id", "text")
                         for event_id, event in events.items()
                     }
-                    projected, audit = project_extra_property_response(
-                        value, sorted(events), expected_item_keys=expected_item_keys,
-                    )
+                    projector = project_multi_kind_response if normalization_policy == POLICY_V2 else project_extra_property_response
+                    projected, audit = projector(value, sorted(events), expected_item_keys=expected_item_keys)
                     projected_found, projected_issues = validate_response(projected, events)
                     if projected_issues:
                         raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(projected_issues))
@@ -1620,8 +1637,10 @@ class Client:
                         observation["physical_transport"] = False
                         observation["model_call_delta"] = 0
                         observation["retry_delta"] = 0
-                elif durable_state not in {"DERIVED_PARSED_VALID"}:
+                elif durable_state not in {"DERIVED_PARSED_VALID", "VALID_SUBSET_RECORDED", "RETRIES_PENDING", "RETRY_RESPONSE_DURABLE", "BATCH_COMPLETE"}:
                     durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
+                    if issues and found and str((durable_context or {}).get("valid_subset_policy") or "") == "V238_VALID_SUBSET_V1":
+                        durable_call.record_valid_subset(found, sorted(events), sorted(set(events) - set(found)))
                 observation["durable_state"] = durable_call.state()
             observation["elapsed_client_seconds"] = time.perf_counter() - started
             observation["duration_seconds"] = observation["elapsed_client_seconds"]

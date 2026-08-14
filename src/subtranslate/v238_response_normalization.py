@@ -17,6 +17,7 @@ from v238_per_call_durability import canonical_bytes, sha256_bytes
 
 
 POLICY = "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1"
+POLICY_V2 = "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"
 
 
 class NormalizationRejected(ValueError):
@@ -134,4 +135,67 @@ def project_extra_property_response(
     return normalized, audit
 
 
-__all__ = ["NormalizationRejected", "POLICY", "project_extra_property_response"]
+def project_multi_kind_response(
+    value: Any,
+    expected_ids: Sequence[int],
+    *,
+    expected_item_keys: Mapping[int, Sequence[str]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Project the narrowly proven TEXT defect across multiple rows.
+
+    Every canonical value must already be valid.  The only tolerated defect
+    is an item-level string ``kind`` property; no other value is changed.
+    """
+    if not isinstance(value, dict) or set(value) != {"translations"}:
+        raise NormalizationRejected("NORMALIZATION_ROOT_STRUCTURE_INVALID")
+    rows = value.get("translations")
+    expected = [int(item_id) for item_id in expected_ids]
+    if not isinstance(rows, list) or len(rows) != len(expected) or len(set(expected)) != len(expected):
+        raise NormalizationRejected("NORMALIZATION_CARDINALITY_INVALID")
+    expected_set = set(expected)
+    seen: set[int] = set()
+    offenders: list[int] = []
+    dropped: dict[str, str] = {}
+    projected: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            raise NormalizationRejected("NORMALIZATION_ITEM_NOT_OBJECT")
+        item_id = item.get("id")
+        if isinstance(item_id, bool) or not isinstance(item_id, int):
+            raise NormalizationRejected("NORMALIZATION_ID_TYPE_INVALID")
+        if item_id not in expected_set:
+            raise NormalizationRejected("NORMALIZATION_UNKNOWN_ID")
+        if item_id in seen:
+            raise NormalizationRejected("NORMALIZATION_DUPLICATE_ID")
+        seen.add(item_id)
+        required = _item_contract(item_id, expected_item_keys)
+        _validate_scalar_fields(item, required)
+        extras = set(item) - required
+        if extras and (extras != {"kind"} or not isinstance(item.get("kind"), str)):
+            raise NormalizationRejected("NORMALIZATION_V2_ONLY_KIND_EXTRA_ALLOWED")
+        if extras:
+            offenders.append(item_id)
+            dropped[str(item_id)] = sha256_bytes(canonical_bytes(item["kind"]))
+        projected.append({key: item[key] for key in sorted(required)})
+    if seen != expected_set:
+        raise NormalizationRejected("NORMALIZATION_MISSING_ID")
+    normalized = {"translations": projected}
+    mode = "NONE" if not offenders else ("V1_COMPAT_SINGLE" if len(offenders) == 1 else "V2_MULTI_KIND")
+    audit = {
+        "policy": POLICY_V2,
+        "mode": mode,
+        "raw_schema_status": "VALID" if not offenders else "INVALID_EXTRA_PROPERTY",
+        "derived_schema_status": "VALID_NO_PROJECTION_REQUIRED" if not offenders else "VALID_AFTER_DETERMINISTIC_PROJECTION",
+        "expected_count": len(expected), "returned_count": len(rows),
+        "offending_item_count": len(offenders),
+        "offending_item_identity_hashes": [hashlib.sha256(str(item_id).encode("ascii")).hexdigest() for item_id in offenders],
+        "extra_property_count": len(offenders),
+        "extra_property_name_hashes": [hashlib.sha256(b"kind").hexdigest()] if offenders else [],
+        "dropped_value_hashes": dropped,
+        "raw_id_set_sha256": sha256_bytes(canonical_bytes(sorted(seen))),
+        "normalized_response_sha256": sha256_bytes(canonical_bytes(normalized)),
+    }
+    return normalized, audit
+
+
+__all__ = ["NormalizationRejected", "POLICY", "POLICY_V2", "project_extra_property_response", "project_multi_kind_response"]

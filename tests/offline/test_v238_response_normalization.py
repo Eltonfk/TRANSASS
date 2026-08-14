@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from v238_per_call_durability import DurableCallError, DurableCallFault, DurableV226Call
-from v238_response_normalization import NormalizationRejected, POLICY, project_extra_property_response
+from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, project_extra_property_response, project_multi_kind_response
 
 
 class ResponseNormalizationTests(unittest.TestCase):
@@ -71,6 +71,62 @@ class ResponseNormalizationTests(unittest.TestCase):
         second, audit_second = project_extra_property_response(first, range(1, 9))
         self.assertEqual(first, second)
         self.assertEqual(audit_first["normalized_response_sha256"], audit_second["normalized_response_sha256"])
+
+    def test_v2_projects_multiple_string_kind_extras_only(self):
+        value = self.value()
+        value["translations"][1]["kind"] = "dialogue"
+        value["translations"][5]["kind"] = "dialogue"
+        projected, audit = project_multi_kind_response(value, range(1, 9))
+        self.assertEqual(audit["policy"], POLICY_V2)
+        self.assertEqual(audit["mode"], "V2_MULTI_KIND")
+        self.assertEqual(audit["offending_item_count"], 2)
+        self.assertTrue(all(set(row) == {"id", "text"} for row in projected["translations"]))
+        self.assertEqual([row["text"] for row in projected["translations"]], ["ok"] * 8)
+
+    def test_v2_rejects_non_kind_or_non_string_extras(self):
+        value = self.value()
+        value["translations"][0]["kind"] = 1
+        with self.assertRaises(NormalizationRejected):
+            project_multi_kind_response(value, range(1, 9))
+
+    def test_valid_subset_is_consumed_by_client_restart_without_post(self):
+        from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {**self.context(root), "valid_subset_policy": "V238_VALID_SUBSET_V1",
+                       "episode_budget_limits": {"planned_initial_calls": 1, "retry_reserve": 2, "physical_ceiling": 3}}
+            context.pop("response_normalization_policy", None)
+            config = Config("http://ollama.invalid", model="qwen3.5:9b", strict_json=True)
+            config.model_digest = context["model_digest"]
+            config.durable_context = context
+            config.durable_attempt_contract = {"attempt_type": "INITIAL", "logical_batch_id": "subset-batch", "attempt_ordinal": 1, "parent_attempt_id": None, "batch_index": 0}
+            events = {}
+            units = []
+            for item_id in (1, 2, 3):
+                event = Event(item_id, 0, 0, 0, 1000, "Default", "", 0, 0, 0, "", "hello", "hello", "hello", [CleanSegment(0, "hello", "hello")], [], [], False, "MAIN_DIALOGUE")
+                events[item_id] = event
+                units.append(Unit(f"unit-{item_id}", [event]))
+            contexts = {item_id: {"previous": [], "next": []} for item_id in events}
+            class Response:
+                status_code = 200
+                content = b'{"message":{"content":"{\\"translations\\":[{\\"id\\":1,\\"text\\":\\"oi\\"},{\\"id\\":2,\\"text\\":\\"tchau\\"}]}"}}'
+            posts = []
+            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *a, **k: posts.append(1) or Response()):
+                first = Client(config, [], {}, model="qwen3.5:9b")
+                found, issues, _ = first.call(units, events, contexts)
+                second = Client(config, [], {}, model="qwen3.5:9b")
+                found_again, issues_again, observation = second.call(units, events, contexts)
+            self.assertEqual(posts, [1])
+            self.assertEqual(set(found), {1, 2})
+            self.assertEqual(set(found_again), {1, 2})
+            self.assertTrue(any("ids ausentes" in issue for issue in issues_again))
+            self.assertTrue(observation["reused_valid_subset"])
+        value = self.value()
+        value["translations"][0]["kind"] = "dialogue"
+        value["translations"][0]["other"] = "x"
+        with self.assertRaises(NormalizationRejected):
+            project_multi_kind_response(value, range(1, 9))
 
     def context(self, root: Path, **overrides):
         data = {

@@ -47,12 +47,12 @@ class PerCallDurabilityTests(unittest.TestCase):
     def payload(self, number=1):
         return {"model": "qwen3.5:9b", "messages": [{"role": "user", "content": f"unit-{number}"}], "stream": False}
 
-    def metadata(self, number=1, phase="initial", *, attempt_type="INITIAL", parent_attempt_id=None, attempt_ordinal=1):
+    def metadata(self, number=1, phase="initial", *, attempt_type="INITIAL", parent_attempt_id=None, attempt_ordinal=1, unit_ids=None):
         return {
             "phase": phase, "attempt_type": attempt_type,
             "logical_batch_id": f"batch-{number}", "batch_index": number,
             "attempt_ordinal": attempt_ordinal, "parent_attempt_id": parent_attempt_id,
-            "unit_ids": [number], "unit_membership_sha256": str(number),
+            "unit_ids": list(unit_ids if unit_ids is not None else [number]), "unit_membership_sha256": str(number),
         }
 
     def install_attempt(self, config, number=1, *, attempt_type="INITIAL", parent_attempt_id=None, attempt_ordinal=1):
@@ -249,6 +249,26 @@ class PerCallDurabilityTests(unittest.TestCase):
             snapshot = call.budget_ledger.snapshot()
             self.assertEqual(snapshot["initial_consumed"], 1)
             self.assertEqual(snapshot["retry_consumed"], 0)
+
+    def test_persistent_retry_caps_block_before_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, episode_budget_limits={
+                "planned_initial_calls": 1, "retry_reserve": 9, "physical_ceiling": 10,
+                "operation_retry_transport_cap": 2, "per_event_retry_transport_cap": 1,
+            })
+            initial = DurableV226Call(context, self.payload(1), self.metadata(1))
+            initial.reserve()
+            retry_one = DurableV226Call(context, self.payload(2), self.metadata(2, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[1]))
+            retry_one.reserve()
+            with self.assertRaisesRegex(DurableCallError, "PER_EVENT_RETRY_TRANSPORT_CAP"):
+                DurableV226Call(context, self.payload(3), self.metadata(3, phase="retry_local", attempt_type="RETRY", parent_attempt_id=retry_one.physical_attempt_id, attempt_ordinal=3, unit_ids=[1])).reserve()
+            retry_two = DurableV226Call(context, self.payload(4), self.metadata(4, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[2]))
+            retry_two.reserve()
+            with self.assertRaisesRegex(DurableCallError, "OPERATION_RETRY_TRANSPORT_CAP"):
+                DurableV226Call(context, self.payload(5), self.metadata(5, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[3])).reserve()
+            snapshot = initial.budget_ledger.snapshot()
+            self.assertEqual(snapshot["retry_consumed"], 2)
 
     def test_missing_or_unknown_attempt_type_fails_before_transport(self):
         with tempfile.TemporaryDirectory() as directory:

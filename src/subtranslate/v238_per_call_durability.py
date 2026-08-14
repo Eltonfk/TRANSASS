@@ -30,9 +30,13 @@ STATE_TRANSITIONS = {
     }),
     "RESPONSE_DURABLE": frozenset({"PARSED_VALID", "PARSED_INVALID"}),
     "PARSED_VALID": frozenset(),
-    "PARSED_INVALID": frozenset({"DERIVED_NORMALIZATION_RECORDED"}),
+    "PARSED_INVALID": frozenset({"DERIVED_NORMALIZATION_RECORDED", "VALID_SUBSET_RECORDED"}),
+    "VALID_SUBSET_RECORDED": frozenset({"RETRIES_PENDING", "BATCH_COMPLETE"}),
+    "RETRIES_PENDING": frozenset({"RETRY_RESPONSE_DURABLE", "BATCH_COMPLETE"}),
+    "RETRY_RESPONSE_DURABLE": frozenset({"RETRIES_PENDING", "BATCH_COMPLETE"}),
     "DERIVED_NORMALIZATION_RECORDED": frozenset({"DERIVED_PARSED_VALID"}),
     "DERIVED_PARSED_VALID": frozenset(),
+    "BATCH_COMPLETE": frozenset(),
     "CANCELLED_CONFIRMED": frozenset(),
     "TRANSPORT_FAILED_CONFIRMED": frozenset(),
     "TRANSPORT_OUTCOME_UNKNOWN": frozenset(),
@@ -41,7 +45,7 @@ STATE_TRANSITIONS = {
 }
 STATES = frozenset(STATE_TRANSITIONS)
 TERMINAL_STATES = frozenset({
-    "PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "CANCELLED_CONFIRMED",
+    "PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "VALID_SUBSET_RECORDED", "BATCH_COMPLETE", "CANCELLED_CONFIRMED",
     "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN",
     "CORRUPT_CAPTURE", "RESERVATION_FAILED",
 })
@@ -148,6 +152,8 @@ class EpisodeBudgetLedger:
             "planned_initial_calls": int(limits.get("planned_initial_calls", 0) or 0),
             "retry_reserve": int(limits.get("retry_reserve", 0) or 0),
             "physical_ceiling": int(limits.get("physical_ceiling", 0) or 0),
+            "operation_retry_transport_cap": (None if limits.get("operation_retry_transport_cap") is None else int(limits["operation_retry_transport_cap"])),
+            "per_event_retry_transport_cap": (None if limits.get("per_event_retry_transport_cap") is None else int(limits["per_event_retry_transport_cap"])),
         }
 
     def _initial(self) -> dict[str, Any]:
@@ -178,7 +184,11 @@ class EpisodeBudgetLedger:
         if value.get("family_contract") != self.family_contract or str(value.get("family_contract_sha256")) != self.family_contract_sha256:
             raise DurableCallError("V238_EPISODE_FAMILY_CONTRACT_MISMATCH")
         for key, expected in self.limits.items():
-            if int(value.get(key, expected)) != expected:
+            actual = value.get(key, expected)
+            if expected is None:
+                if actual is not None:
+                    raise DurableCallError("V238_EPISODE_BUDGET_LIMIT_MISMATCH")
+            elif int(actual) != expected:
                 raise DurableCallError("V238_EPISODE_BUDGET_LIMIT_MISMATCH")
         return value
 
@@ -203,7 +213,7 @@ class EpisodeBudgetLedger:
                 logical_batch_id: str, request_payload_sha256: str,
                 model_tag: str, model_digest: str | None, phase: str,
                 attempt_type: str, attempt_ordinal: int,
-                parent_attempt_id: str | None) -> dict[str, Any]:
+                parent_attempt_id: str | None, unresolved_ids: list[int] | None = None) -> dict[str, Any]:
         if attempt_type not in ATTEMPT_TYPES:
             raise DurableCallError("V238_DURABLE_ATTEMPT_TYPE_INVALID")
         if attempt_type == "INITIAL" and parent_attempt_id:
@@ -249,6 +259,21 @@ class EpisodeBudgetLedger:
                 raise DurableCallError("V238_EPISODE_INITIAL_ALLOCATION_EXHAUSTED")
             if retry and int(value["retry_consumed"]) >= int(value.get("retry_reserve", 0)):
                 raise DurableCallError("V238_EPISODE_RETRY_RESERVE_EXHAUSTED")
+            unresolved = sorted({int(item) for item in (unresolved_ids or [])})
+            if retry:
+                operation_cap = value.get("operation_retry_transport_cap")
+                active_retries = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") != "RESERVATION_FAILED"]
+                if operation_cap is not None and len(active_retries) >= int(operation_cap):
+                    raise DurableCallError("V238_OPERATION_RETRY_TRANSPORT_CAP_REACHED")
+                event_cap = value.get("per_event_retry_transport_cap")
+                if event_cap is not None:
+                    for event_id in unresolved:
+                        used_for_event = sum(
+                            event_id in {int(value) for value in item.get("unresolved_ids", [])}
+                            for item in active_retries
+                        )
+                        if used_for_event >= int(event_cap):
+                            raise DurableCallError("V238_PER_EVENT_RETRY_TRANSPORT_CAP_REACHED")
             if retry:
                 parent = next((item for item in value["reservations"] if item.get("physical_attempt_id") == parent_attempt_id), None)
                 if parent is None:
@@ -271,6 +296,7 @@ class EpisodeBudgetLedger:
                 "reserved_at": _now(),
                 "state": "RESERVED",
                 "operation_budget_state": "PENDING",
+                "unresolved_ids": unresolved,
             }
             value["reservations"].append(row)
             value["retry_consumed" if retry else "initial_consumed"] += 1
@@ -299,6 +325,26 @@ class EpisodeBudgetLedger:
                 if row.get("physical_attempt_id") == attempt_id and row.get("state") == "RESERVATION_FAILED":
                     return
             raise DurableCallError("V238_BUDGET_ATTEMPT_NOT_FOUND")
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def assert_retry_cap(self, *, unresolved_ids: list[int] | None = None, attempt_id: str | None = None) -> None:
+        """Re-check retry caps from the persistent ledger before transport."""
+        handle = self._locked()
+        try:
+            value = self._read_unlocked()
+            row = next((item for item in value["reservations"] if item.get("physical_attempt_id") == attempt_id), None) if attempt_id else None
+            if row is None or row.get("attempt_type") != "RETRY":
+                return
+            active = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") != "RESERVATION_FAILED"]
+            operation_cap = value.get("operation_retry_transport_cap")
+            if operation_cap is not None and len(active) > int(operation_cap):
+                raise DurableCallError("V238_OPERATION_RETRY_TRANSPORT_CAP_REACHED")
+            event_cap = value.get("per_event_retry_transport_cap")
+            for event_id in sorted({int(item) for item in (unresolved_ids or row.get("unresolved_ids", []))}):
+                if event_cap is not None and sum(event_id in {int(item) for item in row2.get("unresolved_ids", [])} for row2 in active) > int(event_cap):
+                    raise DurableCallError("V238_PER_EVENT_RETRY_TRANSPORT_CAP_REACHED")
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
@@ -412,7 +458,13 @@ class DurableV226Call:
             "planned_initial_calls": context.get("planned_initial_calls", 0),
             "retry_reserve": context.get("retry_reserve", 0),
             "physical_ceiling": context.get("physical_ceiling", context.get("qwen_physical_maximum", 0)),
+            "operation_retry_transport_cap": context.get("operation_retry_transport_cap"),
+            "per_event_retry_transport_cap": context.get("per_event_retry_transport_cap"),
         }
+        if "operation_retry_transport_cap" not in limits:
+            limits = {**limits, "operation_retry_transport_cap": context.get("operation_retry_transport_cap")}
+        if "per_event_retry_transport_cap" not in limits:
+            limits = {**limits, "per_event_retry_transport_cap": context.get("per_event_retry_transport_cap")}
         self.budget_ledger = EpisodeBudgetLedger(budget_path, family_contract=self.family_contract, limits=limits)
         self._fault_point = str(context.get("durability_fault_point") or "")
 
@@ -504,6 +556,7 @@ class DurableV226Call:
             attempt_type=attempt_type,
             attempt_ordinal=int(self.metadata.get("attempt_ordinal", 1)),
             parent_attempt_id=self.metadata.get("parent_attempt_id"),
+            unresolved_ids=[int(item) for item in self.metadata.get("unit_ids", [])],
         )
         self._fault("after_ledger_reserve")
         operation_budget_accepted_now = False
@@ -704,6 +757,7 @@ class DurableV226Call:
             raise DurableCallError("V238_TRANSPORT_REQUIRES_EXCLUSIVE_CLAIM")
         if current["state"] != "TRANSPORT_CLAIMED":
             raise DurableCallError("V238_TRANSPORT_REQUIRES_CLAIMED_STATE")
+        self.budget_ledger.assert_retry_cap(unresolved_ids=[int(item) for item in self.metadata.get("unit_ids", [])], attempt_id=self.request_id)
         value = self._transition("TRANSPORT_IN_PROGRESS", transport_started_at=_now())
         self.budget_ledger.update_attempt(self.request_id, state=value["state"])
         self._fault("during_transport")
@@ -779,6 +833,75 @@ class DurableV226Call:
         self._fault("after_parse")
         return value
 
+    def record_valid_subset(self, found: Mapping[int, Mapping[str, Any]], expected_ids: list[int],
+                            unresolved_ids: list[int], *, validator_version: str = "canonical-v226") -> dict[str, Any]:
+        """Persist canonical-valid rows without declaring the batch complete."""
+        current = self._state()
+        if current.get("state") in {"VALID_SUBSET_RECORDED", "RETRIES_PENDING", "RETRY_RESPONSE_DURABLE", "BATCH_COMPLETE"}:
+            return self.load_valid_subset()
+        if current.get("state") != "PARSED_INVALID":
+            raise DurableCallError("V238_VALID_SUBSET_REQUIRES_PARSED_INVALID")
+        expected = sorted({int(item) for item in expected_ids})
+        valid_ids = sorted({int(item) for item in found})
+        unresolved = sorted({int(item) for item in unresolved_ids})
+        if set(valid_ids) & set(unresolved) or set(valid_ids) | set(unresolved) != set(expected):
+            raise DurableCallError("V238_VALID_SUBSET_ID_SET_INVALID")
+        rows = [dict(found[item_id]) for item_id in valid_ids]
+        subset = {"expected_ids": expected, "valid_ids": valid_ids, "unresolved_ids": unresolved,
+                  "rows": rows, "source_response_sha256": current.get("response_sha256"),
+                  "validator_version": validator_version}
+        subset_sha = sha256_bytes(canonical_bytes(subset))
+        manifest = {"kind": "V238_VALID_SUBSET_V1", "subset_sha256": subset_sha,
+                    "source_response_sha256": current.get("response_sha256"),
+                    "expected_ids_sha256": sha256_bytes(canonical_bytes(expected)),
+                    "valid_ids_sha256": sha256_bytes(canonical_bytes(valid_ids)),
+                    "unresolved_ids_sha256": sha256_bytes(canonical_bytes(unresolved)),
+                    "logical_call_id": self.logical_call_id, "physical_attempt_id": self.physical_attempt_id,
+                    "family_id": self.family_contract.get("episode_family_id"),
+                    "operation_id": str(self.context["operation_id"]),
+                    "candidate_commit": self.context.get("candidate_commit"),
+                    "identity": self.identity, "created_at": _now()}
+        manifest["manifest_sha256"] = sha256_bytes(canonical_bytes(manifest))
+        _atomic_json(self.call_dir / "valid_subset.json", subset)
+        self._fault("after_subset_body")
+        _atomic_json(self.call_dir / "valid_subset_manifest.json", manifest)
+        self._fault("after_subset_manifest")
+        value = self._transition("VALID_SUBSET_RECORDED", valid_subset_sha256=subset_sha,
+                                 valid_subset_manifest_sha256=manifest["manifest_sha256"], valid_subset_recorded_at=_now())
+        self._fault("after_subset_state")
+        return {"state": value.get("state"), "subset": subset, "manifest": manifest}
+
+    def load_valid_subset(self) -> dict[str, Any]:
+        subset_path = self.call_dir / "valid_subset.json"
+        manifest_path = self.call_dir / "valid_subset_manifest.json"
+        if not subset_path.is_file() or not manifest_path.is_file():
+            raise DurableCallError("V238_VALID_SUBSET_CAPTURE_MISSING")
+        try:
+            subset = json.loads(subset_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            state = self._state()
+            if sha256_bytes(canonical_bytes(subset)) != manifest.get("subset_sha256"):
+                raise DurableCallError("V238_VALID_SUBSET_HASH_MISMATCH")
+            if manifest.get("subset_sha256") != state.get("valid_subset_sha256") or manifest.get("manifest_sha256") != state.get("valid_subset_manifest_sha256"):
+                raise DurableCallError("V238_VALID_SUBSET_STATE_HASH_MISMATCH")
+            if manifest.get("source_response_sha256") != state.get("response_sha256"):
+                raise DurableCallError("V238_VALID_SUBSET_SOURCE_HASH_MISMATCH")
+            if manifest.get("identity") != self.identity or manifest.get("operation_id") != str(self.context["operation_id"]):
+                raise DurableCallError("V238_VALID_SUBSET_IDENTITY_MISMATCH")
+            if manifest.get("candidate_commit") != self.context.get("candidate_commit"):
+                raise DurableCallError("V238_VALID_SUBSET_CANDIDATE_MISMATCH")
+            expected = set(subset.get("expected_ids", [])); valid = set(subset.get("valid_ids", [])); unresolved = set(subset.get("unresolved_ids", []))
+            if valid & unresolved or valid | unresolved != expected:
+                raise DurableCallError("V238_VALID_SUBSET_ID_SET_INVALID")
+            for key, ids in (("expected_ids", subset.get("expected_ids", [])), ("valid_ids", subset.get("valid_ids", [])), ("unresolved_ids", subset.get("unresolved_ids", []))):
+                if manifest.get(key + "_sha256") != sha256_bytes(canonical_bytes(ids)):
+                    raise DurableCallError("V238_VALID_SUBSET_SET_HASH_MISMATCH")
+            return {"state": state.get("state"), "subset": subset, "manifest": manifest}
+        except DurableCallError:
+            raise
+        except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DurableCallError("V238_VALID_SUBSET_CORRUPT") from exc
+
     def load_derived_response(self) -> bytes:
         """Load a derived response bound to state, manifest and identity.
 
@@ -808,7 +931,7 @@ class DurableV226Call:
             if manifest.get("source_response_sha256") != state.get("response_sha256"):
                 raise DurableCallError("V238_DERIVED_SOURCE_RESPONSE_MISMATCH")
             expected_policy = str(self.context.get("response_normalization_policy") or "")
-            if manifest.get("policy") != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1" or manifest.get("policy") != expected_policy:
+            if manifest.get("policy") not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"} or manifest.get("policy") != expected_policy:
                 raise DurableCallError("V238_DERIVED_POLICY_MISMATCH")
             expected_identity = {
                 "source_response_sha256": state.get("response_sha256"),
@@ -848,7 +971,7 @@ class DurableV226Call:
         if current.get("state") != "PARSED_INVALID":
             raise DurableCallError("V238_DERIVED_NORMALIZATION_REQUIRES_PARSED_INVALID")
         policy = str(audit.get("policy") or "")
-        if policy != "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1":
+        if policy not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"}:
             raise DurableCallError("V238_DERIVED_POLICY_INVALID")
         derived_bytes = canonical_bytes(normalized_value)
         source_sha = str(current.get("response_sha256") or "")
