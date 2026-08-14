@@ -1304,6 +1304,16 @@ class Client:
 
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
+        durable_context = getattr(self.config, "durable_context", None)
+        # Preserve the legacy reservation order exactly.  V2.3.8 opts into
+        # per-call durability below, where the persistent ledger reserves
+        # immediately before request materialization.
+        if not durable_context and self.config.operation_budget is not None:
+            self.config.operation_budget.reserve(
+                model_tag=self.model,
+                model_digest=getattr(self.config, "model_digest", None),
+                phase="V226_QWEN",
+            )
         schema = _schema(units)
         schema_kind = unit_schema_kind(units)
         targets: list[dict[str, Any]] = []
@@ -1394,7 +1404,6 @@ class Client:
             "config": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive},
         }
         durable_call = None
-        durable_context = getattr(self.config, "durable_context", None)
         if durable_context:
             from v238_per_call_durability import DurableV226Call
             membership = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -1455,12 +1464,6 @@ class Client:
                         raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
                     body = json.loads(bytes(raw_body).decode("utf-8"))
             else:
-                if self.config.operation_budget is not None:
-                    self.config.operation_budget.reserve(
-                        model_tag=self.model,
-                        model_digest=getattr(self.config, "model_digest", None),
-                        phase="V226_QWEN",
-                    )
                 response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
                 observation["http_status"] = response.status_code
                 response.raise_for_status()
