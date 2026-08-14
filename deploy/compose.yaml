@@ -1,0 +1,32 @@
+services:
+  subtranslate:
+    image: subtranslate:p2c2-20260813T210000Z
+    container_name: subtranslate-consolidated-candidate
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v2_3_0}
+      TRANSLATOR_OLLAMA_URL: ${TRANSLATOR_OLLAMA_URL:-http://ollama:11434}
+      TRANSLATOR_OLLAMA_MODEL: ${TRANSLATOR_OLLAMA_MODEL:-qwen3.5:9b}
+      TRANSLATOR_FALLBACK_OLLAMA_MODEL: ${TRANSLATOR_FALLBACK_OLLAMA_MODEL:-qwen3.5:9b}
+      TRANSLATOR_REVIEW_MODEL: ${TRANSLATOR_REVIEW_MODEL:-qwen3.5:9b}
+      TRANSLATOR_BASE_LIBRARY: /shows
+      ANIME_LIBRARY_ROOTS: /shows
+      TRANSLATOR_WEB_STATE_DIR: /app/state
+      ANIME_SUBTITLE_LIBRARY_ROOT: /app/state/anime-subtitle-library
+      TRANSLATOR_GLOSSARY_PATH: /app/state/glossary_v1.json
+    volumes:
+      - /Tank/data/Shows:/shows:rw
+      - /docker/subtranslate/state:/app/state:rw
+    tmpfs:
+      - /tmp:size=512m
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
