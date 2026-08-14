@@ -114,7 +114,12 @@ class CanonicalLlamaProvider:
 
     def unload(self) -> Any:
         if callable(self.unload_callback):
-            return self.unload_callback()
+            try:
+                return self.unload_callback(keep_alive=0)
+            except TypeError:
+                # Test/fake providers may expose a zero-argument unload while
+                # the canonical Ollama boundary still requests keep_alive=0.
+                return self.unload_callback()
         return None
 
 
@@ -239,6 +244,7 @@ def run_single_fallback_phase(
         if callable(unload_fn):
             phase["unload_requested"] = True
             phase["unload_calls"] = 1
+            phase["unload_keep_alive"] = 0
             phase["control_calls"] = int(phase.get("control_calls", 0)) + 1
             try:
                 unload_started = time.perf_counter()
