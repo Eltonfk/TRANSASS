@@ -271,6 +271,44 @@ class ResponseNormalizationTests(unittest.TestCase):
             self.assertEqual(observation["normalization_status"], "DERIVED_PARSED_VALID_REUSED")
             self.assertEqual(observation["durable_state"], "DERIVED_PARSED_VALID")
 
+    def test_recorded_invalid_derivation_fails_closed_without_projection_or_transport(self):
+        from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = {**self.context(root), "response_normalization_policy": POLICY, "durability_fault_point": "after_derived_recorded"}
+            config = Config("http://ollama.invalid", model="qwen3.5:9b", strict_json=True)
+            config.model_digest = context["model_digest"]
+            config.durable_context = context
+            config.durable_attempt_contract = {"attempt_type": "INITIAL", "logical_batch_id": "invalid-derived", "attempt_ordinal": 1, "parent_attempt_id": None, "batch_index": 0}
+            event = Event(1, 0, 0, 0, 1000, "Default", "", 0, 0, 0, "", "hello", "hello", "hello", [CleanSegment(0, "hello", "hello")], [], [], False, "MAIN_DIALOGUE")
+            unit = Unit("unit-1", [event])
+            contexts = {1: {"previous": [], "next": []}}
+            class Response:
+                status_code = 200
+                content = b'{"message":{"content":"{\\"translations\\":[{\\"id\\":1,\\"text\\":\\"oi\\",\\"context_note\\":\\"x\\"}]}"}}'
+
+            posts = []
+            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *args, **kwargs: posts.append(1) or Response()):
+                with self.assertRaises(DurableCallFault):
+                    Client(config, [], {}, model="qwen3.5:9b").call([unit], {1: event}, contexts)
+            call_dir = next(root.rglob("derived_response.json")).parent
+            invalid_derived = {"translations": [{"id": 1}]}
+            from v238_per_call_durability import canonical_bytes, sha256_bytes
+            (call_dir / "derived_response.json").write_bytes(canonical_bytes(invalid_derived))
+            manifest = json.loads((call_dir / "derived_normalization.json").read_text())
+            manifest["normalized_response_sha256"] = sha256_bytes(canonical_bytes(invalid_derived))
+            (call_dir / "derived_normalization.json").write_text(json.dumps(manifest))
+            context.pop("durability_fault_point")
+            config.durable_context = context
+            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *args, **kwargs: posts.append(1)):
+                with self.assertRaises(NormalizationRejected):
+                    Client(config, [], {}, model="qwen3.5:9b").call([unit], {1: event}, contexts)
+            self.assertEqual(posts, [1])
+            state = json.loads((call_dir / "state.json").read_text())
+            self.assertEqual(state["state"], "DERIVED_NORMALIZATION_RECORDED")
+
     def test_opt_in_exact_response_skips_projection(self):
         from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
         from unittest.mock import patch

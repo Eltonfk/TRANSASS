@@ -1533,7 +1533,24 @@ class Client:
                 if durable_call is None:
                     raise NormalizationRejected("V238_NORMALIZATION_REQUIRES_DURABLE_CONTEXT")
                 found_before, issues_before = validate_response(value, events)
-                if issues_before:
+                if derived_body:
+                    # A recorded derivation is never projected again.  Its
+                    # persisted bytes are only revalidated and promoted by
+                    # the common validator below; any defect is fail-closed.
+                    observation.update({
+                        "raw_schema_status": "INVALID_EXTRA_PROPERTY",
+                        "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
+                        "normalization_attempted": False,
+                        "normalization_policy": normalization_policy,
+                        "normalization_status": "DERIVED_REVALIDATION_PENDING",
+                        "offending_item_count": 1,
+                        "dropped_property_count": "RECORDED_IN_DERIVED_MANIFEST",
+                        "derived_schema_status": "REVALIDATION_PENDING",
+                        "derived_response_sha": hashlib.sha256((json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest() if isinstance(value, dict) else None,
+                        "model_call_delta": 0,
+                        "retry_delta": 0,
+                    })
+                elif issues_before:
                     # Preserve the raw response's invalid classification before
                     # attempting the explicitly authorized projection.  A
                     # fresh live response reaches RESPONSE_DURABLE directly;
@@ -1569,23 +1586,6 @@ class Client:
                         "derived_recorded_state": recorded_state.get("state"),
                     })
                     normalized = True
-                elif derived_body:
-                    # The recorded state is a durable intermediate.  It is
-                    # promoted only after the common canonical validator below
-                    # proves the derived response is complete and source-bound.
-                    observation.update({
-                        "raw_schema_status": "INVALID_EXTRA_PROPERTY",
-                        "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
-                        "normalization_attempted": False,
-                        "normalization_policy": normalization_policy,
-                        "normalization_status": "DERIVED_PARSED_VALID_REUSED",
-                        "offending_item_count": 1,
-                        "dropped_property_count": "RECORDED_IN_DERIVED_MANIFEST",
-                        "derived_schema_status": "VALID_AFTER_DETERMINISTIC_PROJECTION",
-                        "derived_response_sha": hashlib.sha256((json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest() if isinstance(value, dict) else None,
-                        "model_call_delta": 0,
-                        "retry_delta": 0,
-                    })
                 else:
                     observation.update({
                         "raw_schema_status": "VALID",
