@@ -118,6 +118,26 @@ class ResponseNormalizationTests(unittest.TestCase):
             self.assertEqual(json.loads(resumed.load_derived_response())["translations"][-1]["id"], 8)
             self.assertEqual(resumed.budget_ledger.snapshot()["physical_consumed"], 1)
 
+    def test_crash_before_derived_manifest_rebuilds_without_transport(self):
+        for fault_point in ("before_derived_manifest", "after_derived_response"):
+            with self.subTest(fault_point=fault_point), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                context = self.context(root)
+                metadata = {"attempt_type": "INITIAL", "logical_batch_id": "batch-0", "attempt_ordinal": 1, "parent_attempt_id": None, "unit_membership_sha256": "membership"}
+                call = DurableV226Call(context, {"payload": 1}, metadata)
+                call.reserve(); call.prepare_request()
+                with call.exclusive_transport_claim() as owner:
+                    self.assertTrue(owner)
+                    call.begin_transport(); call.record_response(b'{"translations":[]}', status_code=200)
+                call.mark_parsed(valid=False, error="extra property")
+                value, audit = project_extra_property_response(self.value(extra={"context_note": "private"}), range(1, 9))
+                with self.assertRaises(DurableCallFault):
+                    DurableV226Call(self.context(root, durability_fault_point=fault_point), {"payload": 1}, metadata).record_derived_normalization(value, audit)
+                resumed = DurableV226Call(self.context(root), {"payload": 1}, metadata)
+                resumed.record_derived_normalization(value, audit)
+                self.assertEqual(resumed.state(), "DERIVED_PARSED_VALID")
+                self.assertEqual(resumed.budget_ledger.snapshot()["physical_consumed"], 1)
+
     def test_canonical_client_replays_invalid_capture_without_post(self):
         from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
         from unittest.mock import patch
