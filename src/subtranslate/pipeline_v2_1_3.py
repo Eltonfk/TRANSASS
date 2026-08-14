@@ -118,6 +118,9 @@ class Config:
     # unset; the V2.3.8 canonical materializer injects it explicitly.
     operation_budget: Any = None
     model_digest: str | None = None
+    # Opt-in V2.3.8 per-call durability context. Legacy callers leave this
+    # unset and retain the historical request path byte-for-byte.
+    durable_context: Any = None
 
     @classmethod
     def from_file(cls, path: Path) -> "Config":
@@ -1301,12 +1304,6 @@ class Client:
 
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
-        if self.config.operation_budget is not None:
-            self.config.operation_budget.reserve(
-                model_tag=self.model,
-                model_digest=getattr(self.config, "model_digest", None),
-                phase="V226_QWEN",
-            )
         schema = _schema(units)
         schema_kind = unit_schema_kind(units)
         targets: list[dict[str, Any]] = []
@@ -1396,11 +1393,78 @@ class Client:
             "start_time": datetime.now(timezone.utc).isoformat(),
             "config": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive},
         }
+        durable_call = None
+        durable_context = getattr(self.config, "durable_context", None)
+        if durable_context:
+            from v238_per_call_durability import DurableV226Call
+            membership = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode("utf-8")).hexdigest()
+            durable_call = DurableV226Call(
+                durable_context,
+                payload,
+                {
+                    "phase": phase,
+                    "batch_index": len(self.calls),
+                    "attempt_ordinal": len(self.calls) + 1,
+                    "unit_ids": ids,
+                    "event_count": len(ids),
+                    "unit_membership_sha256": membership,
+                    "model": self.model,
+                    "model_digest": getattr(self.config, "model_digest", None),
+                    "timeout_seconds": self.config.timeout_seconds,
+                    "configuration": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive},
+                },
+                operation_budget=self.config.operation_budget,
+            )
+            observation["call_id"] = durable_call.request_id
+            observation["durable_request_id"] = durable_call.request_id
+            observation["unit_membership_sha256"] = membership
         try:
-            response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
-            observation["http_status"] = response.status_code
-            response.raise_for_status()
-            body = response.json()
+            body = None
+            if durable_call is not None:
+                state = durable_call.prepare_request()
+                observation["durable_state_before_transport"] = state.get("state")
+                if state.get("state") in {"PARSED_VALID", "PARSED_INVALID", "RESPONSE_DURABLE"}:
+                    raw_body = durable_call.load_raw()
+                    body = json.loads(raw_body.decode("utf-8"))
+                    observation["reused_durable_response"] = True
+                    observation["physical_transport"] = False
+                elif state.get("state") in {"CANCELLED_CONFIRMED", "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN", "RESERVATION_FAILED"}:
+                    from v238_per_call_durability import DurableCallError
+                    raise DurableCallError("V238_DURABLE_CALL_TERMINAL_RECONCILIATION_REQUIRED:" + str(state.get("state")))
+                else:
+                    durable_call.begin_transport()
+                    observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
+                    response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                    status_code = int(response.status_code)
+                    observation["http_status"] = status_code
+                    raw_body = getattr(response, "content", None)
+                    if raw_body is None:
+                        text_body = getattr(response, "text", None)
+                        if isinstance(text_body, str):
+                            raw_body = text_body.encode("utf-8")
+                        else:
+                            raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
+                    durable_call.record_response(bytes(raw_body), status_code=status_code)
+                    observation["physical_transport"] = True
+                    if status_code != 200:
+                        # The response/status is already durable.  Do not let
+                        # the legacy Runner interpret this as an ordinary
+                        # retryable exception: a retry requires an explicit
+                        # policy decision after reconciliation.
+                        from v238_per_call_durability import DurableCallError
+                        raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
+                    body = json.loads(bytes(raw_body).decode("utf-8"))
+            else:
+                if self.config.operation_budget is not None:
+                    self.config.operation_budget.reserve(
+                        model_tag=self.model,
+                        model_digest=getattr(self.config, "model_digest", None),
+                        phase="V226_QWEN",
+                    )
+                response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                observation["http_status"] = response.status_code
+                response.raise_for_status()
+                body = response.json()
             content = (body.get("message") or {}).get("content")
             observation["content_chars"] = len(content) if isinstance(content, str) else None
             observation["content_sha256"] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
@@ -1420,11 +1484,24 @@ class Client:
             found, issues = validate_response(value, events)
             observation["json_valid"] = True
             observation["structural_issues"] = issues
+            if durable_call is not None:
+                durable_call.mark_parsed(valid=not issues, error="; ".join(issues) if issues else None)
+                observation["durable_state"] = "PARSED_VALID" if not issues else "PARSED_INVALID"
             observation["elapsed_client_seconds"] = time.perf_counter() - started
             observation["duration_seconds"] = observation["elapsed_client_seconds"]
             self.calls.append(observation)
             return found, issues, observation
         except Exception as exc:
+            if durable_call is not None:
+                try:
+                    if durable_call.state() == "TRANSPORT_IN_PROGRESS":
+                        durable_call.mark_unknown(exc)
+                        observation["durable_state"] = "TRANSPORT_OUTCOME_UNKNOWN"
+                    elif durable_call.state() == "RESPONSE_DURABLE":
+                        durable_call.mark_parsed(valid=False, error=f"{type(exc).__name__}: {exc}")
+                        observation["durable_state"] = "PARSED_INVALID"
+                except Exception as durability_exc:
+                    observation["durability_error"] = f"{type(durability_exc).__name__}: {durability_exc}"
             observation.update({"json_valid": False, "error_type": type(exc).__name__, "error": str(exc)[:500], "elapsed_client_seconds": time.perf_counter() - started})
             observation["duration_seconds"] = observation["elapsed_client_seconds"]
             self.calls.append(observation)
@@ -1558,6 +1635,8 @@ class Runner:
                     issues.append(f"reconstrução inválida: {event_id}")
             return valid, issues
         except Exception as exc:
+            if getattr(exc, "durability_stop", False):
+                raise
             if self.calls:
                 observation = self.calls[-1]
                 observation.update({

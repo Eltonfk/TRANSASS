@@ -189,9 +189,14 @@ class CanonicalV226LiveMaterializer:
     def _identity(self, source: Path, context: Mapping[str, Any]) -> dict[str, Any]:
         source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
         mode = str(context.get("execution_mode") or "").upper()
+        effective_model = context.get("model") or context.get("model_override")
+        effective_digest = context.get("model_digest") or context.get("primary_model_digest")
         if mode == "LIVE_CAPTURED":
             required = ("operation_id", "episode_id", "anime_series_id", "model", "model_digest", "prompt_schema_hash", "glossary_hash", "configuration_hash", "candidate_commit", "candidate_image_id")
-            missing = [key for key in required if context.get(key) in (None, "")]
+            supplied = dict(context)
+            supplied["model"] = effective_model
+            supplied["model_digest"] = effective_digest
+            missing = [key for key in required if supplied.get(key) in (None, "")]
             if missing:
                 raise BaseTranslationMaterializerError("V238_LIVE_CHECKPOINT_IDENTITY_MISSING:" + ",".join(missing))
         identity = {
@@ -201,8 +206,8 @@ class CanonicalV226LiveMaterializer:
             "anime_series_id": context.get("anime_series_id"),
             "pipeline_id": str(context.get("pipeline_id") or "v2_3_8"),
             "stage_id": str(context.get("stage_id") or "FULL_TRANSLATION_V238"),
-            "model_tag": context.get("model") or context.get("model_override"),
-            "model_digest": context.get("model_digest"),
+            "model_tag": effective_model,
+            "model_digest": effective_digest,
             "prompt_schema_hash": context.get("prompt_schema_hash"),
             "glossary_hash": context.get("glossary_hash"),
             "configuration_hash": context.get("configuration_hash"),
@@ -321,7 +326,13 @@ class CanonicalV226LiveMaterializer:
         base_kwargs = {key: context.get(key) for key in ("glossary", "anime_series_id", "episode_id", "job_id") if context.get(key) is not None}
         if memory_db_root is not None:
             base_kwargs["memory_db_root"] = memory_db_root
-        base_kwargs["execution_context"] = dict(context)
+        call_context = dict(context)
+        call_context.setdefault("source_sha256", identity["source_sha256"])
+        if not call_context.get("model"):
+            call_context["model"] = identity.get("model_tag")
+        if not call_context.get("model_digest"):
+            call_context["model_digest"] = identity.get("model_digest")
+        base_kwargs["execution_context"] = call_context
         fd, raw = tempfile.mkstemp(prefix=".v238-base-", suffix=".ass", dir=str(checkpoint))
         os.close(fd)
         temporary = Path(raw)

@@ -400,6 +400,8 @@ def translate_subtitle_file_v2_2_5(
     if execution_context:
         config.operation_budget = execution_context.get("operation_budget")
         config.model_digest = execution_context.get("primary_model_digest") or execution_context.get("model_digest")
+        if execution_context.get("durable_call_root"):
+            config.durable_context = dict(execution_context)
     memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
