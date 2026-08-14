@@ -186,7 +186,12 @@ def run_single_fallback_phase(
         return phase
     call_budget = budget or HardCallBudget(max_calls)
     request_id = "llama-fallback-group-" + hashlib.sha256("|".join(row["canonical_unit_id"] for row in units).encode()).hexdigest()[:24]
-    request = {"operation": "llama_fallback_group", "canonical_unit_ids": [row["canonical_unit_id"] for row in units], "units": units, "model": model_tag, "expected_response_schema": "candidates[]"}
+    request_units = []
+    for row in units:
+        item = dict(row)
+        item["role"] = "ADVISORY_REVIEW_FOR_SUSPECT" if str(row.get("status", "")).upper() == "SUSPECT" else "FALLBACK_FOR_BLOCKED"
+        request_units.append(item)
+    request = {"operation": "llama_fallback_group", "canonical_unit_ids": [row["canonical_unit_id"] for row in units], "units": request_units, "model": model_tag, "expected_response_schema": "candidates[]"}
     try:
         if callable(load):
             phase["load_requested"] = True
