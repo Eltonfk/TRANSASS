@@ -89,6 +89,18 @@ class ResponseNormalizationTests(unittest.TestCase):
         with self.assertRaises(NormalizationRejected):
             project_multi_kind_response(value, range(1, 9))
 
+    def test_v2_rejects_segmented_expected_contract_explicitly(self):
+        value = self.value(extra={"kind": "dialogue"})
+        segmented = {item_id: ("id", "segments") for item_id in range(1, 9)}
+        with self.assertRaisesRegex(NormalizationRejected, "TEXT_ONLY_REQUIRED"):
+            project_multi_kind_response(value, range(1, 9), expected_item_keys=segmented)
+
+    def test_v2_rejects_mixed_text_and_segmented_contract(self):
+        value = self.value(extra={"kind": "dialogue"})
+        mixed = {item_id: (("id", "segments") if item_id == 2 else ("id", "text")) for item_id in range(1, 9)}
+        with self.assertRaisesRegex(NormalizationRejected, "TEXT_ONLY_REQUIRED"):
+            project_multi_kind_response(value, range(1, 9), expected_item_keys=mixed)
+
     def test_valid_subset_is_consumed_by_client_restart_without_post(self):
         from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
         from unittest.mock import patch

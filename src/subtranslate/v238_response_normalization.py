@@ -152,6 +152,12 @@ def project_multi_kind_response(
     expected = [int(item_id) for item_id in expected_ids]
     if not isinstance(rows, list) or len(rows) != len(expected) or len(set(expected)) != len(expected):
         raise NormalizationRejected("NORMALIZATION_CARDINALITY_INVALID")
+    # V2 is intentionally TEXT-only.  A caller may not use this projection
+    # to coerce a segmented or mixed response into a text contract.
+    if expected_item_keys is not None:
+        for item_id in expected:
+            if _item_contract(item_id, expected_item_keys) != {"id", "text"}:
+                raise NormalizationRejected("NORMALIZATION_V2_TEXT_ONLY_REQUIRED")
     expected_set = set(expected)
     seen: set[int] = set()
     offenders: list[int] = []

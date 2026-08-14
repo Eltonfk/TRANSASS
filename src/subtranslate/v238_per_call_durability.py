@@ -31,9 +31,13 @@ STATE_TRANSITIONS = {
     "RESPONSE_DURABLE": frozenset({"PARSED_VALID", "PARSED_INVALID"}),
     "PARSED_VALID": frozenset(),
     "PARSED_INVALID": frozenset({"DERIVED_NORMALIZATION_RECORDED", "VALID_SUBSET_RECORDED"}),
-    "VALID_SUBSET_RECORDED": frozenset({"RETRIES_PENDING", "BATCH_COMPLETE"}),
-    "RETRIES_PENDING": frozenset({"RETRY_RESPONSE_DURABLE", "BATCH_COMPLETE"}),
-    "RETRY_RESPONSE_DURABLE": frozenset({"RETRIES_PENDING", "BATCH_COMPLETE"}),
+    # A partial response can never complete a batch by itself.  Completion is
+    # reached only through the explicit composite-validation seam after all
+    # unresolved retry rows have been durably reconciled.
+    "VALID_SUBSET_RECORDED": frozenset({"RETRIES_PENDING"}),
+    "RETRIES_PENDING": frozenset({"RETRY_RESPONSE_DURABLE", "COMPOSITE_VALIDATED"}),
+    "RETRY_RESPONSE_DURABLE": frozenset({"RETRIES_PENDING", "COMPOSITE_VALIDATED"}),
+    "COMPOSITE_VALIDATED": frozenset({"BATCH_COMPLETE"}),
     "DERIVED_NORMALIZATION_RECORDED": frozenset({"DERIVED_PARSED_VALID"}),
     "DERIVED_PARSED_VALID": frozenset(),
     "BATCH_COMPLETE": frozenset(),
@@ -45,7 +49,7 @@ STATE_TRANSITIONS = {
 }
 STATES = frozenset(STATE_TRANSITIONS)
 TERMINAL_STATES = frozenset({
-    "PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "VALID_SUBSET_RECORDED", "BATCH_COMPLETE", "CANCELLED_CONFIRMED",
+    "PARSED_VALID", "PARSED_INVALID", "DERIVED_NORMALIZATION_RECORDED", "DERIVED_PARSED_VALID", "VALID_SUBSET_RECORDED", "COMPOSITE_VALIDATED", "BATCH_COMPLETE", "CANCELLED_CONFIRMED",
     "TRANSPORT_FAILED_CONFIRMED", "TRANSPORT_OUTCOME_UNKNOWN",
     "CORRUPT_CAPTURE", "RESERVATION_FAILED",
 })
@@ -86,6 +90,15 @@ def canonical_bytes(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _manifest_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical manifest payload excluding its self-hash."""
+    return {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+
+
+def _manifest_sha256(manifest: Mapping[str, Any]) -> str:
+    return sha256_bytes(canonical_bytes(_manifest_payload(manifest)))
 
 
 def _fsync_dir(path: Path) -> None:
@@ -213,7 +226,9 @@ class EpisodeBudgetLedger:
                 logical_batch_id: str, request_payload_sha256: str,
                 model_tag: str, model_digest: str | None, phase: str,
                 attempt_type: str, attempt_ordinal: int,
-                parent_attempt_id: str | None, unresolved_ids: list[int] | None = None) -> dict[str, Any]:
+                parent_attempt_id: str | None, unresolved_ids: list[int] | None = None,
+                operation_id: str | None = None,
+                family_id: str | None = None) -> dict[str, Any]:
         if attempt_type not in ATTEMPT_TYPES:
             raise DurableCallError("V238_DURABLE_ATTEMPT_TYPE_INVALID")
         if attempt_type == "INITIAL" and parent_attempt_id:
@@ -224,6 +239,9 @@ class EpisodeBudgetLedger:
             raise DurableCallError("V238_RETRY_PARENT_ATTEMPT_REQUIRED")
         if attempt_type == "RETRY" and int(attempt_ordinal) <= 1:
             raise DurableCallError("V238_RETRY_ATTEMPT_ORDINAL_INVALID")
+        operation_id = str(operation_id or "")
+        if attempt_type == "RETRY" and not operation_id:
+            raise DurableCallError("V238_RETRY_OPERATION_ID_REQUIRED")
         handle = self._locked()
         try:
             value = self._read_unlocked()
@@ -239,6 +257,13 @@ class EpisodeBudgetLedger:
                         "attempt_ordinal": int(attempt_ordinal),
                         "parent_attempt_id": parent_attempt_id,
                     }
+                    # Initial physical identities are intentionally reusable
+                    # across a new Client operation.  Retry identities are
+                    # operation-scoped and may never silently migrate.
+                    if attempt_type == "RETRY":
+                        expected["operation_id"] = operation_id
+                        if family_id is not None:
+                            expected["family_id"] = str(family_id)
                     if any(row.get(key) != item for key, item in expected.items()):
                         raise DurableCallError("V238_DURABLE_ATTEMPT_IDENTITY_MISMATCH")
                     return {**row, "_reused": True}
@@ -262,7 +287,7 @@ class EpisodeBudgetLedger:
             unresolved = sorted({int(item) for item in (unresolved_ids or [])})
             if retry:
                 operation_cap = value.get("operation_retry_transport_cap")
-                active_retries = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") != "RESERVATION_FAILED"]
+                active_retries = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") != "RESERVATION_FAILED" and item.get("operation_id") == operation_id]
                 if operation_cap is not None and len(active_retries) >= int(operation_cap):
                     raise DurableCallError("V238_OPERATION_RETRY_TRANSPORT_CAP_REACHED")
                 event_cap = value.get("per_event_retry_transport_cap")
@@ -289,6 +314,8 @@ class EpisodeBudgetLedger:
                 "attempt_type": attempt_type,
                 "attempt_ordinal": int(attempt_ordinal),
                 "parent_attempt_id": parent_attempt_id,
+                "operation_id": operation_id,
+                "family_id": str(family_id or self.family_contract.get("episode_family_id", "")),
                 "phase": phase,
                 "model_tag": model_tag,
                 "model_digest": model_digest,
@@ -329,20 +356,54 @@ class EpisodeBudgetLedger:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
 
-    def assert_retry_cap(self, *, unresolved_ids: list[int] | None = None, attempt_id: str | None = None) -> None:
-        """Re-check retry caps from the persistent ledger before transport."""
+    def assert_retry_cap(self, *, unresolved_ids: list[int] | None = None,
+                         attempt_id: str | None = None,
+                         operation_id: str | None = None,
+                         attempt_type: str = "RETRY",
+                         family_id: str | None = None,
+                         logical_call_id: str | None = None,
+                         physical_attempt_id: str | None = None) -> None:
+        """Re-check the persistent retry permit at every transport boundary.
+
+        INITIAL attempts do not consume retry caps.  A RETRY, however, must
+        have a durable reservation and every identity/set field must match
+        that reservation; an absent or mismatched row is never treated as a
+        harmless no-op.
+        """
+        if str(attempt_type).upper() == "INITIAL":
+            return
+        if str(attempt_type).upper() != "RETRY":
+            raise DurableCallError("V238_RETRY_ATTEMPT_TYPE_INVALID")
+        attempt_id = str(attempt_id or physical_attempt_id or "")
+        operation_id = str(operation_id or "")
+        expected_unresolved = sorted({int(item) for item in (unresolved_ids or [])})
         handle = self._locked()
         try:
             value = self._read_unlocked()
             row = next((item for item in value["reservations"] if item.get("physical_attempt_id") == attempt_id), None) if attempt_id else None
-            if row is None or row.get("attempt_type") != "RETRY":
-                return
-            active = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") != "RESERVATION_FAILED"]
+            if row is None:
+                raise DurableCallError("V238_RETRY_RESERVATION_MISSING")
+            if row.get("attempt_type") != "RETRY":
+                raise DurableCallError("V238_RETRY_RESERVATION_ATTEMPT_TYPE_MISMATCH")
+            if row.get("state") in TERMINAL_RESERVATION_STATES:
+                raise DurableCallError("V238_RETRY_RESERVATION_NOT_ACTIVE")
+            if row.get("operation_id") != operation_id:
+                raise DurableCallError("V238_RETRY_OPERATION_ID_MISMATCH")
+            if family_id is not None and row.get("family_id") not in {None, str(family_id)}:
+                raise DurableCallError("V238_RETRY_FAMILY_ID_MISMATCH")
+            if logical_call_id is not None and row.get("logical_call_id") != str(logical_call_id):
+                raise DurableCallError("V238_RETRY_LOGICAL_ID_MISMATCH")
+            if physical_attempt_id is not None and row.get("physical_attempt_id") != str(physical_attempt_id):
+                raise DurableCallError("V238_RETRY_PHYSICAL_ID_MISMATCH")
+            reserved_unresolved = sorted({int(item) for item in row.get("unresolved_ids", [])})
+            if reserved_unresolved != expected_unresolved:
+                raise DurableCallError("V238_RETRY_UNRESOLVED_ID_SET_MISMATCH")
+            active = [item for item in value["reservations"] if item.get("attempt_type") == "RETRY" and item.get("state") not in TERMINAL_RESERVATION_STATES and item.get("operation_id") == operation_id]
             operation_cap = value.get("operation_retry_transport_cap")
             if operation_cap is not None and len(active) > int(operation_cap):
                 raise DurableCallError("V238_OPERATION_RETRY_TRANSPORT_CAP_REACHED")
             event_cap = value.get("per_event_retry_transport_cap")
-            for event_id in sorted({int(item) for item in (unresolved_ids or row.get("unresolved_ids", []))}):
+            for event_id in expected_unresolved:
                 if event_cap is not None and sum(event_id in {int(item) for item in row2.get("unresolved_ids", [])} for row2 in active) > int(event_cap):
                     raise DurableCallError("V238_PER_EVENT_RETRY_TRANSPORT_CAP_REACHED")
         finally:
@@ -401,7 +462,12 @@ class DurableV226Call:
         self.payload_bytes = payload_bytes
         self.payload_sha256 = sha256_bytes(payload_bytes)
         self.metadata = dict(metadata)
-        self.metadata.update({"request_payload_sha256": self.payload_sha256, "request_payload_bytes": len(payload_bytes)})
+        self.metadata.update({
+            "request_payload_sha256": self.payload_sha256,
+            "request_payload_bytes": len(payload_bytes),
+            "operation_id": str(context["operation_id"]),
+            "family_id": str(context.get("episode_family_id") or ""),
+        })
         self.operation_budget = operation_budget
         attempt_type = str(metadata.get("attempt_type") or "").upper()
         if attempt_type not in ATTEMPT_TYPES:
@@ -557,6 +623,8 @@ class DurableV226Call:
             attempt_ordinal=int(self.metadata.get("attempt_ordinal", 1)),
             parent_attempt_id=self.metadata.get("parent_attempt_id"),
             unresolved_ids=[int(item) for item in self.metadata.get("unit_ids", [])],
+            operation_id=str(self.context["operation_id"]),
+            family_id=str(self.family_contract.get("episode_family_id")),
         )
         self._fault("after_ledger_reserve")
         operation_budget_accepted_now = False
@@ -706,6 +774,17 @@ class DurableV226Call:
         finally:
             self._release_transport_lock(handle)
 
+    def _assert_retry_boundary(self) -> None:
+        self.budget_ledger.assert_retry_cap(
+            unresolved_ids=[int(item) for item in self.metadata.get("unit_ids", [])],
+            attempt_id=self.request_id,
+            operation_id=str(self.context["operation_id"]),
+            attempt_type=str(self.metadata.get("attempt_type", "")),
+            family_id=str(self.family_contract.get("episode_family_id")),
+            logical_call_id=self.logical_call_id,
+            physical_attempt_id=self.physical_attempt_id,
+        )
+
     @contextmanager
     def exclusive_transport_claim(self):
         timeout_seconds = float(self.context.get("transport_claim_timeout_seconds", 5.0))
@@ -721,6 +800,9 @@ class DurableV226Call:
                 raise DurableCallError("V238_DURABLE_CALL_TERMINAL_RECONCILIATION_REQUIRED:" + str(current["state"]))
             if current["state"] != "REQUEST_DURABLE":
                 raise DurableCallError("V238_TRANSPORT_CLAIM_REQUIRES_REQUEST_DURABLE")
+            # The persistent permit is checked while the exclusive claim is
+            # held, before the state can be promoted to TRANSPORT_CLAIMED.
+            self._assert_retry_boundary()
             claim_token = sha256_bytes(canonical_bytes({
                 "physical_attempt_id": self.physical_attempt_id,
                 "operation_id": str(self.context["operation_id"]),
@@ -757,7 +839,7 @@ class DurableV226Call:
             raise DurableCallError("V238_TRANSPORT_REQUIRES_EXCLUSIVE_CLAIM")
         if current["state"] != "TRANSPORT_CLAIMED":
             raise DurableCallError("V238_TRANSPORT_REQUIRES_CLAIMED_STATE")
-        self.budget_ledger.assert_retry_cap(unresolved_ids=[int(item) for item in self.metadata.get("unit_ids", [])], attempt_id=self.request_id)
+        self._assert_retry_boundary()
         value = self._transition("TRANSPORT_IN_PROGRESS", transport_started_at=_now())
         self.budget_ledger.update_attempt(self.request_id, state=value["state"])
         self._fault("during_transport")
@@ -847,9 +929,17 @@ class DurableV226Call:
         if set(valid_ids) & set(unresolved) or set(valid_ids) | set(unresolved) != set(expected):
             raise DurableCallError("V238_VALID_SUBSET_ID_SET_INVALID")
         rows = [dict(found[item_id]) for item_id in valid_ids]
+        if [int(row.get("id", -1)) for row in rows] != valid_ids:
+            raise DurableCallError("V238_VALID_SUBSET_ROW_ID_SET_INVALID")
         subset = {"expected_ids": expected, "valid_ids": valid_ids, "unresolved_ids": unresolved,
                   "rows": rows, "source_response_sha256": current.get("response_sha256"),
-                  "validator_version": validator_version}
+                  "validator_version": validator_version,
+                  "family_id": self.family_contract.get("episode_family_id"),
+                  "operation_id": str(self.context["operation_id"]),
+                  "logical_call_id": self.logical_call_id,
+                  "physical_attempt_id": self.physical_attempt_id,
+                  "candidate_commit": self.context.get("candidate_commit"),
+                  "policy": str(self.context.get("valid_subset_policy") or "V238_VALID_SUBSET_V1")}
         subset_sha = sha256_bytes(canonical_bytes(subset))
         manifest = {"kind": "V238_VALID_SUBSET_V1", "subset_sha256": subset_sha,
                     "source_response_sha256": current.get("response_sha256"),
@@ -861,7 +951,7 @@ class DurableV226Call:
                     "operation_id": str(self.context["operation_id"]),
                     "candidate_commit": self.context.get("candidate_commit"),
                     "identity": self.identity, "created_at": _now()}
-        manifest["manifest_sha256"] = sha256_bytes(canonical_bytes(manifest))
+        manifest["manifest_sha256"] = _manifest_sha256(manifest)
         _atomic_json(self.call_dir / "valid_subset.json", subset)
         self._fault("after_subset_body")
         _atomic_json(self.call_dir / "valid_subset_manifest.json", manifest)
@@ -880,19 +970,57 @@ class DurableV226Call:
             subset = json.loads(subset_path.read_text(encoding="utf-8"))
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             state = self._state()
+            if manifest.get("kind") != "V238_VALID_SUBSET_V1":
+                raise DurableCallError("V238_VALID_SUBSET_MANIFEST_KIND_INVALID")
             if sha256_bytes(canonical_bytes(subset)) != manifest.get("subset_sha256"):
                 raise DurableCallError("V238_VALID_SUBSET_HASH_MISMATCH")
+            if manifest.get("manifest_sha256") != _manifest_sha256(manifest):
+                raise DurableCallError("V238_VALID_SUBSET_MANIFEST_HASH_MISMATCH")
             if manifest.get("subset_sha256") != state.get("valid_subset_sha256") or manifest.get("manifest_sha256") != state.get("valid_subset_manifest_sha256"):
                 raise DurableCallError("V238_VALID_SUBSET_STATE_HASH_MISMATCH")
-            if manifest.get("source_response_sha256") != state.get("response_sha256"):
+            if subset.get("source_response_sha256") != manifest.get("source_response_sha256") or manifest.get("source_response_sha256") != state.get("response_sha256"):
                 raise DurableCallError("V238_VALID_SUBSET_SOURCE_HASH_MISMATCH")
-            if manifest.get("identity") != self.identity or manifest.get("operation_id") != str(self.context["operation_id"]):
+            expected_bindings = {
+                "family_id": self.family_contract.get("episode_family_id"),
+                "operation_id": str(self.context["operation_id"]),
+                "logical_call_id": self.logical_call_id,
+                "physical_attempt_id": self.physical_attempt_id,
+                "candidate_commit": self.context.get("candidate_commit"),
+                "identity": self.identity,
+            }
+            if any(manifest.get(key) != expected for key, expected in expected_bindings.items()):
                 raise DurableCallError("V238_VALID_SUBSET_IDENTITY_MISMATCH")
-            if manifest.get("candidate_commit") != self.context.get("candidate_commit"):
-                raise DurableCallError("V238_VALID_SUBSET_CANDIDATE_MISMATCH")
-            expected = set(subset.get("expected_ids", [])); valid = set(subset.get("valid_ids", [])); unresolved = set(subset.get("unresolved_ids", []))
+            if subset.get("family_id") != expected_bindings["family_id"] or subset.get("operation_id") != expected_bindings["operation_id"]:
+                raise DurableCallError("V238_VALID_SUBSET_SOURCE_IDENTITY_MISMATCH")
+            expected_list = subset.get("expected_ids", [])
+            valid_list = subset.get("valid_ids", [])
+            unresolved_list = subset.get("unresolved_ids", [])
+            for key, ids in (("expected_ids", expected_list), ("valid_ids", valid_list), ("unresolved_ids", unresolved_list)):
+                if not isinstance(ids, list) or any(isinstance(item, bool) or not isinstance(item, int) for item in ids) or ids != sorted(set(ids)):
+                    raise DurableCallError("V238_VALID_SUBSET_ID_ARRAY_INVALID:" + key)
+            expected = set(expected_list); valid = set(valid_list); unresolved = set(unresolved_list)
             if valid & unresolved or valid | unresolved != expected:
                 raise DurableCallError("V238_VALID_SUBSET_ID_SET_INVALID")
+            if state.get("state") == "VALID_SUBSET_RECORDED" and not unresolved:
+                raise DurableCallError("V238_VALID_SUBSET_UNRESOLVED_EMPTY")
+            rows = subset.get("rows")
+            if not isinstance(rows, list) or len(rows) != len(valid_list):
+                raise DurableCallError("V238_VALID_SUBSET_ROWS_INVALID")
+            row_ids = []
+            for row in rows:
+                if not isinstance(row, dict) or isinstance(row.get("id"), bool) or not isinstance(row.get("id"), int):
+                    raise DurableCallError("V238_VALID_SUBSET_ROW_INVALID")
+                if "text" in row and (not isinstance(row.get("text"), str) or not row["text"].strip()):
+                    raise DurableCallError("V238_VALID_SUBSET_ROW_CANONICAL_INVALID")
+                if "segments" in row and (not isinstance(row.get("segments"), list) or not row["segments"]):
+                    raise DurableCallError("V238_VALID_SUBSET_ROW_CANONICAL_INVALID")
+                if set(row) - {"id", "text", "segments"}:
+                    raise DurableCallError("V238_VALID_SUBSET_ROW_EXTRA_PROPERTY")
+                if "text" not in row and "segments" not in row:
+                    raise DurableCallError("V238_VALID_SUBSET_ROW_CANONICAL_INVALID")
+                row_ids.append(int(row["id"]))
+            if row_ids != valid_list or any(item in unresolved for item in row_ids):
+                raise DurableCallError("V238_VALID_SUBSET_ROW_ID_SET_INVALID")
             for key, ids in (("expected_ids", subset.get("expected_ids", [])), ("valid_ids", subset.get("valid_ids", [])), ("unresolved_ids", subset.get("unresolved_ids", []))):
                 if manifest.get(key + "_sha256") != sha256_bytes(canonical_bytes(ids)):
                     raise DurableCallError("V238_VALID_SUBSET_SET_HASH_MISMATCH")

@@ -1497,10 +1497,7 @@ class Client:
                             durable_call.begin_transport()
                             observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
                             durable_call._fault("before_post")
-                            durable_call.budget_ledger.assert_retry_cap(
-                                unresolved_ids=[int(item) for item in ids],
-                                attempt_id=durable_call.request_id,
-                            )
+                            durable_call._assert_retry_boundary()
                             response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
                             durable_call._fault("after_response_received_before_capture")
                             status_code = int(response.status_code)

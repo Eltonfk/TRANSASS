@@ -270,6 +270,54 @@ class PerCallDurabilityTests(unittest.TestCase):
             snapshot = initial.budget_ledger.snapshot()
             self.assertEqual(snapshot["retry_consumed"], 2)
 
+    def test_retry_cap_is_operation_scoped_and_identity_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, episode_budget_limits={
+                "planned_initial_calls": 1, "retry_reserve": 9, "physical_ceiling": 10,
+                "operation_retry_transport_cap": 2, "per_event_retry_transport_cap": 2,
+            })
+            initial = DurableV226Call(context, self.payload(1), self.metadata(1, unit_ids=[1]))
+            initial.reserve()
+            retry_a1 = DurableV226Call(context, self.payload(2), self.metadata(2, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[1]))
+            retry_a1.reserve()
+            retry_a2 = DurableV226Call(context, self.payload(3), self.metadata(3, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[2]))
+            retry_a2.reserve()
+            # A distinct operation has its own operation cap, while sharing
+            # the family's nine-slot reserve.
+            context_b = dict(context, operation_id="OTHER_OPERATION")
+            retry_b1 = DurableV226Call(context_b, self.payload(4), self.metadata(4, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[3]))
+            retry_b1.reserve()
+            ledger = initial.budget_ledger.snapshot()
+            self.assertEqual([row["operation_id"] for row in ledger["reservations"] if row["attempt_type"] == "RETRY"], [context["operation_id"], context["operation_id"], context_b["operation_id"]])
+
+    def test_retry_boundary_missing_or_mismatched_reservation_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, episode_budget_limits={
+                "planned_initial_calls": 1, "retry_reserve": 2, "physical_ceiling": 3,
+                "operation_retry_transport_cap": 2, "per_event_retry_transport_cap": 1,
+            })
+            initial = DurableV226Call(context, self.payload(1), self.metadata(1, unit_ids=[1]))
+            initial.reserve()
+            retry = DurableV226Call(context, self.payload(2), self.metadata(2, phase="retry_local", attempt_type="RETRY", parent_attempt_id=initial.physical_attempt_id, attempt_ordinal=2, unit_ids=[2]))
+            retry.reserve(); retry.prepare_request()
+            with self.assertRaisesRegex(DurableCallError, "RESERVATION_MISSING"):
+                retry.budget_ledger.assert_retry_cap(attempt_id="missing", operation_id=context["operation_id"], attempt_type="RETRY", unresolved_ids=[2])
+            with self.assertRaisesRegex(DurableCallError, "OPERATION_ID_MISMATCH"):
+                retry.budget_ledger.assert_retry_cap(attempt_id=retry.physical_attempt_id, operation_id="WRONG", attempt_type="RETRY", unresolved_ids=[2])
+            with self.assertRaisesRegex(DurableCallError, "UNRESOLVED_ID_SET_MISMATCH"):
+                retry.budget_ledger.assert_retry_cap(attempt_id=retry.physical_attempt_id, operation_id=context["operation_id"], attempt_type="RETRY", unresolved_ids=[99])
+            # The same checks are enforced while the claim is held, before a
+            # transport owner can be established.
+            row_path = root / "family" / "episode-budget.json"
+            row_value = json.loads(row_path.read_text())
+            row_value["reservations"][-1]["operation_id"] = "TAMPERED"
+            row_path.write_text(json.dumps(row_value))
+            with self.assertRaisesRegex(DurableCallError, "OPERATION_ID_MISMATCH"):
+                with retry.exclusive_transport_claim():
+                    pass
+
     def test_missing_or_unknown_attempt_type_fails_before_transport(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -820,6 +868,37 @@ class PerCallDurabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(DurableCallError, "CAPTURE_CORRUPT"):
                 resumed.prepare_request()
             self.assertEqual(resumed.state(), "CORRUPT_CAPTURE")
+
+    def test_valid_subset_manifest_self_hash_and_rows_are_fail_closed(self):
+        from v238_per_call_durability import _manifest_sha256, canonical_bytes
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, valid_subset_policy="V238_VALID_SUBSET_V1")
+            call = DurableV226Call(context, self.payload(), self.metadata(unit_ids=[1, 2, 3]))
+            call.reserve(); call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner); call.begin_transport(); call.record_response(b'{"translations":[]}', status_code=200)
+            call.mark_parsed(valid=False, error="synthetic partial response")
+            call.record_valid_subset({1: {"id": 1, "text": "ok"}, 2: {"id": 2, "text": "ok"}}, [1, 2, 3], [3])
+            manifest_path = call.call_dir / "valid_subset_manifest.json"
+            original = json.loads(manifest_path.read_text())
+            self.assertEqual(original["manifest_sha256"], _manifest_sha256(original))
+            tampered = dict(original); tampered["kind"] = "OTHER"
+            manifest_path.write_bytes(canonical_bytes(tampered))
+            with self.assertRaisesRegex(DurableCallError, "MANIFEST_HASH|MANIFEST_KIND"):
+                call.load_valid_subset()
+
+    def test_valid_subset_recorded_cannot_transition_directly_to_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            call = DurableV226Call(self.context(root), self.payload(), self.metadata(unit_ids=[1, 2]))
+            call.reserve(); call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner); call.begin_transport(); call.record_response(b'{"translations":[]}', status_code=200)
+            call.mark_parsed(valid=False, error="synthetic partial response")
+            call.record_valid_subset({1: {"id": 1, "text": "ok"}}, [1, 2], [2])
+            with self.assertRaisesRegex(DurableCallError, "STATE_TRANSITION_PROHIBITED"):
+                call._transition("BATCH_COMPLETE")
 
 
 if __name__ == "__main__":
