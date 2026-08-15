@@ -1416,6 +1416,13 @@ class Client:
             "simplified": simplified, "phase": phase,
             "start_time": datetime.now(timezone.utc).isoformat(),
             "config": {"think": self.config.think, "temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict, "keep_alive": self.config.keep_alive},
+            # Explicit deltas make fresh POSTs distinguishable from durable
+            # replays.  The transport path below overrides these defaults.
+            "physical_transport": False,
+            "model_call_delta": 0,
+            "provider_call_delta": 0,
+            "durable_response_delta": 0,
+            "retry_delta": 0,
         }
         durable_call = None
         if durable_context:
@@ -1510,7 +1517,12 @@ class Client:
                                 else:
                                     raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
                             durable_call.record_response(bytes(raw_body), status_code=status_code)
-                            observation["physical_transport"] = True
+                            observation.update({
+                                "physical_transport": True,
+                                "model_call_delta": 1,
+                                "provider_call_delta": 1,
+                                "durable_response_delta": 1,
+                            })
                             if status_code != 200:
                                 # The response/status is already durable.  Do
                                 # not let the legacy Runner treat this as an
@@ -1521,6 +1533,12 @@ class Client:
             else:
                 response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
                 observation["http_status"] = response.status_code
+                observation.update({
+                    "physical_transport": True,
+                    "model_call_delta": 1,
+                    "provider_call_delta": 1,
+                    "durable_response_delta": 1,
+                })
                 response.raise_for_status()
                 body = response.json()
             content = json.dumps(body, ensure_ascii=False) if (derived_body or subset_reused) else (body.get("message") or {}).get("content")
@@ -1544,6 +1562,7 @@ class Client:
             # recovery, or retry planning.  Mark the durable attempt first so
             # restart cannot reinterpret it as an ordinary parse exception.
             if body.get("done_reason") == "length":
+                physical_transport = observation.get("physical_transport") is True
                 observation.update({
                     "raw_schema_status": "INVALID_TRUNCATED",
                     "raw_noncompliance_class": "OUTPUT_TRUNCATED",
@@ -1552,7 +1571,13 @@ class Client:
                     "derived_schema_status": "NOT_CREATED",
                     "structural_issues": ["OUTPUT_TRUNCATED"],
                     "retry_delta": 0,
-                    "model_call_delta": 0,
+                    # A fresh POST is an actual provider call; a durable
+                    # restart/replay is not.  Keep those facts distinct even
+                    # though both paths terminate on the same raw envelope.
+                    "physical_transport": physical_transport,
+                    "model_call_delta": 1 if physical_transport else 0,
+                    "provider_call_delta": 1 if physical_transport else 0,
+                    "durable_response_delta": 1 if physical_transport else 0,
                 })
                 if durable_call is not None:
                     durable_call.mark_parsed(valid=False, error="OUTPUT_TRUNCATED")
@@ -1583,7 +1608,6 @@ class Client:
                         "dropped_property_count": "RECORDED_IN_DERIVED_MANIFEST",
                         "derived_schema_status": "REVALIDATION_PENDING",
                         "derived_response_sha": hashlib.sha256((json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")).hexdigest() if isinstance(value, dict) else None,
-                        "model_call_delta": 0,
                         "retry_delta": 0,
                     })
                 elif issues_before:
@@ -1615,7 +1639,6 @@ class Client:
                         "dropped_property_count": audit["extra_property_count"],
                         "derived_schema_status": audit["derived_schema_status"],
                         "derived_response_sha": audit["normalized_response_sha256"],
-                        "model_call_delta": 0,
                         "retry_delta": 0,
                         "derived_state": derived_state.get("state"),
                         "derived_recorded_state": recorded_state.get("state"),
@@ -1632,7 +1655,6 @@ class Client:
                         "dropped_property_count": 0,
                         "derived_schema_status": "NOT_CREATED",
                         "derived_response_sha": None,
-                        "model_call_delta": 0,
                         "retry_delta": 0,
                     })
             found, issues = validate_response(value, events)

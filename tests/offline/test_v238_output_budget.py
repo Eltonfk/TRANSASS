@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit
 from production_v2_1_3_adapter import APPROVED_CONFIG
-from v238_per_call_durability import DurableCallError
+from v238_per_call_durability import DurableCallError, DurableV226Call
 
 
 class OutputBudgetTests(unittest.TestCase):
@@ -104,7 +104,8 @@ class OutputBudgetTests(unittest.TestCase):
                 content = raw
 
             posts = []
-            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *a, **k: posts.append(1) or Response()):
+            with patch("pipeline_v2_1_3.requests.post", side_effect=lambda *a, **k: posts.append(1) or Response()), \
+                    patch("pipeline_v2_1_3.strict_json", side_effect=AssertionError("truncated content reached parser")):
                 client = Client(config, [], {}, model="qwen3.5:9b")
                 with self.assertRaises(DurableCallError) as raised:
                     client.call([Unit("unit-1", [event])], {1: event}, {1: {"previous": [], "next": []}})
@@ -114,6 +115,10 @@ class OutputBudgetTests(unittest.TestCase):
                 self.assertEqual(observation["raw_noncompliance_class"], "OUTPUT_TRUNCATED")
                 self.assertEqual(observation["normalization_attempted"], False)
                 self.assertEqual(observation["retry_delta"], 0)
+                self.assertTrue(observation["physical_transport"])
+                self.assertEqual(observation["model_call_delta"], 1)
+                self.assertEqual(observation["provider_call_delta"], 1)
+                self.assertEqual(observation["durable_response_delta"], 1)
                 self.assertEqual(observation["durable_state"], "PARSED_INVALID")
                 self.assertEqual(raised.exception.args[0], "V238_OUTPUT_TRUNCATED")
 
@@ -124,6 +129,42 @@ class OutputBudgetTests(unittest.TestCase):
                 with self.assertRaises(DurableCallError):
                     resumed.call([Unit("unit-1", [event])], {1: event}, {1: {"previous": [], "next": []}})
             self.assertEqual(resumed.calls[-1]["durable_state"], "PARSED_INVALID")
+            self.assertFalse(resumed.calls[-1]["physical_transport"])
+            self.assertEqual(resumed.calls[-1]["model_call_delta"], 0)
+            self.assertEqual(resumed.calls[-1]["provider_call_delta"], 0)
+            self.assertEqual(resumed.calls[-1]["durable_response_delta"], 0)
+
+    def test_output_budget_is_bound_into_family_identity(self):
+        """A ledger created under the old 384 contract cannot reopen at 1024."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_context = self.durable_context(root)
+            old_context["configuration_hash"] = "3" * 64  # historical num_predict=384
+            old = DurableV226Call(old_context, {"model": "qwen3.5:9b"}, {
+                "phase": "initial", "attempt_type": "INITIAL",
+                "logical_batch_id": "batch-0", "attempt_ordinal": 1,
+                "parent_attempt_id": None, "batch_index": 0,
+                "unit_ids": [1], "unit_membership_sha256": "1",
+            })
+            old.reserve()
+            new_context = dict(old_context, configuration_hash="4" * 64)  # canonical num_predict=1024
+            new = DurableV226Call(new_context, {"model": "qwen3.5:9b"}, {
+                "phase": "initial", "attempt_type": "INITIAL",
+                "logical_batch_id": "batch-0", "attempt_ordinal": 1,
+                "parent_attempt_id": None, "batch_index": 0,
+                "unit_ids": [1], "unit_membership_sha256": "1",
+            })
+            with self.assertRaisesRegex(DurableCallError, "FAMILY_CONTRACT_MISMATCH"):
+                new.reserve()
+
+    def test_r6b_dry_limits_allow_one_initial_and_zero_retry(self):
+        """The pre-call contract is a dry bound, never an implicit retry path."""
+        config = Config("http://ollama.invalid", num_ctx=4096, num_predict=1024, max_retries=0)
+        self.assertEqual(config.num_predict, 1024)
+        self.assertEqual(config.num_ctx, 4096)
+        self.assertEqual(config.max_retries, 0)
+        dry_contract = {"initial_maximum": 1, "retry_maximum": 0}
+        self.assertEqual(dry_contract, {"initial_maximum": 1, "retry_maximum": 0})
 
 
 if __name__ == "__main__":
