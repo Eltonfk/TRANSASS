@@ -18,6 +18,7 @@ from v238_per_call_durability import canonical_bytes, sha256_bytes
 
 POLICY = "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1"
 POLICY_V2 = "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"
+POLICY_V3 = "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V3_OPAQUE_CONTEXT_METADATA"
 
 
 class NormalizationRejected(ValueError):
@@ -204,4 +205,82 @@ def project_multi_kind_response(
     return normalized, audit
 
 
-__all__ = ["NormalizationRejected", "POLICY", "POLICY_V2", "project_extra_property_response", "project_multi_kind_response"]
+def project_opaque_context_response(
+    value: Any,
+    expected_ids: Sequence[int],
+    *,
+    expected_item_keys: Mapping[int, Sequence[str]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Project the observed opaque context metadata defect.
+
+    V3 is deliberately shape-bound, not request-content-bound: ``context`` is
+    non-authoritative output metadata and may be discarded only when it has
+    the exact observed shape ``[{"previous": ..., "next": ...}]``.  Canonical
+    ``id``/``text`` values are validated before projection and are copied
+    without interpretation.
+    """
+    if not isinstance(value, dict) or set(value) != {"translations"}:
+        raise NormalizationRejected("NORMALIZATION_ROOT_STRUCTURE_INVALID")
+    rows = value.get("translations")
+    expected = [int(item_id) for item_id in expected_ids]
+    if not isinstance(rows, list) or len(rows) != len(expected) or len(set(expected)) != len(expected):
+        raise NormalizationRejected("NORMALIZATION_CARDINALITY_INVALID")
+    if expected_item_keys is not None:
+        for item_id in expected:
+            if _item_contract(item_id, expected_item_keys) != {"id", "text"}:
+                raise NormalizationRejected("NORMALIZATION_V3_TEXT_ONLY_REQUIRED")
+    expected_set = set(expected)
+    seen: set[int] = set()
+    offenders: list[int] = []
+    context_shape_hashes: dict[str, str] = {}
+    projected: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            raise NormalizationRejected("NORMALIZATION_ITEM_NOT_OBJECT")
+        item_id = item.get("id")
+        if isinstance(item_id, bool) or not isinstance(item_id, int):
+            raise NormalizationRejected("NORMALIZATION_ID_TYPE_INVALID")
+        if item_id not in expected_set:
+            raise NormalizationRejected("NORMALIZATION_UNKNOWN_ID")
+        if item_id in seen:
+            raise NormalizationRejected("NORMALIZATION_DUPLICATE_ID")
+        seen.add(item_id)
+        required = _item_contract(item_id, expected_item_keys)
+        if required != {"id", "text"}:
+            raise NormalizationRejected("NORMALIZATION_V3_TEXT_ONLY_REQUIRED")
+        _validate_scalar_fields(item, required)
+        extras = set(item) - required
+        if extras not in (set(), {"context"}):
+            raise NormalizationRejected("NORMALIZATION_V3_ONLY_CONTEXT_EXTRA_ALLOWED")
+        if extras == {"context"}:
+            context = item.get("context")
+            if not isinstance(context, list) or len(context) != 1 or not isinstance(context[0], dict):
+                raise NormalizationRejected("NORMALIZATION_V3_CONTEXT_SHAPE_INVALID")
+            if set(context[0]) != {"previous", "next"}:
+                raise NormalizationRejected("NORMALIZATION_V3_CONTEXT_KEYS_INVALID")
+            offenders.append(item_id)
+            context_shape_hashes[str(item_id)] = sha256_bytes(canonical_bytes(context))
+        projected.append({"id": item["id"], "text": item["text"]})
+    if seen != expected_set:
+        raise NormalizationRejected("NORMALIZATION_MISSING_ID")
+    normalized = {"translations": projected}
+    audit = {
+        "policy": POLICY_V3,
+        "raw_schema_status": "INVALID_EXTRA_PROPERTY",
+        "derived_schema_status": "VALID_AFTER_DETERMINISTIC_PROJECTION",
+        "expected_count": len(expected),
+        "returned_count": len(rows),
+        "offending_item_count": len(offenders),
+        "removed_property": "context",
+        "removed_property_count": len(offenders),
+        "extra_property_count": len(offenders),
+        "observed_context_shape": "array_length_1_object_previous_next",
+        "context_shape_hashes": context_shape_hashes,
+        "dropped_value_hashes": context_shape_hashes,
+        "raw_id_set_sha256": sha256_bytes(canonical_bytes(sorted(seen))),
+        "normalized_response_sha256": sha256_bytes(canonical_bytes(normalized)),
+    }
+    return normalized, audit
+
+
+__all__ = ["NormalizationRejected", "POLICY", "POLICY_V2", "POLICY_V3", "project_extra_property_response", "project_multi_kind_response", "project_opaque_context_response"]

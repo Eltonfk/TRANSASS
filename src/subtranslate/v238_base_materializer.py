@@ -11,11 +11,33 @@ import json
 import os
 import shutil
 import tempfile
-import uuid
+import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from production_v2_2_6_adapter import translate_subtitle_file_v2_2_6
+
+
+_OPERATION_ID_LOCK = threading.Lock()
+_LAST_OPERATION_SECOND: datetime | None = None
+
+
+def new_operation_id(prefix: str = "V238_OPERATION") -> str:
+    """Generate a future operation identity with one UTC timestamp.
+
+    Existing operation IDs are never rewritten.  A process-local monotonic
+    second prevents two generated IDs with the same prefix from colliding
+    during the same second while retaining the required ``..._YYYYMMDDTHHMMSSZ``
+    format.
+    """
+    global _LAST_OPERATION_SECOND
+    with _OPERATION_ID_LOCK:
+        current = datetime.now(UTC).replace(microsecond=0)
+        if _LAST_OPERATION_SECOND is not None and current <= _LAST_OPERATION_SECOND:
+            current = _LAST_OPERATION_SECOND + timedelta(seconds=1)
+        _LAST_OPERATION_SECOND = current
+        return f"{prefix}_{current.strftime('%Y%m%dT%H%M%SZ')}"
 
 
 _METRIC_KEYS = (
@@ -200,7 +222,7 @@ class CanonicalV226LiveMaterializer:
             if missing:
                 raise BaseTranslationMaterializerError("V238_LIVE_CHECKPOINT_IDENTITY_MISSING:" + ",".join(missing))
         identity = {
-            "operation_id": str(context.get("operation_id") or uuid.uuid4()),
+            "operation_id": str(context.get("operation_id") or new_operation_id()),
             "source_sha256": source_sha,
             "episode_id": context.get("episode_id"),
             "anime_series_id": context.get("anime_series_id"),

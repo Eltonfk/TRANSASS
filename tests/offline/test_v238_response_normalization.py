@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from v238_per_call_durability import DurableCallError, DurableCallFault, DurableV226Call
-from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, project_extra_property_response, project_multi_kind_response
+from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, POLICY_V3, project_extra_property_response, project_multi_kind_response, project_opaque_context_response
 
 
 class ResponseNormalizationTests(unittest.TestCase):
@@ -100,6 +100,60 @@ class ResponseNormalizationTests(unittest.TestCase):
         mixed = {item_id: (("id", "segments") if item_id == 2 else ("id", "text")) for item_id in range(1, 9)}
         with self.assertRaisesRegex(NormalizationRejected, "TEXT_ONLY_REQUIRED"):
             project_multi_kind_response(value, range(1, 9), expected_item_keys=mixed)
+
+    def opaque_context_value(self):
+        return {"translations": [
+            {"id": item_id, "text": "ok", "context": [{"previous": [], "next": []}]}
+            for item_id in range(1, 9)
+        ]}
+
+    def test_v3_accepts_observed_opaque_context_shape_and_preserves_canonical_fields(self):
+        value = self.opaque_context_value()
+        before = [(row["id"], row["text"]) for row in value["translations"]]
+        projected, audit = project_opaque_context_response(
+            value, range(1, 9), expected_item_keys={item_id: ("id", "text") for item_id in range(1, 9)}
+        )
+        self.assertEqual(audit["policy"], POLICY_V3)
+        self.assertEqual(audit["offending_item_count"], 8)
+        self.assertEqual([(row["id"], row["text"]) for row in projected["translations"]], before)
+        self.assertTrue(all(set(row) == {"id", "text"} for row in projected["translations"]))
+
+    def test_v3_rejects_context_shapes_and_unknown_extras(self):
+        invalid = []
+        for context in ("opaque", {"previous": [], "next": []}, None, [], [{"previous": [], "next": []}, {"previous": [], "next": []}], ["not-object"], [{"next": []}], [{"previous": []}], [{"previous": [], "next": [], "other": 1}]):
+            value = self.opaque_context_value(); value["translations"][0]["context"] = context; invalid.append(value)
+        value = self.opaque_context_value(); value["translations"][0]["other"] = "x"; invalid.append(value)
+        value = self.opaque_context_value(); value["extra"] = True; invalid.append(value)
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(NormalizationRejected):
+                    project_opaque_context_response(value, range(1, 9), expected_item_keys={item_id: ("id", "text") for item_id in range(1, 9)})
+
+    def test_v3_rejects_non_text_contract_and_invalid_canonical_fields(self):
+        segmented = {item_id: ("id", "segments") for item_id in range(1, 9)}
+        with self.assertRaisesRegex(NormalizationRejected, "TEXT_ONLY_REQUIRED"):
+            project_opaque_context_response(self.opaque_context_value(), range(1, 9), expected_item_keys=segmented)
+        invalid = self.opaque_context_value(); invalid["translations"][0]["text"] = ""
+        with self.assertRaises(NormalizationRejected):
+            project_opaque_context_response(invalid, range(1, 9), expected_item_keys={item_id: ("id", "text") for item_id in range(1, 9)})
+
+    def test_v3_derived_manifest_is_policy_and_hash_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self.context(root, response_normalization_policy=POLICY_V3)
+            metadata = {"attempt_type": "INITIAL", "logical_batch_id": "v3-batch", "attempt_ordinal": 1, "parent_attempt_id": None, "unit_membership_sha256": "membership"}
+            call = DurableV226Call(context, {"payload": 3}, metadata)
+            call.reserve(); call.prepare_request()
+            with call.exclusive_transport_claim() as owner:
+                self.assertTrue(owner)
+                call.begin_transport(); call.record_response(b'{"translations":[]}', status_code=200)
+            call.mark_parsed(valid=False, error="opaque context")
+            value, audit = project_opaque_context_response(self.opaque_context_value(), range(1, 9), expected_item_keys={item_id: ("id", "text") for item_id in range(1, 9)})
+            call.record_derived_normalization(value, audit)
+            call.mark_derived_parsed_valid()
+            resumed = DurableV226Call(context, {"payload": 3}, metadata)
+            self.assertEqual(resumed.state(), "DERIVED_PARSED_VALID")
+            self.assertEqual(resumed.load_derived_response(), b'{"translations":[{"id":1,"text":"ok"},{"id":2,"text":"ok"},{"id":3,"text":"ok"},{"id":4,"text":"ok"},{"id":5,"text":"ok"},{"id":6,"text":"ok"},{"id":7,"text":"ok"},{"id":8,"text":"ok"}]}\n')
 
     def test_valid_subset_is_consumed_by_client_restart_without_post(self):
         from pipeline_v2_1_3 import CleanSegment, Client, Config, Event, Unit

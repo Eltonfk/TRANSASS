@@ -1059,7 +1059,7 @@ class DurableV226Call:
             if manifest.get("source_response_sha256") != state.get("response_sha256"):
                 raise DurableCallError("V238_DERIVED_SOURCE_RESPONSE_MISMATCH")
             expected_policy = str(self.context.get("response_normalization_policy") or "")
-            if manifest.get("policy") not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"} or manifest.get("policy") != expected_policy:
+            if manifest.get("policy") not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V3_OPAQUE_CONTEXT_METADATA"} or manifest.get("policy") != expected_policy:
                 raise DurableCallError("V238_DERIVED_POLICY_MISMATCH")
             expected_identity = {
                 "source_response_sha256": state.get("response_sha256"),
@@ -1099,7 +1099,7 @@ class DurableV226Call:
         if current.get("state") != "PARSED_INVALID":
             raise DurableCallError("V238_DERIVED_NORMALIZATION_REQUIRES_PARSED_INVALID")
         policy = str(audit.get("policy") or "")
-        if policy not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"}:
+        if policy not in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V3_OPAQUE_CONTEXT_METADATA"}:
             raise DurableCallError("V238_DERIVED_POLICY_INVALID")
         derived_bytes = canonical_bytes(normalized_value)
         source_sha = str(current.get("response_sha256") or "")

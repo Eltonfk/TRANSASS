@@ -1589,8 +1589,8 @@ class Client:
             value = body if (derived_body or subset_reused) else (strict_json(content) if self.config.strict_json else json.loads(content))
             normalization_policy = str((durable_context or {}).get("response_normalization_policy") or "") if durable_context else ""
             normalized = False
-            if normalization_policy in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND"} and not subset_reused:
-                from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, project_extra_property_response, project_multi_kind_response
+            if normalization_policy in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V3_OPAQUE_CONTEXT_METADATA"} and not subset_reused:
+                from v238_response_normalization import NormalizationRejected, POLICY, POLICY_V2, POLICY_V3, project_extra_property_response, project_multi_kind_response, project_opaque_context_response
                 if durable_call is None:
                     raise NormalizationRejected("V238_NORMALIZATION_REQUIRES_DURABLE_CONTEXT")
                 found_before, issues_before = validate_response(value, events)
@@ -1621,7 +1621,12 @@ class Client:
                         int(event_id): ("id", "segments") if is_multi_speaker(event) else ("id", "text")
                         for event_id, event in events.items()
                     }
-                    projector = project_multi_kind_response if normalization_policy == POLICY_V2 else project_extra_property_response
+                    if normalization_policy == POLICY_V2:
+                        projector = project_multi_kind_response
+                    elif normalization_policy == POLICY_V3:
+                        projector = project_opaque_context_response
+                    else:
+                        projector = project_extra_property_response
                     projected, audit = projector(value, sorted(events), expected_item_keys=expected_item_keys)
                     projected_found, projected_issues = validate_response(projected, events)
                     if projected_issues:
@@ -1633,7 +1638,7 @@ class Client:
                         "raw_schema_status": audit["raw_schema_status"],
                         "raw_noncompliance_class": "MODEL_RESPONSE_EXTRA_PROPERTY_VIOLATING_STRICT_SCHEMA",
                         "normalization_attempted": True,
-                        "normalization_policy": POLICY,
+                        "normalization_policy": normalization_policy,
                         "normalization_status": "DERIVED_PARSED_VALID",
                         "offending_item_count": audit["offending_item_count"],
                         "dropped_property_count": audit["extra_property_count"],
