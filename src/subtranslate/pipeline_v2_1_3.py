@@ -86,10 +86,10 @@ class Config:
     think: bool = False
     temperature: float = 0.0
     num_ctx: int = 4096
-    # 192 truncated a resposta estruturada já em blocos de quatro eventos na
-    # amostra real; 384 é o limite experimental inicial e continua ajustável
-    # pelo arquivo de configuração, sem alterar o código.
-    num_predict: int = 384
+    # V226 responses must have enough output headroom for the canonical JSON
+    # envelope.  This is part of the family configuration identity; callers
+    # may still override it explicitly, but the canonical default is 1024.
+    num_predict: int = 1024
     keep_alive: str = "30m"
     timeout_seconds: float = 240
     batch_target_size: int = 6
@@ -1538,6 +1538,27 @@ class Client:
                 if key in body: observation[key] = body[key]
             for key in ("prompt_eval_duration", "eval_duration", "load_duration", "total_duration"):
                 if key in body: observation[key + "_seconds"] = body[key] / 1_000_000_000
+            # Ollama's length stop is a durable, known non-success.  The raw
+            # envelope remains immutable and auditable, but its content must
+            # never enter strict parsing, normalization, valid-subset
+            # recovery, or retry planning.  Mark the durable attempt first so
+            # restart cannot reinterpret it as an ordinary parse exception.
+            if body.get("done_reason") == "length":
+                observation.update({
+                    "raw_schema_status": "INVALID_TRUNCATED",
+                    "raw_noncompliance_class": "OUTPUT_TRUNCATED",
+                    "normalization_attempted": False,
+                    "normalization_status": "NOT_APPLICABLE_OUTPUT_TRUNCATED",
+                    "derived_schema_status": "NOT_CREATED",
+                    "structural_issues": ["OUTPUT_TRUNCATED"],
+                    "retry_delta": 0,
+                    "model_call_delta": 0,
+                })
+                if durable_call is not None:
+                    durable_call.mark_parsed(valid=False, error="OUTPUT_TRUNCATED")
+                    observation["durable_state"] = durable_call.state()
+                from v238_per_call_durability import DurableCallError
+                raise DurableCallError("V238_OUTPUT_TRUNCATED")
             if durable_call is not None:
                 durable_call._fault("before_parse")
             value = body if (derived_body or subset_reused) else (strict_json(content) if self.config.strict_json else json.loads(content))

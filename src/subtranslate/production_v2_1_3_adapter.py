@@ -33,7 +33,7 @@ APPROVED_CONFIG = {
     "think": False,
     "temperature": 0.0,
     "num_ctx": 4096,
-    "num_predict": 384,
+    "num_predict": 1024,
     "keep_alive": "30m",
     "timeout_seconds": 240.0,
     "batch_target_size": 8,
