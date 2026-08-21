@@ -1,0 +1,24 @@
+[Unit]
+Description=Subtranslate one-shot recovery guard broker
+After=network.target
+
+[Service]
+User=subtranslate-guard
+Group=subtranslate-guard
+UMask=0077
+StateDirectory=subtranslate-guard
+RuntimeDirectory=subtranslate-guard
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+ReadWritePaths=/var/lib/subtranslate-guard
+ExecStart=/usr/local/lib/subtranslate-guard/bin/subtranslate-guard-service
+
+[Install]
+WantedBy=multi-user.target
