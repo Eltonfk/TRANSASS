@@ -459,12 +459,42 @@ class FoundationInstallerRepairTests(unittest.TestCase):
             captured["env"] = kwargs["env"]
             return subprocess.CompletedProcess(argv, 0, stdout=b"blob\n", stderr=b"")
 
-        with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict(os.environ, {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": "*",
+            "GIT_DIR": "/tmp/attacker.git",
+            "HOME": "/tmp/attacker-home",
+        }, clear=False), patch("subprocess.run", side_effect=fake_run):
             reader._run(("cat-file", "-t", "a" * 40))
-        self.assertEqual(captured["argv"][:2], ("/usr/bin/git", "--no-replace-objects"))
+        self.assertEqual(captured["argv"][:6], (
+            "/usr/bin/git",
+            "--no-replace-objects",
+            "-c",
+            "safe.directory=/home/palhacinho/codex-projects/subtranslate-v238-candidate",
+            "-C",
+            "/home/palhacinho/codex-projects/subtranslate-v238-candidate",
+        ))
+        self.assertEqual(captured["argv"][6:], ("cat-file", "-t", "a" * 40))
         self.assertEqual(captured["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(captured["env"]["HOME"], "/nonexistent")
         self.assertEqual(set(captured["env"]) , set(self.installer.GitObjectReader._env()))
+        self.assertNotIn("GIT_CONFIG_COUNT", captured["env"])
+        self.assertNotIn("GIT_CONFIG_KEY_0", captured["env"])
+        self.assertNotIn("GIT_CONFIG_VALUE_0", captured["env"])
+        self.assertNotIn("GIT_DIR", captured["env"])
+
+    def test_git_safe_directory_policy_is_fixed_and_non_persistent(self):
+        source = INSTALLER_PATH.read_text(encoding="utf-8")
+        self.assertIn("safe.directory={REPOSITORY_AUTHORITY}", source)
+        self.assertNotIn("safe.directory=*", source)
+        self.assertNotIn("safe.directory=/*", source)
+        self.assertNotIn("safe.directory=~", source)
+        for command in ("git config --global", "git config --system", "git config --local",
+                        "git config --add", "git config --replace-all"):
+            self.assertNotIn(command, source)
+        self.assertEqual(source.count("safe.directory="), 1)
+        self.assertEqual(source.count("REPOSITORY_AUTHORITY"), 7)
 
     def test_strict_tree_and_commit_parsers_reject_malformed_objects(self):
         with self.assertRaises(self.installer.FoundationError):
@@ -688,7 +718,7 @@ class GitMetadataRepairTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, stdout=b"commit\n", stderr=b"")
                 with patch("subprocess.run", side_effect=fake_run):
                     reader._run(("cat-file", "-t", "a" * 40))
-            self.assertEqual(calls[0][2:4], ("cat-file", "-t"))
+            self.assertEqual(calls[0][6:8], ("cat-file", "-t"))
             self.assertNotIn("!touch", calls[0])
 
 

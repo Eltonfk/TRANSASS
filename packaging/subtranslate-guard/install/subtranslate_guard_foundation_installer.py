@@ -374,7 +374,21 @@ class GitObjectReader:
         self.metadata["metadata_fingerprint_after"] = current
 
     def _run(self, args: Iterable[str], *, binary: bool = False) -> bytes | str:
-        argv = (str(GIT), "--no-replace-objects", *tuple(args))
+        # The candidate worktree is a fixed transport source.  Git may reject
+        # it under a privileged UID because the worktree is owned by the
+        # development user; this exact, command-line-only exception permits
+        # access without persisting trust in any Git config file.  It is not a
+        # content authority: every object is still independently hashed and
+        # checked against the release contract below.
+        argv = (
+            str(GIT),
+            "--no-replace-objects",
+            "-c",
+            f"safe.directory={REPOSITORY_AUTHORITY}",
+            "-C",
+            str(REPOSITORY_AUTHORITY),
+            *tuple(args),
+        )
         try:
             result = subprocess.run(argv, cwd=str(REPOSITORY_AUTHORITY), env=self._env(), shell=False,
                                     capture_output=True, check=False, timeout=10)
