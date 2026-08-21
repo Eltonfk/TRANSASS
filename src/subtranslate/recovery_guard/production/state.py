@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import fcntl
+import grp
 import json
 import os
+import pwd
 import tempfile
 import time
 import re
@@ -13,12 +15,102 @@ from typing import Any
 from .schema import SchemaError
 
 FUTURE_STATE_ROOT = Path("/var/lib/subtranslate-guard")
+PRODUCTION_STATE_ROOT = FUTURE_STATE_ROOT
+PRODUCTION_STATE_USER = "subtranslate-guard"
+PRODUCTION_STATE_GROUP = "subtranslate-guard"
+PRODUCTION_STATE_MODE = 0o700
 FOLDERS = ("armed", "claimed", "terminal", "journal", "locks", "backups")
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CLAIMED_EXECUTION_STATE_UNKNOWN", "STALE_INVALIDATED"})
 
 
 class StateError(RuntimeError):
     pass
+
+
+# The production token is deliberately module-private.  There is no public
+# bypass switch and no caller-controlled equivalent.
+_PRODUCTION_TOKEN = object()
+
+
+def _mode(stat_result: os.stat_result) -> int:
+    return stat_result.st_mode & 0o777
+
+
+def _validate_production_state_boundary(
+    path: Path,
+    *,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
+    stat_provider=os.lstat,
+) -> None:
+    """Validate an already-installed state tree without changing it.
+
+    This helper is intentionally pure with respect to the filesystem: it
+    performs only lstat/resolve checks and never creates or repairs a path.
+    ``expected_uid``/``expected_gid`` are injectable solely for deterministic
+    offline tests; the production factory resolves the fixed system account.
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise StateError("PRODUCTION_STATE_ROOT_FIXED")
+    try:
+        root_info = stat_provider(candidate)
+    except (FileNotFoundError, OSError) as exc:
+        raise StateError("PRODUCTION_STATE_BOUNDARY_NOT_INSTALLED") from exc
+    if not os.path.isdir(candidate) or os.path.islink(candidate):
+        raise StateError("PRODUCTION_STATE_ROOT_UNSAFE")
+    try:
+        if candidate.resolve(strict=True) != candidate.absolute():
+            raise StateError("PRODUCTION_STATE_ROOT_ESCAPE")
+    except OSError as exc:
+        raise StateError("PRODUCTION_STATE_ROOT_UNSAFE") from exc
+    if expected_uid is None or expected_gid is None:
+        raise StateError("PRODUCTION_STATE_OWNER_POLICY_UNRESOLVED")
+    if root_info.st_uid != expected_uid or root_info.st_gid != expected_gid:
+        raise StateError("PRODUCTION_STATE_OWNER_MISMATCH")
+    if _mode(root_info) != PRODUCTION_STATE_MODE:
+        raise StateError("PRODUCTION_STATE_MODE_MISMATCH")
+
+    # A writable parent would permit replacement of the state directory even
+    # if the directory itself had the right mode.
+    for parent in candidate.parents:
+        try:
+            parent_info = stat_provider(parent)
+        except (FileNotFoundError, OSError) as exc:
+            raise StateError("PRODUCTION_STATE_PARENT_UNSAFE") from exc
+        if os.path.islink(parent) or parent_info.st_uid != 0 or (_mode(parent_info) & 0o022):
+            raise StateError("PRODUCTION_STATE_PARENT_UNSAFE")
+
+    for name in FOLDERS:
+        folder = candidate / name
+        try:
+            info = stat_provider(folder)
+        except (FileNotFoundError, OSError) as exc:
+            raise StateError("PRODUCTION_STATE_LAYOUT_INCOMPLETE") from exc
+        if os.path.islink(folder) or not os.path.isdir(folder):
+            raise StateError("PRODUCTION_STATE_LAYOUT_UNSAFE")
+        if info.st_uid != expected_uid or info.st_gid != expected_gid or _mode(info) != PRODUCTION_STATE_MODE:
+            raise StateError("PRODUCTION_STATE_LAYOUT_UNSAFE")
+
+
+def open_installed_production_state() -> "ProductionStateStore":
+    """Open the fixed, pre-created production state root read/write.
+
+    The future privileged foundation creates the root and folders.  This
+    factory only resolves the fixed account and validates the installed
+    boundary; it never creates, chmods, chowns, or otherwise repairs state.
+    """
+    if PRODUCTION_STATE_ROOT != Path("/var/lib/subtranslate-guard"):
+        raise StateError("PRODUCTION_STATE_ROOT_POLICY_INVALID")
+    try:
+        expected_uid = pwd.getpwnam(PRODUCTION_STATE_USER).pw_uid
+        expected_gid = grp.getgrnam(PRODUCTION_STATE_GROUP).gr_gid
+    except KeyError as exc:
+        raise StateError("PRODUCTION_STATE_BOUNDARY_NOT_INSTALLED") from exc
+    _validate_production_state_boundary(
+        PRODUCTION_STATE_ROOT, expected_uid=expected_uid, expected_gid=expected_gid
+    )
+    return ProductionStateStore(PRODUCTION_STATE_ROOT, _production_token=_PRODUCTION_TOKEN)
 
 CAPABILITY_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -35,10 +127,31 @@ def _fsync_dir(path: Path) -> None:
 
 
 class ProductionStateStore:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, _production_token=None):
         root = Path(root)
-        if root == FUTURE_STATE_ROOT:
-            raise StateError("REAL_STATE_ROOT_REQUIRES_INSTALLATION")
+        is_production_namespace = False
+        if root.is_absolute():
+            try:
+                is_production_namespace = (
+                    root == PRODUCTION_STATE_ROOT
+                    or PRODUCTION_STATE_ROOT in root.parents
+                    or root.resolve(strict=False) == PRODUCTION_STATE_ROOT
+                )
+            except OSError:
+                is_production_namespace = True
+        if is_production_namespace:
+            if root != PRODUCTION_STATE_ROOT or _production_token is not _PRODUCTION_TOKEN:
+                raise StateError("REAL_STATE_ROOT_REQUIRES_INSTALLATION")
+            # Production state is created by the privileged foundation; the
+            # runtime adapter must never auto-create or repair it.
+            try:
+                uid = pwd.getpwnam(PRODUCTION_STATE_USER).pw_uid
+                gid = grp.getgrnam(PRODUCTION_STATE_GROUP).gr_gid
+            except KeyError as exc:
+                raise StateError("PRODUCTION_STATE_BOUNDARY_NOT_INSTALLED") from exc
+            _validate_production_state_boundary(root, expected_uid=uid, expected_gid=gid)
+            self.root = root
+            return
         if root.is_symlink() or not root.exists() or not root.is_dir():
             raise StateError("STATE_ROOT_UNSAFE")
         # Keep the caller's lexical root.  Resolving before checking would

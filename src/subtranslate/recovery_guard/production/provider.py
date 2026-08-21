@@ -11,10 +11,13 @@ from typing import Any, Callable
 from .bindings import validate_bindings
 from .runner import FUTURE_INTERPRETER
 
-FIXED_PROBE = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_readonly_probe.py")
 FIXED_PYTHON = Path(FUTURE_INTERPRETER)
-FIXED_EXECUTOR = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate/packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_recovery_ledger_reprepare_v2.py")
-FIXED_DURABILITY = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate/packaging/subtranslate-guard/bundle-source/src/subtranslate/v238_per_call_durability.py")
+# The installed provider lives below <release>/src/subtranslate/... and the
+# only source it may execute/hash is the protected release containing it.
+RELEASE_ROOT = Path(__file__).resolve().parents[4]
+FIXED_PROBE = RELEASE_ROOT / ".opencode/tools/subtranslate_readonly_probe.py"
+FIXED_EXECUTOR = RELEASE_ROOT / ".opencode/tools/subtranslate_recovery_ledger_reprepare_v2.py"
+FIXED_DURABILITY = RELEASE_ROOT / "src/subtranslate/v238_per_call_durability.py"
 FIXED_TARGET = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_B4_RECOVERY/episode-budget.json")
 EXPECTED_OPERATION = "SUBTRANSLATE_V238_E07_R6C_B4_RECOVERY_20260818T165144Z"
 EXPECTED_FAMILY = "V238_E07_R6C_B4_RECOVERY"
@@ -26,6 +29,27 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 class BindingProviderError(RuntimeError):
     pass
+
+
+def _protected_release_file(path: Path) -> Path:
+    """Resolve a release component while rejecting symlinked boundaries."""
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(RELEASE_ROOT)
+    except (OSError, ValueError) as exc:
+        raise BindingProviderError("PROTECTED_RELEASE_PATH_INVALID") from exc
+    for parent in (path, path.parent, *path.parent.parents):
+        if parent == RELEASE_ROOT.parent:
+            break
+        try:
+            info = parent.lstat()
+        except OSError as exc:
+            raise BindingProviderError("PROTECTED_RELEASE_PATH_INVALID") from exc
+        if parent.is_symlink() or info.st_uid != 0 or (info.st_mode & 0o022):
+            raise BindingProviderError("PROTECTED_RELEASE_SYMLINK")
+    if path.is_symlink() or not path.is_file():
+        raise BindingProviderError("PROTECTED_RELEASE_PATH_INVALID")
+    return resolved
 
 def _sha(path: Path) -> str:
     if path.is_symlink() or not path.is_file():
@@ -53,7 +77,8 @@ class PhysicalBindingProvider:
     def _probe(self) -> dict[str, Any]:
         environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PYTHONPATH": ""}
         try:
-            result = subprocess.run((FUTURE_INTERPRETER, "-I", "-B", str(FIXED_PROBE)), shell=False, cwd="/", env=environment,
+            probe = _protected_release_file(FIXED_PROBE)
+            result = subprocess.run((FUTURE_INTERPRETER, "-I", "-B", str(probe)), shell=False, cwd="/", env=environment,
                                     capture_output=True, text=True, check=False)
             if result.returncode != 2 or len(result.stdout.encode()) > 2 * 1024 * 1024:
                 raise BindingProviderError("PROBE_EXIT_UNEXPECTED")
@@ -87,13 +112,15 @@ class PhysicalBindingProvider:
         if report.get("execution_toolchain", {}).get("executor_id") != EXPECTED_EXECUTOR:
             raise BindingProviderError("EXECUTOR_ID_INVALID")
         interpreter_path = FIXED_PYTHON.resolve(strict=True)
+        executor_path = _protected_release_file(FIXED_EXECUTOR)
+        durability_path = _protected_release_file(FIXED_DURABILITY)
         values = {
             "operation_id": operation_id, "family_id": family_id, "episode_id": episode_id,
             "target_path": str(FIXED_TARGET), "target_prewrite_sha256": _sha(FIXED_TARGET),
             "snapshot_fingerprint": snapshot,
             "execution_toolchain_fingerprint": toolchain,
-            "executor_id": EXPECTED_EXECUTOR, "executor_sha256": _sha(FIXED_EXECUTOR),
-            "durability_sha256": _sha(FIXED_DURABILITY), "bundle_manifest_fingerprint": self.bundle_manifest_fingerprint,
+            "executor_id": EXPECTED_EXECUTOR, "executor_sha256": _sha(executor_path),
+            "durability_sha256": _sha(durability_path), "bundle_manifest_fingerprint": self.bundle_manifest_fingerprint,
             "expected_blocker": "RECOVERY_LEDGER_IDENTITY_SCHEMA_INCOMPLETE",
             "fixed_argv_identity": fixed_argv_identity(),
             "python_interpreter_identity": f"{interpreter_path}:{_sha(interpreter_path)}",
