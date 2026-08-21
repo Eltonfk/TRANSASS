@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,16 @@ PUBLIC_KEY_ID_RE = re.compile(r"^ed25519-sha256:[0-9a-f]{64}$")
 
 class ManifestError(ValueError): pass
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# systemd escapes ``-`` as the two literal characters ``\\x2d`` in a path
+# unit name.  This is the one installed component whose relative path is
+# intentionally allowed to contain a backslash.  The exception is exact and
+# role-scoped; every other manifest path remains subject to the normal
+# backslash/traversal rejection below.
+EXPECTED_MEDIATION_MOUNT_SOURCE_PATH = (
+    "systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator"
+    "\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount"
+)
 
 
 def build_manifest_template(*, components: dict[str, str], component_roles: dict[str, str],
@@ -103,24 +114,115 @@ def manifest_fingerprint(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_manifest(manifest)).hexdigest()
 
 
-def validate_current_release_selector(selector: Path, expected_release: Path) -> Path:
-    """Validate the root-controlled ``current`` release selector read-only."""
+def validate_current_release_selector(
+    selector: Path,
+    expected_release: Path,
+    *,
+    stat_provider=os.lstat,
+    readlink_provider=os.readlink,
+) -> Path:
+    """Validate the fixed, root-controlled ``current`` release selector.
+
+    The selector is a symlink, so checking its inode's mode bits is a false
+    positive: symlink modes are conventionally ``0777`` and are not
+    permission gates.  Security is instead established by validating the
+    selector and every boundary in the release chain, then requiring an
+    absolute, direct target inside the sibling ``releases`` directory.  The
+    injectable providers are private test seams; production callers use the
+    fixed filesystem APIs and fixed selector path from the manifest policy.
+    """
     selector = Path(selector)
-    expected_release = Path(expected_release).resolve(strict=True)
+    if not selector.is_absolute():
+        raise ManifestError("RELEASE_SELECTOR_UNSAFE")
     try:
-        info = selector.lstat()
+        selector_info = stat_provider(selector)
     except OSError as exc:
         raise ManifestError("RELEASE_SELECTOR_UNAVAILABLE") from exc
-    if not selector.is_symlink() or info.st_uid != 0 or (info.st_mode & 0o022):
+    if not stat.S_ISLNK(selector_info.st_mode) or selector_info.st_uid != 0:
         raise ManifestError("RELEASE_SELECTOR_UNSAFE")
-    resolved = selector.resolve(strict=True)
-    releases = selector.parent / "releases"
+
+    # Validate the lexical parent chain.  A writable parent can replace the
+    # selector even when the selector inode itself is root-owned.
+    for parent in (selector.parent, *selector.parent.parents):
+        try:
+            parent_info = stat_provider(parent)
+        except OSError as exc:
+            raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE") from exc
+        if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+            raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE")
+        if parent_info.st_uid != 0 or (parent_info.st_mode & 0o022):
+            raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE")
+
     try:
-        resolved.relative_to(releases.resolve(strict=True))
-    except (OSError, ValueError) as exc:
+        raw_target = readlink_provider(selector)
+    except OSError as exc:
+        raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID") from exc
+    if not isinstance(raw_target, str) or not raw_target or "\x00" in raw_target:
+        raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID")
+    target = Path(raw_target)
+    # Relative links make the target depend on a replaceable parent and are
+    # therefore rejected.  The installed selector policy uses an absolute
+    # target under the fixed releases boundary.
+    if not target.is_absolute() or ".." in target.parts:
+        raise ManifestError("RELEASE_SELECTOR_ESCAPE")
+
+    releases_lexical = selector.parent / "releases"
+    try:
+        releases_lexical_info = stat_provider(releases_lexical)
+    except OSError as exc:
+        raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE") from exc
+    if (stat.S_ISLNK(releases_lexical_info.st_mode)
+            or not stat.S_ISDIR(releases_lexical_info.st_mode)
+            or releases_lexical_info.st_uid != 0
+            or (releases_lexical_info.st_mode & 0o022)):
+        raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE")
+    try:
+        expected_raw = Path(expected_release)
+        if not expected_raw.is_absolute():
+            raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID")
+        expected_info = stat_provider(expected_raw)
+        if stat.S_ISLNK(expected_info.st_mode):
+            raise ManifestError("RELEASE_SELECTOR_TARGET_SYMLINK")
+        expected_release = expected_raw.resolve(strict=True)
+        releases = releases_lexical.resolve(strict=True)
+        resolved = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID") from exc
+    try:
+        target.relative_to(releases_lexical)
+    except ValueError as exc:
         raise ManifestError("RELEASE_SELECTOR_ESCAPE") from exc
-    if resolved != expected_release:
+    # Check every lexical component of the raw target, not only the final
+    # resolved directory.  This rejects an intermediate symlink chain.
+    for node in (target, *target.parents):
+        try:
+            node_info = stat_provider(node)
+        except OSError as exc:
+            raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID") from exc
+        if stat.S_ISLNK(node_info.st_mode):
+            raise ManifestError("RELEASE_SELECTOR_SYMLINK_CHAIN")
+        if node == releases_lexical:
+            break
+    try:
+        resolved.relative_to(releases)
+    except ValueError as exc:
+        raise ManifestError("RELEASE_SELECTOR_ESCAPE") from exc
+    if resolved == releases or resolved != expected_release:
         raise ManifestError("RELEASE_SELECTOR_TARGET_MISMATCH")
+
+    # The target itself must be a real, non-writable release directory.  A
+    # symlink chain is rejected by lstat rather than silently followed.
+    try:
+        release_info = stat_provider(resolved)
+        releases_info = stat_provider(releases)
+    except OSError as exc:
+        raise ManifestError("RELEASE_SELECTOR_TARGET_INVALID") from exc
+    if (stat.S_ISLNK(release_info.st_mode) or not stat.S_ISDIR(release_info.st_mode)
+            or release_info.st_uid != 0 or (release_info.st_mode & 0o022)):
+        raise ManifestError("RELEASE_SELECTOR_TARGET_UNSAFE")
+    if (stat.S_ISLNK(releases_info.st_mode) or not stat.S_ISDIR(releases_info.st_mode)
+            or releases_info.st_uid != 0 or (releases_info.st_mode & 0o022)):
+        raise ManifestError("RELEASE_SELECTOR_PARENT_UNSAFE")
     return resolved
 
 def validate_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
@@ -162,7 +264,9 @@ def validate_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
     for relative, expected in components.items():
         if not isinstance(relative, str) or not isinstance(expected, str): raise ManifestError("MANIFEST_COMPONENTS_INVALID")
         relative_path = Path(relative)
-        if relative_path.is_absolute() or str(relative_path) != relative or ".." in relative_path.parts or "\\" in relative or not SHA256_RE.fullmatch(expected):
+        role = role_by_path.get(relative)
+        mount_path_exception = role == "mediation_mount" and relative == EXPECTED_MEDIATION_MOUNT_SOURCE_PATH
+        if relative_path.is_absolute() or str(relative_path) != relative or ".." in relative_path.parts or ("\\" in relative and not mount_path_exception) or not SHA256_RE.fullmatch(expected):
             raise ManifestError("MANIFEST_PATH_OR_HASH_INVALID")
         path = root / relative_path
         try: path.relative_to(root)
@@ -172,7 +276,6 @@ def validate_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
         if path.is_symlink() or not path.is_file():
             raise ManifestError("BUNDLE_COMPONENT_UNSAFE")
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            role = role_by_path.get(relative)
             if role not in security_roles_for_hash and role == "structured_tool" and manifest.get("structured_tool_trust_model") == "UNTRUSTED_FIXED_CLIENT":
                 continue
             raise ManifestError("BUNDLE_COMPONENT_HASH_MISMATCH")
