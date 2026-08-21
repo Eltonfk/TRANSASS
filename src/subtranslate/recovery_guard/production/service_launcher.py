@@ -46,8 +46,13 @@ def _read_manifest(path: Path, bundle_root: Path) -> dict:
 def _load_public_key(path: Path):
     from cryptography.hazmat.primitives import serialization
     info = path.lstat()
-    if path.is_symlink() or not path.is_file() or info.st_uid != 0 or (info.st_mode & 0o022):
+    if (path.is_symlink() or not path.is_file() or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o644):
         raise RuntimeError("INSTALLED_PUBLIC_KEY_UNSAFE")
+    parent = path.parent.lstat()
+    if (path.parent.is_symlink() or not path.parent.is_dir() or parent.st_uid != 0
+            or parent.st_gid != 0 or stat.S_IMODE(parent.st_mode) != 0o755):
+        raise RuntimeError("INSTALLED_PUBLIC_KEY_PARENT_UNSAFE")
     key = serialization.load_pem_public_key(path.read_bytes())
     return key
 
@@ -66,7 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     from subtranslate.recovery_guard.production.state import open_installed_production_state
 
     manifest = _read_manifest(Path("/etc/subtranslate-guard/manifest.json"), release)
-    public = _load_public_key(Path("/etc/subtranslate-guard/keys/issuer.ed25519.pub"))
+    # The private-key directory is intentionally root-only (0700).  The
+    # service receives only the public verification material through the
+    # separate, root-owned 0644 path; it must never need to traverse the
+    # private-key directory.
+    public = _load_public_key(Path("/etc/subtranslate-guard/issuer.ed25519.pub"))
     key_id = public_key_id(public)
     if key_id != manifest.get("public_key_id"):
         raise RuntimeError("PUBLIC_KEY_ID_MISMATCH")

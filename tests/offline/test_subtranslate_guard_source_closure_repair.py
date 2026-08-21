@@ -237,7 +237,7 @@ class MountManifestRepairTests(unittest.TestCase):
                 ).encode()).hexdigest(),
                 "socket_policy": "fixed", "state_root_policy": "fixed", "target_policy": "fixed",
                 "backup_policy": "fixed", "uid_gid_policy": "fixed",
-                "unit_hashes": {"service": components[roles["systemd_service"]], "socket": components[roles["systemd_socket"]]},
+                "unit_hashes": {"service": components[roles["systemd_service"]], "socket": components[roles["systemd_socket"]], "mount": components[roles["mediation_mount"]]},
                 "broker_sha256": components[roles["broker"]],
                 "issuer_sha256": components[roles["issuer"]],
                 "structured_tool_sha256": components[roles["structured_tool"]],
@@ -331,6 +331,9 @@ class MountManifestRepairTests(unittest.TestCase):
                 "schema_version": "1.0.0",
                 "source_git": "sha1:" + HEAD,
                 "source_tree": "sha1:0c2f3a017273f74dfb57ed3265f630bd5f0dd55f",
+                "release_id": HEAD,
+                "release_root": "/usr/local/lib/subtranslate-guard/releases/" + HEAD,
+                "current_selector_target": "/usr/local/lib/subtranslate-guard/releases/" + HEAD,
                 "components": components,
                 "dependency_list": sorted(components),
                 "component_roles": source_map,
@@ -341,9 +344,16 @@ class MountManifestRepairTests(unittest.TestCase):
                 "public_key_id": "ed25519-sha256:" + "b" * 64,
                 "fixed_action_id": "RECOVERY_LEDGER_REPREPARATION",
                 "fixed_argv_identity": hashlib.sha256(json.dumps(["/usr/bin/python3.12", "-I", "-B", EXECUTOR_RELATIVE, "--apply"], separators=(",", ":")).encode()).hexdigest(),
+                "executor_path": "/usr/local/lib/subtranslate-guard/releases/" + HEAD + "/" + EXECUTOR_RELATIVE,
+                "durability_path": "/usr/local/lib/subtranslate-guard/releases/" + HEAD + "/src/subtranslate/v238_per_call_durability.py",
+                "max_claims": 1, "max_applies": 1, "max_retries": 0, "auto_rearm": False,
                 "socket_policy": "fixed", "state_root_policy": "fixed", "target_policy": "fixed",
                 "backup_policy": "fixed", "uid_gid_policy": "fixed",
-                "unit_hashes": {"service": components[source_map["systemd_service"]], "socket": components[source_map["systemd_socket"]]},
+                "unit_hashes": {"service": components[source_map["systemd_service"]], "socket": components[source_map["systemd_socket"]], "mount": components[source_map["mediation_mount"]]},
+                "service_unit_sha256": components[source_map["systemd_service"]],
+                "socket_unit_sha256": components[source_map["systemd_socket"]],
+                "mediation_mount_unit_sha256": components[source_map["mediation_mount"]],
+                "sudoers_sha256": components[source_map["sudoers_policy"]],
                 "broker_sha256": components[source_map["broker"]],
                 "issuer_sha256": components[source_map["issuer"]],
                 "structured_tool_sha256": components[source_map["structured_tool"]],
@@ -351,7 +361,11 @@ class MountManifestRepairTests(unittest.TestCase):
                 "non_security_component_roles": ["structured_tool"],
                 "structured_tool_trust_model": "UNTRUSTED_FIXED_CLIENT",
                 "system_external_dependency_set": source_map["system_external_dependency_set"],
-                "mediation_policy": {"host_view": "bind,ro", "canonical_b4": "fixed", "backing_b4": "fixed"},
+                "mediation_policy": {"host_view": "bind,ro", "canonical_b4": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_B4_RECOVERY", "backing_b4": "/var/lib/subtranslate-guard/recovery-targets/V238_E07_R6C_B4_RECOVERY", "service_view": "ProtectHome=tmpfs;BindPaths;ReadWritePaths", "mount_unit": EXPECTED_MEDIATION_MOUNT_SOURCE_PATH},
+                "state_layout": {"root": "/var/lib/subtranslate-guard", "directories": ["armed", "claimed", "terminal", "journal", "locks", "backups", "recovery-targets"], "owner": "subtranslate-guard", "group": "subtranslate-guard", "mode": "0700"},
+                "public_key_policy": {"algorithm": "Ed25519", "encoding": "PEM SubjectPublicKeyInfo",
+                                       "path": "/etc/subtranslate-guard/issuer.ed25519.pub",
+                                       "id_algorithm": "ed25519-sha256-raw-public-key"},
                 "release_selector_policy": {"path": "/usr/local/lib/subtranslate-guard/current", "must_be_root_owned_symlink": True, "target_prefix": "/usr/local/lib/subtranslate-guard/releases/"},
             }
             manifest["manifest_fingerprint"] = manifest_fingerprint(manifest)
@@ -384,8 +398,9 @@ class FoundationInstallerRepairTests(unittest.TestCase):
         self.assertEqual(CANONICAL_DURABILITY.read_bytes(), BUNDLE_DURABILITY.read_bytes())
         self.assertEqual(digest(LIVE_PROBE), LIVE_PROBE_SHA)
 
-    def test_allowlist_is_exact_and_excludes_unrelated_execution_surface_artifacts(self):
+    def test_allowlist_is_exact_and_binds_policy_execution_assets(self):
         pairs = self.installer.FOUNDATION_RELEASE_ALLOWLIST
+        self.assertEqual(len(pairs), 30)
         self.assertEqual(len({dest for _, dest in pairs}), len(pairs))
         source_paths = {source for source, _ in pairs}
         self.assertIn("packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_readonly_probe.py", source_paths)
@@ -393,8 +408,12 @@ class FoundationInstallerRepairTests(unittest.TestCase):
         self.assertFalse(any(path.startswith(".opencode/agents/") for path in source_paths))
         destinations = {destination for _, destination in pairs}
         self.assertNotIn("current", destinations)
-        self.assertNotIn("systemd/subtranslate-guard.service", destinations)
-        self.assertNotIn("systemd/subtranslate-guard.socket", destinations)
+        self.assertIn("systemd/subtranslate-guard.service", destinations)
+        self.assertIn("systemd/subtranslate-guard.socket", destinations)
+        self.assertIn("sudoers/subtranslate-guard-arm", destinations)
+        self.assertIn("opencode/subtranslate_recovery_apply_once.ts", destinations)
+        self.assertIn("manifests/system-external-dependencies.json", destinations)
+        self.assertIn("manifests/interpreter.identity", destinations)
 
     def test_current_head_plan_rejects_expected_dirty_manifest_contract(self):
         before = {path: digest(path) for path in (V1, V2, CANONICAL_DURABILITY, BUNDLE_DURABILITY, LIVE_PROBE)}
@@ -444,7 +463,7 @@ class FoundationInstallerRepairTests(unittest.TestCase):
             backend = SyntheticGitBackend()
             plan = self.installer.build_foundation_plan("a" * 40, reader=backend)
             self.assertEqual(plan["source_tree_oid"], "b" * 40)
-            self.assertEqual(len(plan["release_files"]), 23)
+            self.assertEqual(len(plan["release_files"]), 30)
             self.assertEqual(plan["execution_surface_effect"], "NONE")
             self.assertEqual(backend.write_count, 0)
             self.assertEqual(list(Path(tmp).iterdir()), list(before))

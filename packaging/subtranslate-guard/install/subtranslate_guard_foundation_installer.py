@@ -43,6 +43,14 @@ NOLOGIN = "/usr/sbin/nologin"
 SCHEMA_VERSION = "1.0.0"
 SOURCE_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 ROOT_CONTROLLED_BOOTSTRAP_ROOT = Path("/usr/local/lib/subtranslate-guard/bootstrap")
+MEDIATION_MOUNT_SOURCE_PATH = (
+    "packaging/subtranslate-guard/systemd/home-palhacinho-codex\\x2dprojects-anime"
+    "\\x2dsubtitle\\x2dtranslator\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount"
+)
+MEDIATION_MOUNT_DESTINATION_PATH = (
+    "systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator"
+    "\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount"
+)
 
 
 def git_object_oid(object_type: str, payload: bytes) -> str:
@@ -135,6 +143,13 @@ FOUNDATION_RELEASE_ALLOWLIST = (
     ("packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_readonly_probe.py", ".opencode/tools/subtranslate_readonly_probe.py"),
     ("packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_recovery_ledger_reprepare_v2.py", ".opencode/tools/subtranslate_recovery_ledger_reprepare_v2.py"),
     ("packaging/subtranslate-guard/bundle-source/src/subtranslate/v238_per_call_durability.py", "src/subtranslate/v238_per_call_durability.py"),
+    ("packaging/subtranslate-guard/systemd/subtranslate-guard.service", "systemd/subtranslate-guard.service"),
+    ("packaging/subtranslate-guard/systemd/subtranslate-guard.socket", "systemd/subtranslate-guard.socket"),
+    ("packaging/subtranslate-guard/systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount", "systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount"),
+    ("packaging/subtranslate-guard/sudoers/subtranslate-guard-arm", "sudoers/subtranslate-guard-arm"),
+    ("packaging/subtranslate-guard/opencode/subtranslate_recovery_apply_once.ts", "opencode/subtranslate_recovery_apply_once.ts"),
+    ("packaging/subtranslate-guard/manifests/system-external-dependencies.json", "manifests/system-external-dependencies.json"),
+    ("packaging/subtranslate-guard/manifests/interpreter.identity", "manifests/interpreter.identity"),
 )
 FOUNDATION_SOURCE_PATHS = frozenset(source for source, _ in FOUNDATION_RELEASE_ALLOWLIST)
 
@@ -149,23 +164,30 @@ FOUNDATION_RELEASE_CONTRACT: dict[str, dict[str, str]] = {
     "src/subtranslate/recovery_guard/production/bindings.py": {"git_blob_oid": "a88eaa63784bc7313e12f742772e070a3111dc19", "sha256": "17e5cace5fd7673cd05f846b4b7fd554e1ff6bd4f412805b02497820af0f66d8", "role": "binding_provider"},
     "src/subtranslate/recovery_guard/production/broker.py": {"git_blob_oid": "09ee59929479ca4708888fe8f226805abf5a154f", "sha256": "c6885c427fef1851762c3e6f1f4acbb134e1b603406ff9a8af800159c7725511", "role": "broker"},
     "src/subtranslate/recovery_guard/production/crypto.py": {"git_blob_oid": "710e4591cf0f57320414d43bcf303b7b2ef5e29f", "sha256": "eeac85802bc49b4607901c5bb034e4fb75702ce39b28fa18eee5b0e5e1c63c97", "role": "crypto_verifier"},
-    "src/subtranslate/recovery_guard/production/issuer.py": {"git_blob_oid": "edd4bd79de426ee3a8a1399afbcf0918aa53ab8b", "sha256": "4aa9ec509e952ea82a8de83a3c118bfa6eb0ad7a0a16487840520b06adce4a4c", "role": "issuer"},
+    "src/subtranslate/recovery_guard/production/issuer.py": {"git_blob_oid": "0cb769a17029a15ad4d1ff9ea6b672e82c4b2f0f", "sha256": "d890aab2c1e1958c0730c39547e9c82b6e74a5014b779bf86c5abdc21c585d18", "role": "issuer"},
     "src/subtranslate/recovery_guard/production/issuer_cli.py": {"git_blob_oid": "2d52810d9b34675ce130ce5d4806d035416d193c", "sha256": "ce37385d48347c5416d8720ea05edbf956484c9858de651af50179563ddf6640", "role": "issuer_cli"},
     "src/subtranslate/recovery_guard/production/issuer_launcher.py": {"git_blob_oid": "091978b6acce0886dec804c842fc9217a3f1361f", "sha256": "36a60c8910bc16100f2ac51fa63c78ffb78af6287291be5d45633cf806b5719c", "role": "issuer_launcher"},
     "src/subtranslate/recovery_guard/production/journal.py": {"git_blob_oid": "cff8f2f6f59d39cf51b222840fbe2fc680daacf9", "sha256": "2855e8d8aadcc7c03ac0f3f38255e802b47693889d2b3f9fd54236b6b5c29254", "role": "journal"},
-    "src/subtranslate/recovery_guard/production/manifest.py": {"git_blob_oid": "1eb35248094f3722bb027723b9c6aa97fd635ac3", "sha256": "4f7f8f3d4d0dba476044e7df8066702251ae1e09c252b206da3b3adb488b5ca3", "role": "manifest"},
+    "src/subtranslate/recovery_guard/production/manifest.py": {"git_blob_oid": "6afc0e6374beca10d975c01f2708747267a6b604", "sha256": "6c61258d3961bee98810fe1b8650d808b0da11267a44117c73e75e6dfb5bd4be", "role": "manifest"},
     "src/subtranslate/recovery_guard/production/probe_engine.py": {"git_blob_oid": "4f013fc27c307a4112990cf640fac10ce021769f", "sha256": "56ab2a465219c656c4ebb0fe64a45221abe04303342a7bb22a135c4eebae06e1", "role": "probe_engine"},
     "src/subtranslate/recovery_guard/production/protocol.py": {"git_blob_oid": "e87fe3115227ed4b9b9019f5dcda73e6e60f769f", "sha256": "79dc36d5ed0272cbc025472f0d4822c27aa542382cc895be631329a04f503f9b", "role": "protocol"},
     "src/subtranslate/recovery_guard/production/provider.py": {"git_blob_oid": "229f0c2069b90b72ace30c34c5fbf4383336f6d5", "sha256": "2a862898c722777813436a1ca2d231e4c1a2163f63bc583b9666458807996a02", "role": "binding_provider"},
     "src/subtranslate/recovery_guard/production/runner.py": {"git_blob_oid": "1bc43a4807b78adee553c617a11a1a002b3467b8", "sha256": "5fef458996c4f04e0e465e87913960812ec4e24fd66ced15dbe2b6b6a037bf1a", "role": "runner"},
     "src/subtranslate/recovery_guard/production/schema.py": {"git_blob_oid": "ad1314629e6eed9283a3d9cd41396a2404afcb81", "sha256": "e1b133bdd297d6cd226bfca1bf1025138f5988baeff0947d90bac4c65881f144", "role": "capability_schema"},
     "src/subtranslate/recovery_guard/production/service.py": {"git_blob_oid": "4854e5dc477f93af724fb385375f4679c71bc96f", "sha256": "bbb8d6e1e67ccb89ba31065c77f1ce3fc06efc89f3f9986baa27ad803d6ccb57", "role": "service"},
-    "src/subtranslate/recovery_guard/production/service_launcher.py": {"git_blob_oid": "7ee37b3095223a9407ac7d1d292bbd5115f31cf0", "sha256": "e9c4d1155483a9caced74c70b39b25ace74ac93cc796aee7ff90cc3a7ee4dd47", "role": "service_launcher"},
+    "src/subtranslate/recovery_guard/production/service_launcher.py": {"git_blob_oid": "4886804ffc36b4ac04d0a7fc1e9901983d425539", "sha256": "621356774d8f5d3f31bf4116c6bca9a615baf4c4ecf746d80f10db7d19c68549", "role": "service_launcher"},
     "src/subtranslate/recovery_guard/production/service_main.py": {"git_blob_oid": "2e748ae7d2b77af166a3d726ba3dd4ce2061097f", "sha256": "83cd7bb363ccac7e380c91bf9b062726e7c32b87d45b27862804e1afa09a7b87", "role": "service_entrypoint"},
-    "src/subtranslate/recovery_guard/production/state.py": {"git_blob_oid": "dc5aa3a363b87ee2ecb65b80b72bbddebee2769b", "sha256": "6ab54d1a95e360b2a4486a6b3e354048fef6792f1981aac7d27950c44fc4c799", "role": "state"},
+    "src/subtranslate/recovery_guard/production/state.py": {"git_blob_oid": "1f7a8971a6007953a7f4f9edcd4af843faf42b57", "sha256": "09de8c30ea2de6a34e83e2fe2fc6f9884dae9afb9cd0243d959bcae2be44e47b", "role": "state"},
     "packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_readonly_probe.py": {"git_blob_oid": "5176f8cf4bf9352995d9f5f1fde60af6aef9bef1", "sha256": "45f37a97e67195a84033c694b867e46f599891215bad3b876334018de7d268d5", "role": "probe_entrypoint"},
     "packaging/subtranslate-guard/bundle-source/.opencode/tools/subtranslate_recovery_ledger_reprepare_v2.py": {"git_blob_oid": "afa2555b35e178ad7429c978f7bd7f3263b458e4", "sha256": "ca95eac8680897d387878f69a87b089ff60e81e598fb051fcbb97606aeb408ad", "role": "executor"},
     "packaging/subtranslate-guard/bundle-source/src/subtranslate/v238_per_call_durability.py": {"git_blob_oid": "656eb2e2b6c20bfec0ac7c5eca79e49fce131fc8", "sha256": "5caeb33f1bb21fbc90b7195b791e061bc46a7bddedb49bb15f52908b09d23585", "role": "durability"},
+    "packaging/subtranslate-guard/systemd/subtranslate-guard.service": {"git_blob_oid": "a224ffd04100ffbd3d5ddcccf2debe703862ae1f", "sha256": "14c878d315a5e6b7bacc5b392f257f1a568c26597ee3723ce7b55aab1d69d006", "role": "systemd_service"},
+    "packaging/subtranslate-guard/systemd/subtranslate-guard.socket": {"git_blob_oid": "77e5b396debbb6b7a5f6b8c32d6e211662cc6053", "sha256": "fd3a17bb19a9a0039f82e3984bbebf12f835c3e483bdc642bdc12b04ecc68255", "role": "systemd_socket"},
+    "packaging/subtranslate-guard/systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount": {"git_blob_oid": "cbceb95963299c844eebbea8fdc363a1fa67896d", "sha256": "fc477c093d8bdf052e35132b50fd0a2b22c628374ca06d1f38b4bff54ed97a88", "role": "mediation_mount"},
+    "packaging/subtranslate-guard/sudoers/subtranslate-guard-arm": {"git_blob_oid": "386e75710d66342515c0f11f9ca1a6b761a8a9fb", "sha256": "7685fc71d5ce5384ec9bf0abbb3ef0112f6f78f4e37ec4874a8a5a6934c0548d", "role": "sudoers_policy"},
+    "packaging/subtranslate-guard/opencode/subtranslate_recovery_apply_once.ts": {"git_blob_oid": "92776a0e10b61d33021ee910a114651175a9cf21", "sha256": "ddfdb24b1047522bf750174d9e70364ab8d34494608d4f10c791a6c7dbc89d7c", "role": "structured_tool"},
+    "packaging/subtranslate-guard/manifests/system-external-dependencies.json": {"git_blob_oid": "094cb740a54d05eb8a9e8cabe708681b14814265", "sha256": "3393b7fbde1e0132cc48bf7e740d645121919b86ad84321bd59f2e2ed611b8c8", "role": "system_external_dependency_set"},
+    "packaging/subtranslate-guard/manifests/interpreter.identity": {"git_blob_oid": "a01d81c2222ba729918be5bf8261ac5d1d885aae", "sha256": "251ccfcd2e674f7179aece078f9d69c47f168905552bf747c2310c2a41b75fad", "role": "interpreter"},
 }
 
 
@@ -182,7 +204,8 @@ def _validate_commit_oid(value: str) -> str:
 def _safe_relative(value: str) -> Path:
     path = Path(value)
     if (not value or path == Path(".") or not path.parts or path.is_absolute()
-            or str(path) != value or ".." in path.parts or "\\" in value):
+            or str(path) != value or ".." in path.parts
+            or ("\\" in value and value not in {MEDIATION_MOUNT_SOURCE_PATH, MEDIATION_MOUNT_DESTINATION_PATH})):
         raise FoundationError("RELEASE_PATH_INVALID")
     return path
 

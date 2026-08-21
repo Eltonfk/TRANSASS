@@ -25,8 +25,16 @@ def load_private_key(path: str = FUTURE_PRIVATE_KEY_PATH, *, require_root: bool 
     p = Path(path)
     try: info = p.lstat()
     except OSError as exc: raise IssuerError("ISSUER_KEY_UNAVAILABLE") from exc
-    if p.is_symlink() or not p.is_file() or (info.st_mode & 0o077) != 0 or (require_root and info.st_uid != 0):
+    if (p.is_symlink() or not p.is_file() or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600 or (require_root and os.geteuid() != 0)):
         raise IssuerError("ISSUER_KEY_FILE_UNSAFE")
+    try:
+        parent = p.parent.lstat()
+    except OSError as exc:
+        raise IssuerError("ISSUER_KEY_PARENT_UNSAFE") from exc
+    if (p.parent.is_symlink() or not p.parent.is_dir() or parent.st_uid != 0
+            or parent.st_gid != 0 or stat.S_IMODE(parent.st_mode) != 0o700):
+        raise IssuerError("ISSUER_KEY_PARENT_UNSAFE")
     try:
         key = serialization.load_pem_private_key(p.read_bytes(), password=None)
         if not isinstance(key, Ed25519PrivateKey): raise IssuerError("ISSUER_KEY_TYPE_INVALID")

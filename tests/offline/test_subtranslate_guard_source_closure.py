@@ -15,6 +15,7 @@ from src.subtranslate.recovery_guard.production.manifest import ManifestError, m
 from src.subtranslate.recovery_guard.production.probe_engine import legacy_profile, run_probe
 from src.subtranslate.recovery_guard.production.state import (
     FOLDERS,
+    PRODUCTION_STATE_DIRECTORIES,
     PRODUCTION_STATE_MODE,
     PRODUCTION_STATE_ROOT,
     ProductionStateStore,
@@ -60,7 +61,7 @@ class SourceClosureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "state"
             root.mkdir()
-            for name in FOLDERS:
+            for name in PRODUCTION_STATE_DIRECTORIES:
                 (root / name).mkdir()
             expected_uid, expected_gid = 1234, 2345
 
@@ -75,7 +76,7 @@ class SourceClosureTests(unittest.TestCase):
                                                 expected_gid=expected_gid,
                                                 stat_provider=fake_stat)
             before = sorted(root.iterdir())
-            self.assertEqual(len(before), len(FOLDERS))
+            self.assertEqual(len(before), len(PRODUCTION_STATE_DIRECTORIES))
             # A missing folder, symlink, wrong owner, mode, and writable parent
             # all fail without any repair attempt.
             (root / "armed").rmdir()

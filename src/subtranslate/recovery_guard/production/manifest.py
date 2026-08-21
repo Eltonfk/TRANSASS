@@ -34,7 +34,13 @@ OPTIONAL_MANIFEST_FIELDS = frozenset({
     "socket_peer_uid", "authority_root", "runtime_parent",
     "probe_toolchain_components", "probe_executor_id",
     "mediation_policy",
+    "state_layout",
     "release_selector_policy",
+    "public_key_policy",
+    "release_id", "release_root", "current_selector_target",
+    "executor_path", "durability_path", "service_unit_sha256",
+    "socket_unit_sha256", "mediation_mount_unit_sha256", "sudoers_sha256",
+    "max_claims", "max_applies", "max_retries", "auto_rearm",
 })
 PUBLIC_KEY_ID_RE = re.compile(r"^ed25519-sha256:[0-9a-f]{64}$")
 
@@ -64,22 +70,38 @@ def build_manifest_template(*, components: dict[str, str], component_roles: dict
         raise ManifestError("MANIFEST_COMPONENT_ROLES_INVALID")
     if set(component_roles.values()) != set(components):
         raise ManifestError("MANIFEST_COMPONENT_CLOSURE_INVALID")
+    release_id = source_git[5:] if source_git.startswith("sha1:") else "UNRESOLVED"
+    release_root = f"/usr/local/lib/subtranslate-guard/releases/{release_id}"
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "source_git": source_git, "source_tree": source_tree,
+        "release_id": release_id,
+        "release_root": release_root,
+        "current_selector_target": release_root,
         "components": dict(components), "dependency_list": sorted(components),
         "component_roles": dict(component_roles), "executor_id": EXECUTOR_ID,
         "executor_sha256": components[EXECUTOR_RELATIVE],
         "durability_sha256": components[component_roles["durability"]],
         "interpreter": {"declared_path": "/usr/bin/python3.12", "resolved_path": "/usr/bin/python3.12", "sha256": interpreter_sha256},
         "public_key_id": public_key_id, "fixed_action_id": ACTION_ID,
+        "public_key_policy": {
+            "algorithm": "Ed25519",
+            "encoding": "PEM SubjectPublicKeyInfo",
+            "path": "/etc/subtranslate-guard/issuer.ed25519.pub",
+            "id_algorithm": "ed25519-sha256-raw-public-key",
+        },
         "fixed_argv_identity": hashlib.sha256(json.dumps(["/usr/bin/python3.12", "-I", "-B", EXECUTOR_RELATIVE, "--apply"], separators=(",", ":")).encode()).hexdigest(),
+        "executor_path": f"{release_root}/{EXECUTOR_RELATIVE}",
+        "durability_path": f"{release_root}/src/subtranslate/v238_per_call_durability.py",
+        "max_claims": 1, "max_applies": 1, "max_retries": 0, "auto_rearm": False,
         "socket_policy": "/run/subtranslate-guard/guard.sock;uid-gated;fixed-frame",
         "state_root_policy": "/var/lib/subtranslate-guard;0700;guard-owned",
         "target_policy": "fixed-B4-runtime-target;preexec-revalidation",
         "backup_policy": "/var/lib/subtranslate-guard/backups;before-publish",
         "uid_gid_policy": "subtranslate-guard:subtranslate-guard",
         "unit_hashes": {"service": components[component_roles["systemd_service"]], "socket": components[component_roles["systemd_socket"]]},
+        "service_unit_sha256": components[component_roles["systemd_service"]],
+        "socket_unit_sha256": components[component_roles["systemd_socket"]],
         "broker_sha256": components[component_roles["broker"]],
         "issuer_sha256": components[component_roles["issuer"]],
         "structured_tool_sha256": components[component_roles["structured_tool"]],
@@ -92,16 +114,28 @@ def build_manifest_template(*, components: dict[str, str], component_roles: dict
     }
     if "system_external_dependency_set" in component_roles:
         manifest["system_external_dependency_set"] = component_roles["system_external_dependency_set"]
+    if "sudoers_policy" in component_roles:
+        manifest["sudoers_sha256"] = components[component_roles["sudoers_policy"]]
     if "security_component_roles" not in manifest:
         manifest["security_component_roles"] = sorted(set(component_roles) - {"structured_tool"})
     if "non_security_component_roles" not in manifest:
         manifest["non_security_component_roles"] = ["structured_tool"]
     if "mediation_mount" in component_roles:
+        manifest["unit_hashes"]["mount"] = components[component_roles["mediation_mount"]]
+        manifest["mediation_mount_unit_sha256"] = components[component_roles["mediation_mount"]]
         manifest["mediation_policy"] = {
             "canonical_b4": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_B4_RECOVERY",
             "backing_b4": "/var/lib/subtranslate-guard/recovery-targets/V238_E07_R6C_B4_RECOVERY",
             "host_view": "bind,ro",
-            "service_view": "BindPaths;ReadWritePaths",
+            "service_view": "ProtectHome=tmpfs;BindPaths;ReadWritePaths",
+            "mount_unit": EXPECTED_MEDIATION_MOUNT_SOURCE_PATH,
+        }
+        manifest["state_layout"] = {
+            "root": "/var/lib/subtranslate-guard",
+            "directories": ["armed", "claimed", "terminal", "journal", "locks", "backups", "recovery-targets"],
+            "owner": "subtranslate-guard",
+            "group": "subtranslate-guard",
+            "mode": "0700",
         }
     manifest["manifest_fingerprint"] = manifest_fingerprint(manifest)
     return manifest
@@ -254,7 +288,8 @@ def validate_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
         if not SHA256_RE.fullmatch(manifest.get(key, "")):
             raise ManifestError("MANIFEST_COMPONENT_HASH_INVALID:" + key)
     unit_hashes = manifest.get("unit_hashes")
-    if not isinstance(unit_hashes, dict) or set(unit_hashes) != {"service", "socket"} or any(not SHA256_RE.fullmatch(value) for value in unit_hashes.values()):
+    expected_unit_keys = {"service", "socket"} | ({"mount"} if "mediation_mount" in roles else set())
+    if not isinstance(unit_hashes, dict) or set(unit_hashes) != expected_unit_keys or any(not SHA256_RE.fullmatch(value) for value in unit_hashes.values()):
         raise ManifestError("MANIFEST_UNIT_HASHES_INVALID")
     root = Path(bundle_root)
     if root.is_symlink() or not root.is_dir():
@@ -345,12 +380,46 @@ def validate_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
         if not isinstance(values, list) or any(not isinstance(value, str) or Path(value).is_absolute() or ".." in Path(value).parts for value in values):
             raise ManifestError("PROBE_POLICY_INVALID")
     mediation = manifest.get("mediation_policy")
-    if mediation is not None and (not isinstance(mediation, dict) or mediation.get("host_view") != "bind,ro"):
-        raise ManifestError("MEDIATION_POLICY_INVALID")
+    if mediation is not None:
+        if (not isinstance(mediation, dict)
+                or mediation.get("canonical_b4") != "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_B4_RECOVERY"
+                or mediation.get("backing_b4") != "/var/lib/subtranslate-guard/recovery-targets/V238_E07_R6C_B4_RECOVERY"
+                or mediation.get("host_view") != "bind,ro"
+                or mediation.get("service_view") != "ProtectHome=tmpfs;BindPaths;ReadWritePaths"
+                or mediation.get("mount_unit") != EXPECTED_MEDIATION_MOUNT_SOURCE_PATH):
+            raise ManifestError("MEDIATION_POLICY_INVALID")
     selector = manifest.get("release_selector_policy")
     if selector is not None:
         if not isinstance(selector, dict) or selector.get("path") != "/usr/local/lib/subtranslate-guard/current" or selector.get("must_be_root_owned_symlink") is not True or selector.get("target_prefix") != "/usr/local/lib/subtranslate-guard/releases/":
             raise ManifestError("RELEASE_SELECTOR_POLICY_INVALID")
+    for hash_field in ("service_unit_sha256", "socket_unit_sha256", "mediation_mount_unit_sha256", "sudoers_sha256"):
+        if hash_field in manifest and not SHA256_RE.fullmatch(manifest[hash_field]):
+            raise ManifestError("MANIFEST_COMPONENT_HASH_INVALID:" + hash_field)
+    for numeric_field in ("max_claims", "max_applies", "max_retries"):
+        if numeric_field in manifest and (not isinstance(manifest[numeric_field], int) or isinstance(manifest[numeric_field], bool) or manifest[numeric_field] < 0):
+            raise ManifestError("MANIFEST_CAPABILITY_LIMIT_INVALID")
+    if "auto_rearm" in manifest and not isinstance(manifest["auto_rearm"], bool):
+        raise ManifestError("MANIFEST_CAPABILITY_LIMIT_INVALID")
+    for path_field in ("release_root", "current_selector_target", "executor_path", "durability_path"):
+        if path_field in manifest and (not isinstance(manifest[path_field], str) or not manifest[path_field].startswith("/")):
+            raise ManifestError("MANIFEST_PATH_POLICY_INVALID")
+    public_policy = manifest.get("public_key_policy")
+    if public_policy is not None:
+        if (not isinstance(public_policy, dict)
+                or public_policy.get("algorithm") != "Ed25519"
+                or public_policy.get("encoding") != "PEM SubjectPublicKeyInfo"
+                or public_policy.get("path") != "/etc/subtranslate-guard/issuer.ed25519.pub"
+                or public_policy.get("id_algorithm") != "ed25519-sha256-raw-public-key"):
+            raise ManifestError("PUBLIC_KEY_POLICY_INVALID")
+    layout = manifest.get("state_layout")
+    if layout is not None:
+        if (not isinstance(layout, dict)
+                or layout.get("root") != "/var/lib/subtranslate-guard"
+                or layout.get("directories") != ["armed", "claimed", "terminal", "journal", "locks", "backups", "recovery-targets"]
+                or layout.get("owner") != "subtranslate-guard"
+                or layout.get("group") != "subtranslate-guard"
+                or layout.get("mode") != "0700"):
+            raise ManifestError("STATE_LAYOUT_POLICY_INVALID")
 
 
 def validate_final_manifest(manifest: dict[str, Any], bundle_root: Path) -> None:
@@ -361,6 +430,7 @@ def validate_final_manifest(manifest: dict[str, Any], bundle_root: Path) -> None
     # valid for offline regression tests, but cannot be promoted as final
     # installation manifests without the complete R2 role set.
     roles = manifest.get("component_roles", {})
+    components = manifest.get("components", {})
     if "system_external_dependency_set" in roles and not SOURCE_CLOSURE_COMPONENT_ROLES.issubset(roles):
         raise ManifestError("SOURCE_CLOSURE_COMPONENT_ROLES_INCOMPLETE")
     if not re.fullmatch(r"sha1:[0-9a-f]{40}", manifest["source_git"]):
@@ -369,6 +439,36 @@ def validate_final_manifest(manifest: dict[str, Any], bundle_root: Path) -> None
         raise ManifestError("SOURCE_TREE_AUTHORITY_UNRESOLVED")
     if manifest["public_key_id"].endswith("0" * 64):
         raise ManifestError("PUBLIC_KEY_PLACEHOLDER")
+    public_policy = manifest.get("public_key_policy")
+    if not isinstance(public_policy, dict):
+        raise ManifestError("PUBLIC_KEY_POLICY_REQUIRED")
+    if (public_policy.get("algorithm") != "Ed25519"
+            or public_policy.get("encoding") != "PEM SubjectPublicKeyInfo"
+            or public_policy.get("path") != "/etc/subtranslate-guard/issuer.ed25519.pub"
+            or public_policy.get("id_algorithm") != "ed25519-sha256-raw-public-key"):
+            raise ManifestError("PUBLIC_KEY_POLICY_INVALID")
+    if "mediation_mount" in roles:
+        if not isinstance(manifest.get("mediation_policy"), dict) or not isinstance(manifest.get("state_layout"), dict):
+            raise ManifestError("MEDIATION_POLICY_REQUIRED")
+    if "system_external_dependency_set" in roles:
+        release_id = manifest.get("release_id")
+        expected_release_root = f"/usr/local/lib/subtranslate-guard/releases/{release_id}"
+        if (not isinstance(release_id, str) or not re.fullmatch(r"[0-9a-f]{40}", release_id)
+                or manifest.get("release_root") != expected_release_root
+                or manifest.get("current_selector_target") != expected_release_root
+                or manifest.get("executor_path") != f"{expected_release_root}/{EXECUTOR_RELATIVE}"
+                or manifest.get("durability_path") != f"{expected_release_root}/src/subtranslate/v238_per_call_durability.py"
+                or manifest.get("max_claims") != 1
+                or manifest.get("max_applies") != 1
+                or manifest.get("max_retries") != 0
+                or manifest.get("auto_rearm") is not False):
+            raise ManifestError("FINAL_RELEASE_BINDINGS_INVALID")
+        if (manifest.get("service_unit_sha256") != components[roles["systemd_service"]]
+                or manifest.get("socket_unit_sha256") != components[roles["systemd_socket"]]
+                or manifest.get("sudoers_sha256") != components[roles["sudoers_policy"]]):
+            raise ManifestError("FINAL_POLICY_HASH_BINDING_INVALID")
+        if "mediation_mount" in roles and manifest.get("mediation_mount_unit_sha256") != components[roles["mediation_mount"]]:
+            raise ManifestError("FINAL_MEDIATION_HASH_BINDING_INVALID")
     forbidden = {"TODO", "UNKNOWN", "UNRESOLVED", "current-untracked", "0000000000000000000000000000000000000000"}
     if any(any(token in str(value) for token in forbidden) for value in manifest.values()):
         raise ManifestError("MANIFEST_PLACEHOLDER_UNRESOLVED")

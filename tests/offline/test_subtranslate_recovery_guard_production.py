@@ -148,8 +148,16 @@ class ProductionGuardTests(unittest.TestCase):
         with self.assertRaises(ServiceError): service_main([])
 
     def test_no_real_roots_or_private_key_paths(self):
-        self.assertFalse(Path('/var/lib/subtranslate-guard').exists())
-        self.assertFalse(Path('/etc/subtranslate-guard/keys/issuer.ed25519').exists())
+        # The host may legitimately contain the foundation skeleton.  The
+        # offline fixture must never use it as a test target or read key
+        # material from it.  Production opening remains fail-closed when the
+        # full boundary is not explicitly validated.
+        self.assertNotEqual(self.root.resolve(), Path('/var/lib/subtranslate-guard'))
+        self.assertNotEqual(self.root.resolve(), Path('/etc/subtranslate-guard/keys'))
+        self.assertFalse((self.root / 'issuer.ed25519').exists())
+        with self.assertRaises(StateError):
+            from src.subtranslate.recovery_guard.production.state import open_installed_production_state
+            open_installed_production_state()
 
     def test_capability_id_is_validated_before_path_derivation(self):
         for bad in ('', '.', '..', '../escape', 'A' * 64, 'f' * 63, 'f' * 65, 'f' * 63 + '/', 'f' * 32 + '\\' + 'f' * 31):

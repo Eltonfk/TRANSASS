@@ -113,6 +113,9 @@ class IntegratedGuardTests(unittest.TestCase):
             "broker_sha256": components[source_map["broker"]],
             "issuer_sha256": components[source_map["issuer"]],
             "structured_tool_sha256": components[source_map["structured_tool"]],
+            "public_key_policy": {"algorithm": "Ed25519", "encoding": "PEM SubjectPublicKeyInfo",
+                                  "path": "/etc/subtranslate-guard/issuer.ed25519.pub",
+                                  "id_algorithm": "ed25519-sha256-raw-public-key"},
         }
         manifest["manifest_fingerprint"] = manifest_fingerprint(manifest)
         validate_manifest(manifest, self.bundle)

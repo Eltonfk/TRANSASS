@@ -20,6 +20,12 @@ PRODUCTION_STATE_USER = "subtranslate-guard"
 PRODUCTION_STATE_GROUP = "subtranslate-guard"
 PRODUCTION_STATE_MODE = 0o700
 FOLDERS = ("armed", "claimed", "terminal", "journal", "locks", "backups")
+# ``recovery-targets`` is a protected mediation boundary rather than a
+# capability-state folder.  It is nevertheless part of the installed
+# production root contract and must exist before a service can open the
+# production store.  Fixture stores intentionally keep the smaller
+# capability-state layout above.
+PRODUCTION_STATE_DIRECTORIES = FOLDERS + ("recovery-targets",)
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CLAIMED_EXECUTION_STATE_UNKNOWN", "STALE_INVALIDATED"})
 
 
@@ -81,7 +87,7 @@ def _validate_production_state_boundary(
         if os.path.islink(parent) or parent_info.st_uid != 0 or (_mode(parent_info) & 0o022):
             raise StateError("PRODUCTION_STATE_PARENT_UNSAFE")
 
-    for name in FOLDERS:
+    for name in PRODUCTION_STATE_DIRECTORIES:
         folder = candidate / name
         try:
             info = stat_provider(folder)
