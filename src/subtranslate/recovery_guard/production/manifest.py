@@ -137,6 +137,11 @@ def build_manifest_template(*, components: dict[str, str], component_roles: dict
             "group": "subtranslate-guard",
             "mode": "0700",
         }
+    if "probe_engine" in component_roles and "probe_entrypoint" in component_roles:
+        manifest["authority_root"] = "/home/palhacinho/codex-projects/anime-subtitle-translator-review"
+        manifest["runtime_parent"] = "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence"
+        manifest["probe_toolchain_components"] = [EXECUTOR_RELATIVE, "src/subtranslate/v238_per_call_durability.py"]
+        manifest["probe_executor_id"] = EXECUTOR_ID
     manifest["manifest_fingerprint"] = manifest_fingerprint(manifest)
     return manifest
 
