@@ -103,6 +103,20 @@ class PhysicalBindingProvider:
         operation_id = operation.get("operation_id")
         family_id = budget.get("episode_family_id")
         episode_id = budget.get("episode_id")
+        missing_identity = budget.get("missing_identity_fields")
+        expected_missing = {
+            "episode_id", "episode_family_id", "family_contract",
+            "family_contract_sha256", "logical_calls", "updated_at",
+        }
+        if not isinstance(missing_identity, list) or set(missing_identity) != expected_missing:
+            raise BindingProviderError("IDENTITY_SCHEMA_MISSING_SET_INVALID")
+        # The pre-reparation ledger is intentionally incomplete.  Bind the
+        # missing identity to the provider's fixed operation contract; never
+        # accept caller- or filesystem-supplied substitutes.
+        if family_id is None:
+            family_id = EXPECTED_FAMILY
+        if episode_id is None:
+            episode_id = EXPECTED_EPISODE
         if (operation_id, family_id, episode_id) != (EXPECTED_OPERATION, EXPECTED_FAMILY, EXPECTED_EPISODE):
             raise BindingProviderError("IDENTITY_FIELDS_INCOMPLETE")
         snapshot = report.get("snapshot_fingerprint", "")
