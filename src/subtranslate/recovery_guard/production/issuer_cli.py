@@ -7,6 +7,7 @@ or an unconfigured checkout from touching ``/var/lib/subtranslate-guard``.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Callable, Any
@@ -22,6 +23,29 @@ from .issuer import (
 from .crypto import public_key_id
 
 BUNDLE_ROOT = Path("/usr/local/lib/subtranslate-guard")
+
+
+def _manifest_bundle_root(path: str | Path) -> Path:
+    """Derive the protected release root before validating its components."""
+    manifest_path = Path(path)
+    try:
+        info = manifest_path.lstat()
+    except OSError as exc:
+        raise IssuerError("ISSUER_MANIFEST_FILE_UNSAFE") from exc
+    if (manifest_path.is_symlink() or not manifest_path.is_file()
+            or info.st_uid != 0 or (info.st_mode & 0o077) != 0):
+        raise IssuerError("ISSUER_MANIFEST_FILE_UNSAFE")
+    try:
+        raw = json.loads(manifest_path.read_bytes())
+        release_root = raw.get("release_root")
+    except Exception as exc:
+        raise IssuerError("ISSUER_MANIFEST_INVALID") from exc
+    if (not isinstance(release_root, str)
+            or not release_root.startswith("/usr/local/lib/subtranslate-guard/releases/")
+            or len(release_root.rsplit("/", 1)[-1]) != 40
+            or any(ch not in "0123456789abcdef" for ch in release_root.rsplit("/", 1)[-1])):
+        raise IssuerError("ISSUER_MANIFEST_RELEASE_ROOT_INVALID")
+    return Path(release_root)
 
 
 def main(
@@ -40,7 +64,7 @@ def main(
         raise IssuerError("ISSUER_REQUIRES_ROOT")
     if state_store_factory is None or provider_factory is None:
         raise IssuerError("ISSUER_INSTALLATION_CONFIGURATION_REQUIRED")
-    manifest = manifest_loader(FUTURE_MANIFEST_PATH, bundle_root=BUNDLE_ROOT)
+    manifest = manifest_loader(FUTURE_MANIFEST_PATH, bundle_root=_manifest_bundle_root(FUTURE_MANIFEST_PATH))
     key = key_loader(FUTURE_PRIVATE_KEY_PATH, require_root=True)
     if public_key_id(key.public_key()) != manifest.get("public_key_id"):
         raise IssuerError("ISSUER_PUBLIC_KEY_ID_MISMATCH")

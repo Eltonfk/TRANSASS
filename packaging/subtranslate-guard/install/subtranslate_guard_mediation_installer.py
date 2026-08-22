@@ -100,7 +100,7 @@ RUNTIME_RELEASE_CONTRACT = {
     'src/subtranslate/recovery_guard/production/broker.py': ('09ee59929479ca4708888fe8f226805abf5a154f', 'c6885c427fef1851762c3e6f1f4acbb134e1b603406ff9a8af800159c7725511'),
     'src/subtranslate/recovery_guard/production/crypto.py': ('710e4591cf0f57320414d43bcf303b7b2ef5e29f', 'eeac85802bc49b4607901c5bb034e4fb75702ce39b28fa18eee5b0e5e1c63c97'),
     'src/subtranslate/recovery_guard/production/issuer.py': ('0cb769a17029a15ad4d1ff9ea6b672e82c4b2f0f', 'd890aab2c1e1958c0730c39547e9c82b6e74a5014b779bf86c5abdc21c585d18'),
-    'src/subtranslate/recovery_guard/production/issuer_cli.py': ('2d52810d9b34675ce130ce5d4806d035416d193c', 'ce37385d48347c5416d8720ea05edbf956484c9858de651af50179563ddf6640'),
+    'src/subtranslate/recovery_guard/production/issuer_cli.py': ('35c984768917d0cb4f69aa6ad82fa34eb5d0f45d', '696f205928d247a4cd5474eb4f286b0bf98313fa0caaca47a1176dfc302c0a98'),
     'src/subtranslate/recovery_guard/production/issuer_launcher.py': ('091978b6acce0886dec804c842fc9217a3f1361f', '36a60c8910bc16100f2ac51fa63c78ffb78af6287291be5d45633cf806b5719c'),
     'src/subtranslate/recovery_guard/production/journal.py': ('cff8f2f6f59d39cf51b222840fbe2fc680daacf9', '2855e8d8aadcc7c03ac0f3f38255e802b47693889d2b3f9fd54236b6b5c29254'),
     'src/subtranslate/recovery_guard/production/manifest.py': ('5038005370a6065e44e837ac40d3291ee86e2945', '99275dac848e3b79c03523862e75d024465b6c02eac4cd8174601c97448e077a'),
