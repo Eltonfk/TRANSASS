@@ -1034,10 +1034,13 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
         f"canonica aplicada retroativamente apos interrupcao do runner."
         + (" Lock de ledger orfao removido." if removed_lock else ""),
         digest(before_project_bytes), after["next_action"])
-    publish_both(before_project_bytes, after_project_bytes(after), before_handoff, after_handoff, backup_dir)
+    doc_backup_dir = BACKUP_PARENT / f"subtranslate-e08-b{batch_index}-reconcile-doc-write-{stamp}"
+    publish_both(before_project_bytes, after_project_bytes(after), before_handoff, after_handoff, doc_backup_dir)
     return {"status": "PASS", "transition": "reconcile-batch", "batch_index": batch_index,
             "terminal_state": terminal, "removed_orphan_lock": removed_lock,
-            "canonical_backup_hashes": manifest_files, "backup_root": str(backup_dir),
+            "canonical_backup_hashes": manifest_files,
+            "evidence_backup_root": str(backup_dir),
+            "documentary_backup_root": str(doc_backup_dir),
             "next_action": after["next_action"]}
 
 
