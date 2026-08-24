@@ -376,8 +376,19 @@ def authorize(config_path: Path) -> dict[str, Any]:
     }
     after = json.loads(json.dumps(before))
     after[AUTHORIZATION_KEY] = record
-    after["latest_decision"] = TARGET_LATEST_DECISION
-    after["next_action"] = decision_pointer(0)
+    # Point at the FIRST batch still missing its reconciliation object, so a
+    # re-authorization mid-episode resumes instead of rewinding.
+    next_expected = None
+    for n in range(total):
+        if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in before:
+            next_expected = n
+            break
+    if next_expected is None:
+        after["latest_decision"] = "E08_ALL_BATCHES_RECONCILED_ASSEMBLY_REQUIRED"
+        after["next_action"] = "E08_ASSEMBLY_REQUIRED"
+    else:
+        after["latest_decision"] = TARGET_LATEST_DECISION
+        after["next_action"] = decision_pointer(next_expected)
     after_project = (json.dumps(after, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
     title = "AUTO-03E-E08-EPISODE-INTEGRAL-AUTHORIZATION-R1"
     summary = ("Autorizacao de episodio integral E08 vinculada: 360 lotes esperados, um model call por lote, "
