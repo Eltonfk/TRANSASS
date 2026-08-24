@@ -461,7 +461,7 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
     sys.path.insert(0, str(SRC_ROOT))
     from v238_per_call_durability import DurableV226Call
 
-    require_regular(payload_path)
+    regular(payload_path)
     raw_payload = payload_path.read_bytes()
     if sha256_bytes(raw_payload) != record["request_payload_sha256"]:
         raise RunnerBlocked(f"BATCH_PAYLOAD_HASH_MISMATCH:b{batch_index}")
@@ -775,6 +775,77 @@ def execute(config_path: Path) -> dict[str, Any]:
     return summary
 
 
+def recover_batch(config_path: Path, batch_index: int) -> dict[str, Any]:
+    """Clean a pre-transport orphan batch: an authorization object exists but
+    NO physical attempt was ever created (no calls/ entries in the family
+    directory).  Backs up both authority documents, removes the orphan
+    per-batch authorization object and the materialized payload, restores the
+    decision pointer so --mode execute can run the batch from scratch."""
+    config = load_config(config_path)
+    state = load_json(PROJECT)
+    if batch_recon_key(batch_index) in state:
+        raise RunnerBlocked(f"BATCH_RECOVER_ALREADY_RECONCILED:b{batch_index}")
+    if batch_auth_key(batch_index) not in state:
+        raise RunnerBlocked(f"BATCH_RECOVER_NOT_INTERRUPTED:b{batch_index}")
+    if state.get("next_action") != authorized_pointer(batch_index):
+        raise RunnerBlocked(
+            f"BATCH_RECOVER_POINTER_UNEXPECTED:b{batch_index}:{state.get('next_action')}")
+    auth_record = state[batch_auth_key(batch_index)]
+    family = str(auth_record.get("family_id") or family_id_for(config, batch_index))
+    family_dir = AUTHORITY_ROOT / "runtime-evidence" / family
+    calls_dir = family_dir / "calls"
+    if calls_dir.exists() and any(calls_dir.iterdir()):
+        raise RunnerBlocked(
+            f"BATCH_RECOVER_ATTEMPTS_PRESENT:b{batch_index}:manual assessment required")
+    payload_path = Path(str(auth_record.get("request_payload_path") or ""))
+    before_project_bytes = PROJECT.read_bytes()
+    before_handoff = HANDOFF.read_bytes()
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = BACKUP_PARENT / f"subtranslate-e08-b{batch_index}-recover-{stamp}"
+    manifest_files = backup_canonical(backup_dir)
+
+    after = json.loads(before_project_bytes)
+    del after[batch_auth_key(batch_index)]
+    after["next_action"] = decision_pointer(batch_index)
+    atomic_write_json(PROJECT, after)
+
+    removed_payload = False
+    if payload_path.is_file():
+        payload_path.unlink()
+        removed_payload = True
+    planning_root = payload_path.parent
+    try:
+        planning_root.rmdir()
+        planning_root.parent.rmdir()
+    except OSError:
+        pass
+
+    title = f"AUTO-03E-E08-B{batch_index}-PRETRANSPORT-ORPHAN-RECOVERY-R1"
+    summary = (f"Lote {batch_index} interrompido pre-transporte (bug de toolchain corrigido em "
+               "commit 071ca18+); nenhum attempt fisico existia; objeto de autorizacao orfao e "
+               "payload materializados removidos com backup; lote pronto para re-execucao.")
+    after_handoff = write_handoff_addendum(before_handoff, title, summary,
+                                           digest(before_project_bytes), decision_pointer(batch_index))
+    handoff_info = regular(HANDOFF)
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{HANDOFF.name}.auto03e-", dir=str(HANDOFF.parent))
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(os.open(tmp_name, os.O_WRONLY), "wb") as stream:
+            stream.write(after_handoff)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, HANDOFF)
+        fsync_dir(HANDOFF.parent)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return {"status": "PASS", "transition": "recover-batch", "batch_index": batch_index,
+            "removed_orphan_authorization": True, "removed_materialized_payload": removed_payload,
+            "canonical_backup_hashes": manifest_files, "backup_root": str(backup_dir),
+            "next_action": decision_pointer(batch_index)}
+
+
 def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str | None, total: int) -> dict[str, Any]:
     completed = [r for r in results if r["status"] == "COMPLETED"]
     skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
@@ -801,10 +872,9 @@ def persist_progress(report: dict[str, Any]) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
-    parser.add_argument("--mode", required=True, choices=("authorize", "status", "execute"))
+    parser.add_argument("--mode", required=True, choices=("authorize", "status", "execute", "recover-batch"))
+    parser.add_argument("--batch", type=int, default=None)
     args = parser.parse_args(argv)
-    # Resolve BEFORE any fingerprint derivation so the config path component of
-    # the toolchain manifest is invocation-independent (absolute == relative).
     config_path = Path(args.config).resolve()
     try:
         if args.mode == "authorize":
@@ -812,6 +882,11 @@ def main(argv=None) -> int:
             return 0
         if args.mode == "status":
             print(json.dumps(status(config_path), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.mode == "recover-batch":
+            if args.batch is None:
+                raise RunnerBlocked("RECOVER_REQUIRES_BATCH")
+            print(json.dumps(recover_batch(config_path, args.batch), sort_keys=True, ensure_ascii=False))
             return 0
         result = execute(config_path)
         return 0 if result.get("status") == "PASS" else 1
