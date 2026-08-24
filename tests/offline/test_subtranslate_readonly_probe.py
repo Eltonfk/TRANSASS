@@ -92,6 +92,27 @@ class ProbeFixtures(unittest.TestCase):
         evidence = r["runtime"]["B5_B6_B7_evidence"]
         self.assertFalse(evidence["b5_evidence_exists"]); self.assertFalse(evidence["b6_evidence_exists"]); self.assertFalse(evidence["b7_evidence_exists"])
 
+    def test_lock_absent_is_normal_transient_state(self):
+        (self.runtime / "episode-budget.json.lock").unlink()
+        r = self.probe_run()
+        self.assertEqual(r["unknowns"], [])
+        self.assertEqual(r["runtime"]["lock"], {"exists": False})
+        self.assertTrue(r["integrity"]["snapshot_consistent"])
+
+    def test_lock_present_still_read_and_hashed(self):
+        r = self.probe_run()
+        lock = r["runtime"]["lock"]
+        self.assertTrue(lock["exists"])
+        self.assertEqual(lock["size"], 0)
+        self.assertEqual(lock["sha256"], hashlib.sha256(b"").hexdigest())
+
+    def test_lock_symlink_remains_fail_closed(self):
+        (self.runtime / "episode-budget.json.lock").unlink()
+        (self.runtime / "episode-budget.json.lock").symlink_to(self.state_path)
+        r = self.probe_run()
+        self.assertIn("UNEXPECTED_SYMLINK", {x["code"] for x in r["unknowns"]})
+        self.assertFalse(r["integrity"]["snapshot_consistent"])
+
     def test_invalid_and_missing_files_are_not_pass(self):
         (self.runtime / "operation.json").write_text("{", encoding="utf-8"); r = self.probe_run(); self.assertIn("INVALID_JSON", {x["code"] for x in r["blockers"]})
         (self.runtime / "operation.json").unlink(); r = self.probe_run(); self.assertTrue(r["unknowns"])
