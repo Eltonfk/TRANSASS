@@ -523,8 +523,9 @@ class ProbeBootstrapIntegrationTests(unittest.TestCase):
             self.assertIn(token, self.agent_text)
 
     def test_current_gate_missing_requirement_never_falls_back(self):
-        self.assertIn("AUTO03B2A_CONTRACT_INCOMPLETE", self.agent_text)
-        self.assertIn("AUTO03B1 e AUTO03A não são fallback", self.agent_text)
+        normalized = " ".join(self.agent_text.split())
+        self.assertIn("AUTO03B2A_CONTRACT_INCOMPLETE", normalized)
+        self.assertIn("AUTO03B1 e AUTO03A não são fallback", normalized)
 
     def test_current_gate_flags(self):
         expected = {
