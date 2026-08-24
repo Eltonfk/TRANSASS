@@ -408,6 +408,21 @@ def classify(state: dict[str, Any], batch_index: int) -> str:
     if batch_recon_key(batch_index) in state:
         return "SKIP"
     if batch_auth_key(batch_index) in state:
+        # Mid-cycle: an authorization object exists without its reconciliation
+        # counterpart.  If the recorded attempt ended in a content-level parse
+        # failure (and nothing succeeded), the batch is DEFERRED to the final
+        # documented retry pass instead of blocking the whole episode.
+        auth_record = state[batch_auth_key(batch_index)]
+        family_dir = AUTHORITY_ROOT / "runtime-evidence" / str(auth_record.get("family_id") or "")
+        calls_dir = family_dir / "calls"
+        attempts = sorted(p for p in calls_dir.iterdir() if p.is_dir()) if calls_dir.is_dir() else []
+        parse_failed = [d for d in attempts if (d / "parse_failure.json").is_file()]
+        succeeded = [d for d in attempts if not (d / "parse_failure.json").is_file()
+                     and (d / "state.json").is_file()
+                     and json.loads((d / "state.json").read_text(encoding="utf-8")).get("state")
+                     in ("PARSED_VALID", "DERIVED_PARSED_VALID")]
+        if parse_failed and not succeeded:
+            return "DEFERRED_PARSE_FAILED"
         raise RunnerBlocked(
             f"BATCH_MID_CYCLE_INTERRUPTED:b{batch_index}:manual assessment required")
     if state.get("next_action") != decision_pointer(batch_index):
@@ -778,6 +793,17 @@ def execute(config_path: Path, max_batches: int | None = None) -> dict[str, Any]
             classification = classify(state, batch_index)
             if classification == "SKIP":
                 results.append({"batch_index": batch_index, "status": "SKIPPED_ALREADY_RECONCILED"})
+                continue
+            if classification == "DEFERRED_PARSE_FAILED":
+                # Content-level parse failure already evidenced on disk: defer
+                # to the final retry pass and advance the decision pointer so
+                # the remaining batches can flow.
+                state["next_action"] = (
+                    "E08_ASSEMBLY_REQUIRED" if batch_index + 1 >= total
+                    else decision_pointer(batch_index + 1))
+                atomic_write_json(PROJECT, state)
+                results.append({"batch_index": batch_index,
+                                "status": "SKIPPED_PARSE_FAILED_DEFERRED_TO_FINAL_RETRY"})
                 continue
             if max_batches is not None and ran_this_call >= max_batches:
                 results.append({"batch_index": batch_index,
