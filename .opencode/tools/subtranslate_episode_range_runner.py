@@ -326,15 +326,33 @@ def authorize(config_path: Path) -> dict[str, Any]:
         if not isinstance(previous, dict):
             raise RunnerBlocked("EPISODE_AUTHORIZATION_PREVIOUS_INVALID")
         prior_total = int(previous.get("expected_total_batches", -1))
-        mid_cycle = [n for n in range(max(prior_total, 0))
-                     if f"auto03e_e08_b{n}_batch_execution_authorization_r1" in before
-                     and f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in before]
+        mid_cycle = []
+        deferred_parse = []
+        for n in range(max(prior_total, 0)):
+            has_auth = f"auto03e_e08_b{n}_batch_execution_authorization_r1" in before
+            has_recon = f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before
+            if not has_auth or has_recon:
+                continue
+            prev_record = before[f"auto03e_e08_b{n}_batch_execution_authorization_r1"]
+            family_dir = AUTHORITY_ROOT / "runtime-evidence" / str(prev_record.get("family_id") or "")
+            calls_dir = family_dir / "calls"
+            attempts = sorted(p for p in calls_dir.iterdir() if p.is_dir()) if calls_dir.is_dir() else []
+            parse_failed = [d for d in attempts if (d / "parse_failure.json").is_file()]
+            succeeded = [d for d in attempts if not (d / "parse_failure.json").is_file()
+                         and (d / "state.json").is_file()
+                         and json.loads((d / "state.json").read_text(encoding="utf-8")).get("state")
+                         in ("PARSED_VALID", "DERIVED_PARSED_VALID")]
+            if parse_failed and not succeeded:
+                deferred_parse.append(n)
+            else:
+                mid_cycle.append(n)
         if mid_cycle:
             raise RunnerBlocked(
                 f"EPISODE_AUTHORIZATION_REPLACE_BLOCKED_MID_CYCLE:{mid_cycle[:5]}")
         superseded = {
             "authorized_at": previous.get("authorized_at"),
-            "reason": "runner corrected/re-authorized; all started batches reconciled",
+            "reason": "runner corrected/re-authorized; started batches are reconciled or deferred-parse",
+            "deferred_parse_failure_batches": deferred_parse,
             "reconciled_batches_carried_over": sorted(
                 n for n in range(max(prior_total, 0))
                 if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before),
