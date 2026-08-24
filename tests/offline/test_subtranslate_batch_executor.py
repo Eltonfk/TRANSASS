@@ -1,0 +1,113 @@
+"""Offline deterministic tests for the AUTO-03D generalized batch executor."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+TOOL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".opencode/tools/subtranslate_batch_executor.py"
+)
+
+UNIT_IDS_8 = [66, 67, 68, 69, 70, 71, 72, 73]
+
+
+def _load_tool():
+    spec = importlib.util.spec_from_file_location("subtranslate_batch_executor", TOOL_PATH)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError("executor module could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def executor():
+    return _load_tool()
+
+
+def test_plan_contract_without_authorization(executor):
+    result = executor.plan(require_authorization=False, batch_index=8)
+    assert result["status"] == "READY"
+    assert result["action_id"] == "BATCH_EXECUTION"
+    assert result["executor_id"] == "BATCH_EXECUTOR_V1"
+    assert result["batch_index"] == 8
+    assert result["max_client_calls"] == 1
+    assert result["max_http_posts"] == 1
+    assert result["max_retries"] == 0
+    assert result["authorization_present"] is False
+    assert result["side_effects_performed"] is False
+    assert set(result["required_from_authorization"]) == {
+        "operation_id", "family_id", "episode_id", "unit_ids",
+        "unit_membership_sha256", "request_payload_sha256",
+        "request_payload_path", "logical_batch_id",
+    }
+
+
+def test_authorization_key_template(executor):
+    assert executor.authorization_key(8) == "auto03d_b8_batch_execution_authorization_r1"
+    assert executor.authorization_key(9) == "auto03d_b9_batch_execution_authorization_r1"
+    assert executor.authorized_next_action(8) == "B8_BATCH_EXECUTION_AUTHORIZED"
+    assert executor.logical_batch_id(8) == "v226-initial-000008"
+
+
+def test_apply_fail_closed_without_authorization(executor, tmp_path, monkeypatch):
+    """State-independent: with an empty canonical fixture, apply blocks before
+    any backup or network activity."""
+    fixture = tmp_path / "PROJECT_STATE.json"
+    fixture.write_text(json.dumps({}), encoding="utf-8")
+    monkeypatch.setattr(executor, "PROJECT_STATE", fixture)
+    with pytest.raises(executor.ExecutionBlocked) as excinfo:
+        executor.execute(8)
+    assert "BATCH_EXECUTION_AUTHORIZATION_ABSENT:b8" in str(excinfo.value)
+
+
+def test_no_hardcoded_per_batch_bindings():
+    source = TOOL_PATH.read_text(encoding="utf-8")
+    assert "auto03d_b5" not in source
+    assert "auto03d_b6" not in source
+    assert "auto03d_b7" not in source
+    assert 'f"auto03d_b{batch_index}_batch_execution_authorization_r1"' in source
+    assert '"batch_index": batch_index' in source
+
+
+def test_range_guard_in_main(executor, capsys):
+    exit_code = executor.main(["--plan", "--batch", "5"])
+    captured = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert captured["status"] == "FAIL_STOP"
+    assert "BATCH_INDEX_OUT_OF_RANGE" in captured["blocker"]
+
+
+def test_toolchain_fingerprint_is_stable_64hex(executor):
+    fingerprint = executor.current_toolchain_fingerprint()
+    assert isinstance(fingerprint, str) and len(fingerprint) == 64
+    assert all(c in "0123456789abcdef" for c in fingerprint)
+    assert executor.current_toolchain_fingerprint() == fingerprint
+
+
+def test_validate_translation_accepts_exact_membership(executor):
+    value = {"translations": [{"id": uid, "text": f"texto {uid}"} for uid in UNIT_IDS_8]}
+    projected, normalized = executor.validate_translation(value, UNIT_IDS_8)
+    assert normalized is False
+    assert [row["id"] for row in projected["translations"]] == UNIT_IDS_8
+
+
+def test_validate_translation_rejects_wrong_membership(executor):
+    swapped = list(reversed(UNIT_IDS_8))
+    value = {"translations": [{"id": uid, "text": f"texto {uid}"} for uid in swapped]}
+    with pytest.raises(executor.ExecutionBlocked) as excinfo:
+        executor.validate_translation(value, UNIT_IDS_8)
+    assert "BATCH_RESPONSE_MEMBERSHIP_INVALID" in str(excinfo.value)
+
+
+def test_cli_plan_smoke(executor, capsys):
+    exit_code = executor.main(["--plan", "--batch", "8"])
+    captured = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert captured["status"] == "READY"
+    assert captured["batch_index"] == 8
