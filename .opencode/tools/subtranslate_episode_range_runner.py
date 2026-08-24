@@ -461,19 +461,26 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
 
     payload_dir = AUTHORITY_ROOT / "runtime-evidence" / family / "planning" / logical_batch_id(batch_index)
     payload_path = payload_dir / "request_payload.json"
+    expected_len = int(target["request_payload_bytes"])
+    expected_sha = target["request_payload_sha256"]
     if payload_path.exists():
-        raise RunnerBlocked(f"BATCH_PAYLOAD_FILE_ALREADY_EXISTS:b{batch_index}")
-    payload_bytes = base64.b64decode(target["request_payload_canonical_b64"], validate=True)
-    if len(payload_bytes) != int(target["request_payload_bytes"]) or sha256_bytes(payload_bytes) != target["request_payload_sha256"]:
-        raise RunnerBlocked(f"BATCH_PAYLOAD_HASH_OR_SIZE_MISMATCH:b{batch_index}")
-    payload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(payload_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
-        os.write(fd, payload_bytes)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    fsync_dir(payload_dir)
+        # Idempotent re-entry: an identical payload may already be materialized
+        # from an interrupted prior run.  Only a hash/size CONFLICT blocks.
+        existing = payload_path.read_bytes()
+        if len(existing) != expected_len or sha256_bytes(existing) != expected_sha:
+            raise RunnerBlocked(f"BATCH_PAYLOAD_HASH_CONFLICT:b{batch_index}")
+    else:
+        payload_bytes = base64.b64decode(target["request_payload_canonical_b64"], validate=True)
+        if len(payload_bytes) != expected_len or sha256_bytes(payload_bytes) != expected_sha:
+            raise RunnerBlocked(f"BATCH_PAYLOAD_HASH_OR_SIZE_MISMATCH:b{batch_index}")
+        payload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(payload_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, payload_bytes)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_dir(payload_dir)
 
     state = load_json(PROJECT)
     if batch_auth_key(batch_index) in state:
