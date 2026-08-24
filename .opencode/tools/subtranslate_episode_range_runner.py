@@ -374,7 +374,8 @@ def authorize(config_path: Path) -> dict[str, Any]:
                "zero retry, producao/Library/main intocados, revisao humana adiada ate E07-E12 finalizados.")
     after_handoff = write_handoff_addendum(before_handoff, title, summary,
                                            str(probe["snapshot_fingerprint"]), after["next_action"])
-    backup_dir = BACKUP_PARENT / "subtranslate-auto03e-e08-episode-integral-authorization-r1"
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = BACKUP_PARENT / f"subtranslate-auto03e-e08-episode-integral-authorization-r1-{stamp}"
     publish_both(before_project_bytes, after_project, before_handoff, after_handoff, backup_dir)
     return {"status": "PASS", "transition": "authorize", "expected_total_batches": total,
             "project_state_sha256": digest(after_project), "handoff_sha256": digest(after_handoff),
