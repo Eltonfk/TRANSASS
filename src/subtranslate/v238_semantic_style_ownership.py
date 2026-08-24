@@ -23,7 +23,18 @@ from v237_temporal_transform import (
 from v238_source_payload import rc4_replace_source_payload
 
 
-SEMANTIC_STYLE_PROPERTIES = frozenset({"c", "1c", "2c", "3c", "4c", "b", "i", "u", "fn", "fs"})
+SEMANTIC_STYLE_PROPERTIES = frozenset({
+    "c", "1c", "2c", "3c", "4c",
+    "b", "i", "u", "s",
+    "fn", "fs",
+    "bord", "xbord", "ybord",
+    "shad", "xshad", "yshad",
+    "be", "blur",
+    "frx", "fry", "frz", "fr",
+    "fscx", "fscy",
+    "fax", "fay",
+    "alpha", "1a", "2a", "3a", "4a",
+})
 OWNERSHIP_SCHEMA = {
     "type": "object",
     "properties": {

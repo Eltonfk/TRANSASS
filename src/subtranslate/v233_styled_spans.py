@@ -18,10 +18,29 @@ from typing import Any, Callable, Iterable
 
 TAG_GROUP_RE = re.compile(r"\{[^{}]*\}")
 STYLE_TOKEN_RE = re.compile(
-    r"\\(?:(?P<color>1c|2c|3c|4c|c)(?P<color_value>&H[0-9A-Fa-f]+&)?(?![A-Za-z])"
-    r"|(?P<toggle>b|i|u)(?P<toggle_value>[01]?)(?![A-Za-z])"
+    r"\\(?:"
+    # Border width (longest first: bord before b)
+    r"(?P<border>bord|xbord|ybord)(?P<border_value>-?\d*\.?\d*)"
+    # Shadow depth
+    r"|(?P<shadow>shad|xshad|yshad)(?P<shadow_value>-?\d*\.?\d*)"
+    # Blur / edge
+    r"|(?P<blur>blur|be)(?P<blur_value>\d+)"
+    # Rotation (frx, fry, frz, fr)
+    r"|(?P<rotation>fr[xyz]?)(?P<rotation_value>-?\d*\.?\d*)"
+    # Scaling (fscx, fscy)
+    r"|(?P<scaling>fsc[xy])(?P<scaling_value>-?\d*\.?\d*)"
+    # Shearing (fax, fay)
+    r"|(?P<shear>fa[xy])(?P<shear_value>-?\d*\.?\d*)"
+    # Alpha / transparency
+    r"|(?P<alpha>alpha|[1234]a)&H(?P<alpha_value>[0-9A-Fa-f]{1,2})"
+    # Colors
+    r"|(?P<color>1c|2c|3c|4c|c)(?P<color_value>&H[0-9A-Fa-f]+&)?(?![A-Za-z])"
+    # Font name and size
     r"|(?P<font>fn)(?P<font_value>[^\\}]*)"
-    r"|(?P<size>fs)(?P<size_value>\d*)(?![A-Za-z]))"
+    r"|(?P<size>fs)(?P<size_value>\d*)(?![A-Za-z])"
+    # Toggles: bold, italic, underline, strikethrough
+    r"|(?P<toggle>b|i|u|s)(?P<toggle_value>[01]?)(?![0-9A-Za-z])"
+    ")"
 )
 
 
@@ -74,8 +93,14 @@ def _style_is_reset(name: str, value: str) -> bool:
     value = value.strip()
     if name in {"c", "1c", "2c", "3c", "4c", "fn"}:
         return not value
-    if name in {"b", "i", "u", "fs"}:
+    if name in {"b", "i", "u", "s", "fs"}:
         return not value or value == "0"
+    if name in {"bord", "xbord", "ybord", "shad", "xshad", "yshad",
+                "be", "blur", "frx", "fry", "frz", "fr",
+                "fscx", "fscy", "fax", "fay"}:
+        return value in ("0", "0.0")
+    if name in {"alpha", "1a", "2a", "3a", "4a"}:
+        return value.upper() == "&H00" or value == "0"
     return False
 
 
