@@ -22,8 +22,8 @@ from typing import Any
 CANDIDATE_ROOT = "/home/palhacinho/codex-projects/subtranslate-v238-candidate"
 AUTHORITY_ROOT = "/home/palhacinho/codex-projects/anime-subtitle-translator-review"
 RUNTIME_PARENT = os.path.join(AUTHORITY_ROOT, "runtime-evidence")
-SCHEMA_VERSION = "0.4.0"
-PROBE_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.4.1"
+PROBE_VERSION = "0.4.1"
 MAX_CANONICAL_BYTES = 8 * 1024 * 1024
 MAX_RUNTIME_BYTES = 2 * 1024 * 1024
 GIT_TIMEOUT = 5
@@ -539,8 +539,6 @@ def probe() -> dict[str, Any]:
             value = observed[observed_key]
             expected = canonical_current.get(canonical_key)
             accounting["comparisons"][observed_key] = "UNKNOWN" if value is None or expected is None else ("MATCH" if value == expected else "MISMATCH")
-    if any(x["code"] == "MISMATCH" for x in []):
-        pass
     result = {"schema_version": SCHEMA_VERSION, "probe_version": PROBE_VERSION, "canonical": canonical,
               "candidate_git": candidate_git, "runtime": runtime, "accounting": accounting,
               "context_hygiene": context_hygiene,

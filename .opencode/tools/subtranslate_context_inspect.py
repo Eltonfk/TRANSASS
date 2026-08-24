@@ -9,12 +9,26 @@ canonical JSON or report context size.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 
 CANDIDATE = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
 PROBE_PATH = CANDIDATE / ".opencode/tools/subtranslate_readonly_probe.py"
+AUTHORITY_PROJECT_STATE = Path(
+    "/home/palhacinho/codex-projects/anime-subtitle-translator-review/PROJECT_STATE.json"
+)
+TARGET_CANONICAL_KEYS = (
+    "auto03d_b4_recovery_call_preflight_r2",
+    "auto03d_b4_recovery_call_planning_decision_canonicalization_r1",
+    "auto03d_b4_recovery_call_execution_observed_r2",
+    "auto03d_b4_recovery_call_post_execution_canonical_reconciliation_r1",
+    "auto03d_b4_recovery_call_route_correction_r1",
+    "auto03d_future_resend_decision_canonicalization_r1",
+    "auto03c_r4_closure_canonicalization_r1",
+    "auto03c_canonical_reconciliation_preflight_r1",
+)
 
 
 class InspectBlocked(RuntimeError):
@@ -57,12 +71,32 @@ def summary(result: dict) -> dict:
     }
 
 
+def canonical_keys() -> dict:
+    """Read-only top-level key inventory of the canonical PROJECT_STATE.json."""
+    try:
+        data = AUTHORITY_PROJECT_STATE.read_bytes()
+        state = json.loads(data)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise InspectBlocked(f"CANONICAL_READ_FAILED:{type(exc).__name__}") from exc
+    if not isinstance(state, dict):
+        raise InspectBlocked("CANONICAL_ROOT_NOT_OBJECT")
+    keys = sorted(state.keys())
+    return {
+        "project_state_sha256": hashlib.sha256(data).hexdigest(),
+        "top_level_key_count": len(keys),
+        "auto03_top_level_keys": [k for k in keys if k.startswith(("auto03c_", "auto03d_"))],
+        "target_keys_present": {key: key in state for key in TARGET_CANONICAL_KEYS},
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--summary", action="store_true", required=True)
     parser.parse_args()
     try:
-        print(json.dumps(summary(probe()), sort_keys=True, ensure_ascii=False))
+        payload = summary(probe())
+        payload["canonical_keys"] = canonical_keys()
+        print(json.dumps(payload, sort_keys=True, ensure_ascii=False))
         return 0
     except Exception as exc:
         print(json.dumps({"status": "FAIL_STOP", "mode": "READ_ONLY_SUMMARY", "side_effects_performed": False,

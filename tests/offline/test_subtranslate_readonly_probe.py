@@ -113,6 +113,53 @@ class ProbeFixtures(unittest.TestCase):
         self.assertIn("UNEXPECTED_SYMLINK", {x["code"] for x in r["unknowns"]})
         self.assertFalse(r["integrity"]["snapshot_consistent"])
 
+    def test_lock_lstat_oserror_is_fail_closed(self):
+        self.write_runtime()
+        real_lstat = probe.os.lstat
+        lock_path = str(self.runtime / "episode-budget.json.lock")
+
+        def deny_lock(path, *args, **kwargs):
+            if path == lock_path:
+                raise PermissionError()
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(probe.os, "lstat", side_effect=deny_lock):
+            r = self.probe_run()
+        self.assertIn("FILE_READ_ERROR", {x["code"] for x in r["unknowns"]})
+        self.assertFalse(r["integrity"]["snapshot_consistent"])
+
+    def test_lock_toctou_window_remains_fail_closed(self):
+        lock_path = self.runtime / "episode-budget.json.lock"
+        self.write_runtime()
+        real_lstat = probe.os.lstat
+
+        def present_then_gone(path, *args, **kwargs):
+            result = real_lstat(path, *args, **kwargs)
+            if str(path) == str(lock_path):
+                lock_path.unlink()
+            return result
+
+        with mock.patch.object(probe.os, "lstat", side_effect=present_then_gone):
+            r = self.probe_run()
+        self.assertIn("FILE_DISAPPEARED", {x["code"] for x in r["unknowns"]})
+        self.assertFalse(r["integrity"]["snapshot_consistent"])
+
+    def test_lock_present_but_unreadable_partial_shape(self):
+        self.write_runtime()
+        real_open = probe.os.open
+        lock_path = str(self.runtime / "episode-budget.json.lock")
+
+        def deny_lock(path, flags, *args, **kwargs):
+            if path == lock_path:
+                raise PermissionError()
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(probe.os, "open", side_effect=deny_lock):
+            r = self.probe_run()
+        self.assertIn("FILE_PERMISSION_DENIED", {x["code"] for x in r["unknowns"]})
+        self.assertEqual(r["runtime"]["lock"], {"exists": True})
+        self.assertFalse(r["integrity"]["snapshot_consistent"])
+
     def test_invalid_and_missing_files_are_not_pass(self):
         (self.runtime / "operation.json").write_text("{", encoding="utf-8"); r = self.probe_run(); self.assertIn("INVALID_JSON", {x["code"] for x in r["blockers"]})
         (self.runtime / "operation.json").unlink(); r = self.probe_run(); self.assertTrue(r["unknowns"])
@@ -143,11 +190,18 @@ class ProbeFixtures(unittest.TestCase):
         with mock.patch.object(probe, "MAX_RUNTIME_BYTES", 1):
             r = self.probe_run()
         self.assertIn("IMPORTANT_FILE_TOO_LARGE", {x["code"] for x in r["unknowns"]})
-        with mock.patch("builtins.open", side_effect=PermissionError()):
+        budget_path = str(self.runtime / "episode-budget.json")
+        real_open = probe.os.open
+
+        def deny_budget(path, flags, *args, **kwargs):
+            if path == budget_path:
+                raise PermissionError()
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(probe.os, "open", side_effect=deny_budget):
             r = self.probe_run()
         self.assertEqual(r["integrity"]["side_effects_performed"], False)
-        unknown_codes = {x["code"] for x in r["unknowns"]}
-        self.assertTrue(unknown_codes or r["blockers"])
+        self.assertIn("FILE_PERMISSION_DENIED", {x["code"] for x in r["unknowns"]})
 
     def test_git_failure_and_runtime_canonical_mismatch_is_observable(self):
         self.write_state(e1_nested=True, e1_value={"runtime_root": str(self.runtime), "accounting": {"canonical_before": {"recovery_family_consumed": 99, "r6c_retries": 0}}})
