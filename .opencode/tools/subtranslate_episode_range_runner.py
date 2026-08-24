@@ -304,12 +304,15 @@ def authorize(config_path: Path) -> dict[str, Any]:
     before_project_bytes = PROJECT.read_bytes()
     before_handoff = HANDOFF.read_bytes()
     before = json.loads(before_project_bytes)
-    if before.get("state") != PRESTATE_STATE or before.get("next_action") != PRESTATE_NEXT:
+    if before.get("state") != PRESTATE_STATE:
         raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
     superseded = None
     if AUTHORIZATION_KEY in before:
-        # Replacement is only safe when ZERO batches were ever started under
-        # the previous authorization (no per-batch objects exist at all).
+        # Re-authorization path: the previous episode authorization moved the
+        # pointer to batch 0's decision state; replacement is only safe when
+        # ZERO batches were ever started under it.
+        if before.get("next_action") != decision_pointer(0):
+            raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
         previous = before[AUTHORIZATION_KEY]
         if not isinstance(previous, dict):
             raise RunnerBlocked("EPISODE_AUTHORIZATION_PREVIOUS_INVALID")
@@ -324,6 +327,8 @@ def authorize(config_path: Path) -> dict[str, Any]:
             "authorized_at": previous.get("authorized_at"),
             "reason": "runner corrected after authorization; zero batches executed",
         }
+    elif before.get("next_action") != PRESTATE_NEXT:
+        raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
     probe = fresh_probe()
     plan0 = run_planner(config_path, 0, expected_total=None)
     total = int(plan0["validation"]["packed_total"])
