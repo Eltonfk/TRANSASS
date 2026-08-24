@@ -306,8 +306,24 @@ def authorize(config_path: Path) -> dict[str, Any]:
     before = json.loads(before_project_bytes)
     if before.get("state") != PRESTATE_STATE or before.get("next_action") != PRESTATE_NEXT:
         raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
+    superseded = None
     if AUTHORIZATION_KEY in before:
-        raise RunnerBlocked("EPISODE_AUTHORIZATION_ALREADY_EXISTS")
+        # Replacement is only safe when ZERO batches were ever started under
+        # the previous authorization (no per-batch objects exist at all).
+        previous = before[AUTHORIZATION_KEY]
+        if not isinstance(previous, dict):
+            raise RunnerBlocked("EPISODE_AUTHORIZATION_PREVIOUS_INVALID")
+        prior_total = int(previous.get("expected_total_batches", -1))
+        leftovers = [n for n in range(max(prior_total, 0))
+                     if f"auto03e_e08_b{n}_batch_execution_authorization_r1" in before
+                     or f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before]
+        if leftovers:
+            raise RunnerBlocked(
+                f"EPISODE_AUTHORIZATION_REPLACE_BLOCKED_BATCHES_STARTED:{leftovers[:5]}")
+        superseded = {
+            "authorized_at": previous.get("authorized_at"),
+            "reason": "runner corrected after authorization; zero batches executed",
+        }
     probe = fresh_probe()
     plan0 = run_planner(config_path, 0, expected_total=None)
     total = int(plan0["validation"]["packed_total"])
@@ -341,6 +357,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
         "human_review_deferred_until_all_episodes_finalized": True,
         "execution_toolchain_fingerprint": fingerprint,
         "snapshot_fingerprint": probe["snapshot_fingerprint"],
+        "supersedes_previous_authorization": superseded,
     }
     after = json.loads(json.dumps(before))
     after[AUTHORIZATION_KEY] = record
@@ -780,7 +797,9 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--mode", required=True, choices=("authorize", "status", "execute"))
     args = parser.parse_args(argv)
-    config_path = Path(args.config)
+    # Resolve BEFORE any fingerprint derivation so the config path component of
+    # the toolchain manifest is invocation-independent (absolute == relative).
+    config_path = Path(args.config).resolve()
     try:
         if args.mode == "authorize":
             print(json.dumps(authorize(config_path), sort_keys=True, ensure_ascii=False))
