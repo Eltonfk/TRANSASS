@@ -534,7 +534,8 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
     if payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
         raise RunnerBlocked(f"BATCH_PAYLOAD_OPTIONS_MISMATCH:b{batch_index}")
 
-    executor_backup = BACKUP_PARENT / f"subtranslate-auto03e-e08-b{batch_index}-batch-execution-r1"
+    exec_stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ%f")
+    executor_backup = BACKUP_PARENT / f"subtranslate-auto03e-e08-b{batch_index}-batch-execution-r1-{exec_stamp}"
     if executor_backup.exists():
         raise RunnerBlocked("BATCH_BACKUP_ROOT_ALREADY_EXISTS")
     executor_backup.mkdir(mode=0o700)
