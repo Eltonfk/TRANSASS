@@ -309,26 +309,27 @@ def authorize(config_path: Path) -> dict[str, Any]:
     superseded = None
     if AUTHORIZATION_KEY in before:
         # Re-authorization path: the previous episode authorization moved the
-        # pointer to batch 0's decision state; replacement is only safe when
-        # ZERO batches were ever started under it.
-        if before.get("next_action") != decision_pointer(0):
-            raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
+        # pointer forward; replacement is safe when every started batch is
+        # already RECONCILED (no mid-cycle orphan: auth object without its
+        # reconciliation counterpart).  Reconciled batches remain SKIP-safe
+        # and keep their own per-batch authorization lineage.
         previous = before[AUTHORIZATION_KEY]
         if not isinstance(previous, dict):
             raise RunnerBlocked("EPISODE_AUTHORIZATION_PREVIOUS_INVALID")
         prior_total = int(previous.get("expected_total_batches", -1))
-        leftovers = [n for n in range(max(prior_total, 0))
+        mid_cycle = [n for n in range(max(prior_total, 0))
                      if f"auto03e_e08_b{n}_batch_execution_authorization_r1" in before
-                     or f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before]
-        if leftovers:
+                     and f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in before]
+        if mid_cycle:
             raise RunnerBlocked(
-                f"EPISODE_AUTHORIZATION_REPLACE_BLOCKED_BATCHES_STARTED:{leftovers[:5]}")
+                f"EPISODE_AUTHORIZATION_REPLACE_BLOCKED_MID_CYCLE:{mid_cycle[:5]}")
         superseded = {
             "authorized_at": previous.get("authorized_at"),
-            "reason": "runner corrected after authorization; zero batches executed",
+            "reason": "runner corrected/re-authorized; all started batches reconciled",
+            "reconciled_batches_carried_over": sorted(
+                n for n in range(max(prior_total, 0))
+                if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before),
         }
-    elif before.get("next_action") != PRESTATE_NEXT:
-        raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
     probe = fresh_probe()
     plan0 = run_planner(config_path, 0, expected_total=None)
     total = int(plan0["validation"]["packed_total"])
@@ -744,11 +745,12 @@ def status(config_path: Path) -> dict[str, Any]:
             "canonical_state": state.get("state"), "canonical_next_action": state.get("next_action")}
 
 
-def execute(config_path: Path) -> dict[str, Any]:
+def execute(config_path: Path, max_batches: int | None = None) -> dict[str, Any]:
     config, auth_record, total = load_authorization(config_path)
     results: list[dict[str, Any]] = []
     stopped = False
     blocker: str | None = None
+    ran_this_call = 0
     try:
         fresh_probe()
         for batch_index in range(total):
@@ -757,10 +759,18 @@ def execute(config_path: Path) -> dict[str, Any]:
             if classification == "SKIP":
                 results.append({"batch_index": batch_index, "status": "SKIPPED_ALREADY_RECONCILED"})
                 continue
+            if max_batches is not None and ran_this_call >= max_batches:
+                results.append({"batch_index": batch_index,
+                                "status": "DEFERRED_MAX_BATCHES_LIMIT",
+                                "note": f"resume with --mode execute (limit {max_batches}/call)"})
+                continue
             result = execute_batch(config, config_path, batch_index, auth_record, total)
             results.append(result)
+            ran_this_call += 1
             report = progress_report(results, stopped, blocker, total)
             persist_progress(report)
+            if state.get("next_action") == "E08_ASSEMBLY_REQUIRED":
+                break
     except Exception as exc:
         stopped = True
         blocker = f"{type(exc).__name__}:{exc}"
@@ -874,7 +884,11 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--mode", required=True, choices=("authorize", "status", "execute", "recover-batch"))
     parser.add_argument("--batch", type=int, default=None)
+    parser.add_argument("--max-batches", type=int, default=None,
+                        help="execute at most K pending batches, then exit cleanly")
     args = parser.parse_args(argv)
+    # Resolve BEFORE any fingerprint derivation so the config path component of
+    # the toolchain manifest is invocation-independent (absolute == relative).
     config_path = Path(args.config).resolve()
     try:
         if args.mode == "authorize":
@@ -888,6 +902,8 @@ def main(argv=None) -> int:
                 raise RunnerBlocked("RECOVER_REQUIRES_BATCH")
             print(json.dumps(recover_batch(config_path, args.batch), sort_keys=True, ensure_ascii=False))
             return 0
+        result = execute(config_path, max_batches=args.max_batches)
+        return 0 if result.get("status") == "PASS" else 1
         result = execute(config_path)
         return 0 if result.get("status") == "PASS" else 1
     except Exception as exc:
