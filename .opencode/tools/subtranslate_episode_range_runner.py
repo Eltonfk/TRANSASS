@@ -304,8 +304,17 @@ def authorize(config_path: Path) -> dict[str, Any]:
     before_project_bytes = PROJECT.read_bytes()
     before_handoff = HANDOFF.read_bytes()
     before = json.loads(before_project_bytes)
-    if before.get("state") != PRESTATE_STATE:
-        raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
+    canonical_state = before.get("state")
+    first_authorization = canonical_state == PRESTATE_STATE and AUTHORIZATION_KEY not in before
+    if first_authorization:
+        if before.get("next_action") != PRESTATE_NEXT:
+            raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
+    else:
+        # Episode already in progress under a previous authorization: the
+        # canonical state must belong to this episode's progressive namespace.
+        if not isinstance(canonical_state, str) or not canonical_state.startswith("SUBTRANSLATE_V238_ZLS_S01E08_"):
+            raise RunnerBlocked(
+                f"RECONCILIATION_PRESTATE_MISMATCH:{canonical_state}")
     superseded = None
     if AUTHORIZATION_KEY in before:
         # Re-authorization path: the previous episode authorization moved the
