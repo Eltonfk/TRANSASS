@@ -1013,7 +1013,7 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
         orphan_lock.unlink()
         removed_lock = True
 
-    total = int(load_authorization_total(before))
+    total = int(load_authorization_total(state))
     done_count = sum(1 for n in range(total)
                      if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in after)
     pending = [n for n in range(total)
