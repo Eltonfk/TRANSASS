@@ -876,6 +876,138 @@ def recover_batch(config_path: Path, batch_index: int) -> dict[str, Any]:
             "next_action": decision_pointer(batch_index)}
 
 
+def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, Any]:
+    """Retroactive canonical reconciliation for a batch whose model call and
+    derived_coverage.json are already complete on disk but whose canonical
+    reconciliation object was never written (runner died between the durable
+    call and the documentary write).  Also removes an orphaned ledger lock."""
+    config = load_config(config_path)
+    state = load_json(PROJECT)
+    if batch_recon_key(batch_index) in state:
+        raise RunnerBlocked(f"BATCH_RECONCILE_ALREADY_RECONCILED:b{batch_index}")
+    if batch_auth_key(batch_index) not in state:
+        raise RunnerBlocked(f"BATCH_RECONCILE_NOT_INTERRUPTED:b{batch_index}")
+    auth_record = state[batch_auth_key(batch_index)]
+    family = str(auth_record.get("family_id") or family_id_for(config, batch_index))
+    family_dir = AUTHORITY_ROOT / "runtime-evidence" / family
+    calls_dir = family_dir / "calls"
+    if not calls_dir.is_dir():
+        raise RunnerBlocked(f"BATCH_RECONCILE_NO_ATTEMPTS:b{batch_index}:use recover-batch instead")
+    attempts = sorted(p for p in calls_dir.iterdir() if p.is_dir())
+    if len(attempts) != 1:
+        raise RunnerBlocked(
+            f"BATCH_RECONCILE_ATTEMPT_COUNT_UNEXPECTED:b{batch_index}:{len(attempts)}")
+    attempt_dir = attempts[0]
+    attempt_id = attempt_dir.name
+    state_json = json.loads((attempt_dir / "state.json").read_text(encoding="utf-8"))
+    terminal = state_json.get("state")
+    if terminal not in ("PARSED_VALID", "DERIVED_PARSED_VALID"):
+        raise RunnerBlocked(
+            f"BATCH_RECONCILE_ATTEMPT_NOT_TERMINAL:b{batch_index}:{terminal}")
+    coverage_path = attempt_dir / "derived_coverage.json"
+    if not coverage_path.is_file():
+        raise RunnerBlocked(f"BATCH_RECONCILE_COVERAGE_MISSING:b{batch_index}")
+    response_meta = json.loads((attempt_dir / "response_metadata.json").read_text(encoding="utf-8"))
+    response_sha = str(response_meta.get("response_sha256") or "")
+
+    before_project_bytes = PROJECT.read_bytes()
+    before_handoff = HANDOFF.read_bytes()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = BACKUP_PARENT / f"subtranslate-e08-b{batch_index}-reconcile-{stamp}"
+    manifest_files = backup_canonical(backup_dir)
+
+    reconciliation = {
+        "execution": {
+            "action_id": ACTION_ID,
+            "executor_id": RUNNER_ID,
+            "batch_index": batch_index,
+            "operation_id": str(state_json.get("operation_ids", [""])[0]) if state_json.get("operation_ids") else auth_record.get("operation_id", ""),
+            "family_id": family,
+            "episode_id": str(config["episode_id"]),
+            "logical_batch_id": logical_batch_id(batch_index),
+            "unit_ids": list(auth_record["unit_ids"]),
+            "unit_membership_sha256": auth_record["unit_membership_sha256"],
+            "request_payload_sha256": auth_record["request_payload_sha256"],
+            "response_sha256": response_sha,
+            "physical_attempt_id": attempt_id,
+            "logical_call_id": str(state_json.get("logical_call_id") or ""),
+            "terminal_state": terminal,
+            "model_calls": 1,
+            "http_posts": 1,
+            "retries": 0,
+            "model": MODEL,
+            "policy": POLICY,
+        },
+        "coverage_formalized": {
+            "artifact": str(coverage_path),
+            "found_ids": expected_from_coverage(coverage_path),
+            "missing_ids": [],
+        },
+        "authorization_lineage": {
+            "episode_authorization_key": AUTHORIZATION_KEY,
+            "runner": "AUTO-03E-EPISODE-RANGE-RUNNER retroactive reconciliation",
+        },
+        "future_side_effects_authorized": False,
+        "next_batch_started": False,
+        "canonical_reconciliation_required": False,
+        "created_at_utc": datetime.now(UTC).isoformat(),
+    }
+    after = json.loads(before_project_bytes)
+    after[batch_recon_key(batch_index)] = reconciliation
+
+    orphan_lock = family_dir / "episode-budget.json.lock"
+    removed_lock = False
+    if orphan_lock.is_file():
+        orphan_lock.unlink()
+        removed_lock = True
+
+    total = int(load_authorization_total(before))
+    done_count = sum(1 for n in range(total)
+                     if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in after)
+    pending = [n for n in range(total)
+               if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in after]
+    if not pending:
+        after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}_ALL_PARSED_VALID_ZERO_RETRY"
+        after["status"] = "E08_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
+        after["next_action"] = "E08_ASSEMBLY_REQUIRED"
+    else:
+        after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_IN_PROGRESS_BATCHES_0_{max(pending) - 1}_ALL_PARSED_VALID_ZERO_RETRY"
+        after["status"] = f"E08_BATCHES_DONE_{done_count}_OF_{total}_ZERO_RETRY"
+        after["next_action"] = decision_pointer(min(pending))
+
+    after_handoff = write_handoff_addendum(
+        before_handoff,
+        f"AUTO-03E-E08-B{batch_index}-RETROACTIVE-RECONCILIATION-R1",
+        f"Lote {batch_index} executado (PARSED_VALID, 1 call, 0 retry) com reconciliacao "
+        f"canonica aplicada retroativamente apos interrupcao do runner."
+        + (" Lock de ledger orfao removido." if removed_lock else ""),
+        digest(before_project_bytes), after["next_action"])
+    publish_both(before_project_bytes, after_project_bytes(after), before_handoff, after_handoff, backup_dir)
+    return {"status": "PASS", "transition": "reconcile-batch", "batch_index": batch_index,
+            "terminal_state": terminal, "removed_orphan_lock": removed_lock,
+            "canonical_backup_hashes": manifest_files, "backup_root": str(backup_dir),
+            "next_action": after["next_action"]}
+
+
+def expected_from_coverage(coverage_path: Path) -> list[int]:
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    return list(coverage.get("found_ids", []))
+
+
+def after_project_bytes(after: dict[str, Any]) -> bytes:
+    return (json.dumps(after, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def load_authorization_total(before: dict[str, Any]) -> int:
+    record = before.get(AUTHORIZATION_KEY)
+    if not isinstance(record, dict):
+        raise RunnerBlocked("EPISODE_AUTHORIZATION_ABSENT_FOR_TOTAL")
+    total = int(record.get("expected_total_batches", -1))
+    if total < 1:
+        raise RunnerBlocked("EPISODE_AUTHORIZATION_TOTAL_INVALID")
+    return total
+
+
 def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str | None, total: int) -> dict[str, Any]:
     completed = [r for r in results if r["status"] == "COMPLETED"]
     skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
@@ -902,7 +1034,8 @@ def persist_progress(report: dict[str, Any]) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
-    parser.add_argument("--mode", required=True, choices=("authorize", "status", "execute", "recover-batch"))
+    parser.add_argument("--mode", required=True,
+                        choices=("authorize", "status", "execute", "recover-batch", "reconcile-batch"))
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--max-batches", type=int, default=None,
                         help="execute at most K pending batches, then exit cleanly")
@@ -921,6 +1054,11 @@ def main(argv=None) -> int:
             if args.batch is None:
                 raise RunnerBlocked("RECOVER_REQUIRES_BATCH")
             print(json.dumps(recover_batch(config_path, args.batch), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.mode == "reconcile-batch":
+            if args.batch is None:
+                raise RunnerBlocked("RECONCILE_REQUIRES_BATCH")
+            print(json.dumps(reconcile_existing_batch(config_path, args.batch), sort_keys=True, ensure_ascii=False))
             return 0
         result = execute(config_path, max_batches=args.max_batches)
         return 0 if result.get("status") == "PASS" else 1
