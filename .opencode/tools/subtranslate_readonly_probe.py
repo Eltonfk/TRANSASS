@@ -379,7 +379,7 @@ def _marker(text: str, patterns: tuple[str, ...]) -> bool:
     return all(pattern in text for pattern in patterns)
 
 
-APP_VERSION_PATH = CANDIDATE_ROOT / "src/subtranslate/_version.py"
+APP_VERSION_PATH = Path(CANDIDATE_ROOT) / "src/subtranslate/_version.py"
 
 
 def read_app_version() -> str | None:
