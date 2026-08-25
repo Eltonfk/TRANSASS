@@ -1759,7 +1759,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--mode", required=True,
                         choices=("authorize", "status", "execute", "recover-batch",
-                                 "reconcile-batch", "retry-failed"))
+                                 "reconcile-batch", "retry-failed", "finalize-retries"))
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--max-batches", type=int, default=None,
                         help="execute at most K pending batches, then exit cleanly")
@@ -1787,6 +1787,9 @@ def main(argv=None) -> int:
             return 0
         if args.mode == "retry-failed":
             print(json.dumps(retry_failed(config_path), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.mode == "finalize-retries":
+            print(json.dumps(finalize_retries(config_path), sort_keys=True, ensure_ascii=False))
             return 0
         result = execute(config_path, max_batches=args.max_batches)
         return 0 if result.get("status") == "PASS" else 1
