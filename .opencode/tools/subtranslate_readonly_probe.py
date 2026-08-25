@@ -387,7 +387,7 @@ def read_app_version() -> str | None:
     executing it.  Returns None when unreadable (never blocks the snapshot)."""
     try:
         info = APP_VERSION_PATH.lstat()
-        if _stat.S_ISLNK(info.st_mode) or not _stat.S_ISREG(info.st_mode):
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             return None
         text = APP_VERSION_PATH.read_text(encoding="utf-8")
         marker = '__version__ = "'
