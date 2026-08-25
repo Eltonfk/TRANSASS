@@ -424,7 +424,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
         "supersedes_previous_authorization": superseded,
     }
     after = json.loads(json.dumps(before))
-    after[AUTHORIZATION_KEY] = record
+    after[_AUTHORIZATION_KEY] = record
     # Point at the FIRST batch still missing its reconciliation object, so a
     # re-authorization mid-episode resumes instead of rewinding.
     next_expected = None
@@ -573,7 +573,7 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
         "request_payload_path": str(payload_path),
         "execution_toolchain_fingerprint": toolchain_fingerprint(config_path),
         "snapshot_fingerprint": auth_record["snapshot_fingerprint"],
-        "range_binding": {"episode_authorization_key": AUTHORIZATION_KEY},
+        "range_binding": {"episode_authorization_key": _AUTHORIZATION_KEY},
         "backup_root": str(backup_dir),
         "canonical_backup_hashes": manifest_files,
         "provenance": "EPISODE_RANGE_RUNNER_UNDER_EPISODE_AUTHORIZATION",
@@ -756,7 +756,7 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
             "missing_ids": [],
         },
         "authorization_lineage": {
-            "episode_authorization_key": AUTHORIZATION_KEY,
+            "episode_authorization_key": _AUTHORIZATION_KEY,
             "runner": "AUTO-03E-EPISODE-RANGE-RUNNER under episode authorization",
         },
         "future_side_effects_authorized": False,
@@ -812,7 +812,7 @@ def validate_translation(value: Any, unit_ids: list[int], batch_index: int) -> t
 def load_authorization(config_path: Path) -> tuple[dict[str, Any], dict[str, Any], int]:
     config = load_config(config_path)
     state = load_json(PROJECT)
-    record = state.get(AUTHORIZATION_KEY)
+    record = state.get(_AUTHORIZATION_KEY)
     if not isinstance(record, dict):
         raise RunnerBlocked("EPISODE_AUTHORIZATION_ABSENT:run --mode authorize first")
     required = {
@@ -1124,7 +1124,7 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
             "basis": partial_basis,
         } if partial_invalid else None),
         "authorization_lineage": {
-            "episode_authorization_key": AUTHORIZATION_KEY,
+            "episode_authorization_key": _AUTHORIZATION_KEY,
             "runner": "AUTO-03E-EPISODE-RANGE-RUNNER retroactive reconciliation",
         },
         "future_side_effects_authorized": False,
@@ -1190,7 +1190,7 @@ def after_project_bytes(after: dict[str, Any]) -> bytes:
 
 
 def load_authorization_total(before: dict[str, Any]) -> int:
-    record = before.get(AUTHORIZATION_KEY)
+    record = before.get(_AUTHORIZATION_KEY)
     if not isinstance(record, dict):
         raise RunnerBlocked("EPISODE_AUTHORIZATION_ABSENT_FOR_TOTAL")
     total = int(record.get("expected_total_batches", -1))
