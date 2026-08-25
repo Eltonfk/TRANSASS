@@ -11,6 +11,16 @@ completa traduzida, motor de tradução escolhível e toolchain de operação
 generalizada.
 
 ### Adicionado
+- **Fallback automático de motor**: quando o motor principal falha um lote
+  (HTTP, parse ou validação), o runner tenta automaticamente o motor
+  alternativo configurado (via `transport_config.json` da UI web ou
+  `transport_fallback` no config do episódio), com evidência durável própria
+  por tentativa. Provado em produção: Gemini resolveu os lotes que o Qwen
+  falhou 2× seguidas (E09 B150/B194, E10 B2, E11 B96, E12 B47).
+- **UI web de configuração de motor** (⚙ Motor): motor principal + fallback
+  opcional + API keys, persistidos em `/app/state/transport_config.json`
+  (permissão 600, host-local). Keys nunca expostas pela API — apenas
+  `keys_configured`.
 - **Tradução integral da temporada Zombie Land Saga (E07–E12)**: 10.549 eventos,
   8.372 traduções aplicadas, 2.177 eventos preservados por design (músicas,
   signos, técnicos), 1.266 lotes executados com zero retries silenciosos.
