@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "0.3.0"
-PROBE_VERSION = "0.3.0"
+SCHEMA_VERSION = "0.3.1"
+PROBE_VERSION = "0.3.1"
 MAX_CANONICAL_BYTES = 8 * 1024 * 1024
 MAX_RUNTIME_BYTES = 2 * 1024 * 1024
 GIT_TIMEOUT = 5
@@ -298,7 +298,21 @@ def run_probe(profile: ProbeProfile) -> dict[str, Any]:
     if runtime_root:
         op, op_meta = read_json(os.path.join(runtime_root, "operation.json"), MAX_RUNTIME_BYTES, unknowns, blockers)
         budget, budget_meta = read_json(os.path.join(runtime_root, "episode-budget.json"), MAX_RUNTIME_BYTES, unknowns, blockers)
-        _, lock_meta = read_consistent(os.path.join(runtime_root, "episode-budget.json.lock"), MAX_RUNTIME_BYTES, unknowns, blockers)
+        lock_path = os.path.join(runtime_root, "episode-budget.json.lock")
+        # A ledger lock is transient: absent is the normal quiescent state and
+        # must not degrade snapshot trust.  Real anomalies still fail-closed.
+        lock_info: dict[str, Any] = {"exists": False}
+        try:
+            os.lstat(lock_path)
+            lock_present = True
+        except FileNotFoundError:
+            lock_present = False
+        except OSError as exc:
+            _issue(unknowns, "FILE_READ_ERROR", "UNKNOWN", {"path": lock_path, "error": type(exc).__name__})
+            lock_present = None
+        if lock_present is True:
+            _, lock_meta = read_consistent(lock_path, MAX_RUNTIME_BYTES, unknowns, blockers)
+            lock_info = {"exists": True, **{k: lock_meta[k] for k in ("size", "sha256") if k in lock_meta}}
         calls_path = Path(runtime_root) / "calls"
         attempt_names = []
         try:
@@ -325,7 +339,7 @@ def run_probe(profile: ProbeProfile) -> dict[str, Any]:
                             "fields_present": {k: isinstance(budget, dict) and k in budget for k in REQUIRED_LEDGER_IDENTITY_FIELDS},
                             "missing_identity_fields": missing_identity,
                             "identity_state": ("INCOMPLETE" if missing_identity else "COMPLETE") if isinstance(budget, dict) else "UNKNOWN"},
-                        "lock": {"exists": lock_meta.get("readable", False), **{k: lock_meta[k] for k in ("size", "sha256") if k in lock_meta}},
+                        "lock": lock_info,
                         "calls_attempts": {"calls_dir_exists": os.path.isdir(calls_path), "attempt_count": len(attempt_names), "ids_names_observable": attempt_names},
                         "B5_B6_B7_evidence": {"present": False, "observable": [], "b5_evidence_exists": False, "b6_evidence_exists": False, "b7_evidence_exists": False}})
         if isinstance(budget, dict):

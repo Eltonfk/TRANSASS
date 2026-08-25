@@ -104,7 +104,7 @@ RUNTIME_RELEASE_CONTRACT = {
     'src/subtranslate/recovery_guard/production/issuer_launcher.py': ('091978b6acce0886dec804c842fc9217a3f1361f', '36a60c8910bc16100f2ac51fa63c78ffb78af6287291be5d45633cf806b5719c'),
     'src/subtranslate/recovery_guard/production/journal.py': ('cff8f2f6f59d39cf51b222840fbe2fc680daacf9', '2855e8d8aadcc7c03ac0f3f38255e802b47693889d2b3f9fd54236b6b5c29254'),
     'src/subtranslate/recovery_guard/production/manifest.py': ('5038005370a6065e44e837ac40d3291ee86e2945', '99275dac848e3b79c03523862e75d024465b6c02eac4cd8174601c97448e077a'),
-    'src/subtranslate/recovery_guard/production/probe_engine.py': ('4f013fc27c307a4112990cf640fac10ce021769f', '56ab2a465219c656c4ebb0fe64a45221abe04303342a7bb22a135c4eebae06e1'),
+    'src/subtranslate/recovery_guard/production/probe_engine.py': ('2d64ef5116fef41e44c9ad027d15f635f80d97db', '22de43e533d47cf700741da4eb72d5ca727305322c608bf894dea19e56fdd1bb'),
     'src/subtranslate/recovery_guard/production/protocol.py': ('e87fe3115227ed4b9b9019f5dcda73e6e60f769f', '79dc36d5ed0272cbc025472f0d4822c27aa542382cc895be631329a04f503f9b'),
     'src/subtranslate/recovery_guard/production/provider.py': ('7c9521557025ff29af82c7196b00e8af08aa0eb1', '973f478b5216c1160850923810e0ab821e87fe1b3fb26ae2d5d1320a8797bfa1'),
     'src/subtranslate/recovery_guard/production/runner.py': ('1bc43a4807b78adee553c617a11a1a002b3467b8', '5fef458996c4f04e0e465e87913960812ec4e24fd66ced15dbe2b6b6a037bf1a'),

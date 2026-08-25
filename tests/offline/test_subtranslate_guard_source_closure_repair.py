@@ -34,7 +34,7 @@ BUNDLE_DURABILITY = ROOT / "packaging/subtranslate-guard/bundle-source/src/subtr
 V1_SHA = "2f0fc420399671f06040a46405d42eca532c692d0b62729353fb90b840a04801"
 V2_SHA = "ca95eac8680897d387878f69a87b089ff60e81e598fb051fcbb97606aeb408ad"
 DURABILITY_SHA = "5caeb33f1bb21fbc90b7195b791e061bc46a7bddedb49bb15f52908b09d23585"
-LIVE_PROBE_SHA = "d2ee2d37626b8f51ba191773f47ee5e74914d56b0edd89ff4ec9b46302ab3b4e"
+LIVE_PROBE_SHA = "9b76e8bf2a66ba5bef3014f2e6f6edbb97242b6999a9c2062df55addffad4722"
 HEAD = "2cc4953e769f6ef0896e285489264dec21c02733"
 
 
@@ -416,12 +416,21 @@ class FoundationInstallerRepairTests(unittest.TestCase):
         self.assertIn("manifests/interpreter.identity", destinations)
 
     def test_current_head_plan_rejects_expected_dirty_manifest_contract(self):
-        before = {path: digest(path) for path in (V1, V2, CANONICAL_DURABILITY, BUNDLE_DURABILITY, LIVE_PROBE)}
-        with self.assertRaisesRegex(self.installer.FoundationError, "RELEASE_CONTRACT_MISMATCH"):
-            self.installer.build_foundation_plan(HEAD)
-        self.assertFalse(Path("/usr/local/lib/subtranslate-guard/current").exists())
-        after = {path: digest(path) for path in before}
-        self.assertEqual(before, after)
+        # The real host may already have the guard installed at the fixed
+        # INSTALL_ROOT, so patch CURRENT_SELECTOR to a temp path to keep the
+        # "no residue" assertion environment-independent.
+        from unittest import mock
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fake_selector = Path(tmp.name) / "current"
+        with mock.patch.object(self.installer, "CURRENT_SELECTOR", fake_selector):
+            before = {path: digest(path) for path in (V1, V2, CANONICAL_DURABILITY, BUNDLE_DURABILITY, LIVE_PROBE)}
+            with self.assertRaisesRegex(self.installer.FoundationError, "RELEASE_CONTRACT_MISMATCH"):
+                self.installer.build_foundation_plan(HEAD)
+            self.assertFalse(self.installer.CURRENT_SELECTOR.exists())
+            after = {path: digest(path) for path in before}
+            self.assertEqual(before, after)
 
     def test_git_object_oid_matches_independent_git_formula(self):
         payload = b"hello\n"

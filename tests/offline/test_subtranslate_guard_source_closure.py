@@ -33,7 +33,7 @@ BUNDLE_DURABILITY = ROOT / "packaging/subtranslate-guard/bundle-source/src/subtr
 V1_SHA = "2f0fc420399671f06040a46405d42eca532c692d0b62729353fb90b840a04801"
 V2_SHA = "ca95eac8680897d387878f69a87b089ff60e81e598fb051fcbb97606aeb408ad"
 DURABILITY_SHA = "5caeb33f1bb21fbc90b7195b791e061bc46a7bddedb49bb15f52908b09d23585"
-LIVE_PROBE_SHA = "d2ee2d37626b8f51ba191773f47ee5e74914d56b0edd89ff4ec9b46302ab3b4e"
+LIVE_PROBE_SHA = "9b76e8bf2a66ba5bef3014f2e6f6edbb97242b6999a9c2062df55addffad4722"
 
 
 def digest(path: Path) -> str:
