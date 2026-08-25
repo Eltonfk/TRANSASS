@@ -180,12 +180,21 @@ def batch_ids(units):
 
 
 def plan(config_path: str, batch_index: int) -> dict[str, Any]:
+    import time
+
+    timing: dict[str, float] = {}
+    t0 = time.perf_counter()
     config = load_config(config_path)
     source_path = resolve_source(config)
     engine_root, engine_from_cache = extract_engine(config["engine_revision"])
+    timing["engine_s"] = round(time.perf_counter() - t0, 3)
     try:
+        t1 = time.perf_counter()
         runner, pipeline = build_runner(source_path, config["episode_title"], engine_root)
+        timing["build_runner_s"] = round(time.perf_counter() - t1, 3)
+        t2 = time.perf_counter()
         packed = runner.plan_initial_batches()
+        timing["plan_batches_s"] = round(time.perf_counter() - t2, 3)
 
         # Validate against inventory if available
         inv_path = config.get("plan_inventory_path")
@@ -209,6 +218,8 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
             raise Blocked("EPISODE_TARGET_BATCH_EMPTY")
 
         payload = capture_payload(pipeline, runner, units)
+        timing["capture_s"] = round(time.perf_counter() - t2 - timing["plan_batches_s"], 3)
+        timing["total_s"] = round(time.perf_counter() - t0, 3)
         payload_bytes = canonical_bytes(payload)
 
         family_template = config.get("family_id_template", "V238_E{ep:02d}_R1_B{batch}_BATCH")
@@ -236,6 +247,7 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
                 "inventory_validated": plan_validation,
                 "engine_revision": config["engine_revision"],
                 "engine_from_cache": engine_from_cache,
+                "timing_seconds": timing,
                 "source_path": str(source_path),
             },
             "execution_authorized": False,
