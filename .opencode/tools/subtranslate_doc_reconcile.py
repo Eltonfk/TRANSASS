@@ -28,11 +28,17 @@ HANDOFF = AUTHORITY_ROOT / "HANDOFF_CHATGPT.md"
 PROBE_PATH = CANDIDATE_ROOT / ".opencode/tools/subtranslate_readonly_probe.py"
 BACKUP_PARENT = Path("/home/palhacinho/opencode-backups")
 
-PRESTATE_STATE = "SUBTRANSLATE_V238_E07_R6C_COMPLETE_BATCHES_1_232_ALL_PARSED_VALID_ZERO_RETRY"
-PRESTATE_NEXT = "BATCH_RANGE_112_232_COMPLETED_NEXT_RANGE_DECISION_REQUIRED"
-RECONCILIATION_KEY = "auto03e_infra_toolchain_reconciliation_r1"
-TARGET_LATEST_DECISION = "HUMAN_DECISION_RECORDED_REVIEW_DEFERRED_UNTIL_ALL_EPISODES_E08_E12_V238_FLOW_SELECTED"
-TARGET_NEXT_ACTION = "E08_E12_V238_FLOW_PLANNING_REQUIRED"
+PRESTATE_STATES = (
+    "SUBTRANSLATE_V238_E07_R6C_COMPLETE_BATCHES_1_232_ALL_PARSED_VALID_ZERO_RETRY",
+    "SUBTRANSLATE_V238_ZLS_S0112_COMPLETE_BATCHES_0_130_ALL_PARSED_VALID_ZERO_RETRY",
+)
+PRESTATE_NEXT_ACCEPTED = (
+    "BATCH_RANGE_112_232_COMPLETED_NEXT_RANGE_DECISION_REQUIRED",
+    "E12_ASSEMBLY_COMPLETED_NEXT_EPISODE_DECISION_REQUIRED",
+)
+RECONCILIATION_KEY = "auto03e_v240_release_reconciliation_r1"
+TARGET_LATEST_DECISION = "V240_DEPLOYED_PRODUCTION_SEASON_E07_E12_COMPLETE_HYGIENE_APPLIED"
+TARGET_NEXT_ACTION = "SEASON_E07_E12_COMPLETE_REVIEW_AND_RELEASE_DECISION_REQUIRED"
 
 WEB_IMAGE = "subtranslate:v2.3.8-dockerfile-rc4567-20260824T151953Z"
 ROLLBACK_IMAGE = "subtranslate:p2c3-20260813T223000Z"
@@ -68,47 +74,52 @@ def fresh_probe() -> dict[str, Any]:
 
 def build_additive_object(now: str, fingerprint: str) -> dict[str, Any]:
     return {
-        "mode": "INFRA_TOOLCHAIN_RECONCILIATION",
+        "mode": "V240_RELEASE_RECONCILIATION",
         "recorded_at": now,
         "snapshot_fingerprint": fingerprint,
         "scope": {
-            "web_deploy": {
-                "image": WEB_IMAGE,
-                "deployed_at": "2026-08-24T15:20Z",
+            "production_deploy_v240": {
+                "image": "subtranslate:v2.4.0-20260825T145426Z",
+                "deployed_at": "2026-08-25T14:57Z",
                 "mechanism": "docker compose --project-directory /docker/subtranslate up -d with SUBTRANSLATE_IMAGE override; no files edited",
+                "health": "healthy; /health ok; /version 2.4.0",
                 "config_preserved": {
                     "TRANSLATOR_PIPELINE": "v2_3_0",
                     "TRANSLATOR_OLLAMA_URL": "http://192.168.1.5:11434/api/chat",
                     "TRANSLATOR_REVIEW_MODEL": "llama3.1:8b",
                     "TRANSLATOR_FALLBACK_OLLAMA_MODEL": "llama3.1:8b",
                 },
-                "rollback_image": ROLLBACK_IMAGE,
-                "health": "healthy; /health ok",
+                "rollback_image": "subtranslate:p2c3-20260813T223000Z",
             },
-            "candidate_toolchain_commits": [
-                {"sha": "89ae63d", "summary": "deploy/Dockerfile includes V238 rc4-rc7b1 modules"},
-                {"sha": "b4203f9", "summary": "probe: absent transient ledger lock is normal state"},
-                {"sha": "ae298b6", "summary": "context_inspect canonical_keys in summary; probe 0.4.1 lineage"},
-                {"sha": "27c565a", "summary": "cycle 5-A tests: routing whitespace-tolerant, frozen baseline d2ee2d37, shared-section engine equivalence"},
-            ],
-            "release_gate_e07": {
-                "result": "BLOCK",
-                "readiness": "NOT_READY",
-                "pending": [
-                    "human review deferred by human decision until all episodes E07-E12 finalized",
-                    "human playback of output/e07_v238_full_styled.ass",
-                    "app_safety/translator_safety suites NOT_RUN on host (flask missing)",
-                ],
+            "season_e07_e12": {
+                "status": "COMPLETE_ALL_EPISODES_TRANSLATED_AND_ASSEMBLED",
+                "episodes": ["E07", "E08", "E09", "E10", "E11", "E12"],
+                "total_events": 10549,
+                "translated_applied": 8372,
+                "preserved_by_design": 2177,
+                "batches_executed": 1266,
+                "retries_automatic": 0,
+                "legendas_deployed": "/Tank/data/Shows/Zombie Land Saga/Season 1/*.pt-BR.ass",
+                "deferred_parse_failures": ["E08_B210", "E09_B150", "E09_B194",
+                                            "E10_B2", "E11_B96", "E11_B144", "E12_B47"],
+                "retry_resolved": ["E11_B144"],
             },
+            "versioning": {
+                "app_version": "2.4.0",
+                "changelog": "CHANGELOG.md vivo (v2.3.8 -> v2.4.0)",
+                "git_tag": "v2.4.0",
+                "health_version_endpoint": "/health + /version",
+            },
+            "transport_providers": ["ollama", "openai_compat", "gemini"],
             "pending_toolchain_projects": [
                 "cycle 5-B guard contract reconciliation (probe_engine lock-fix port; foundation/mediation/bundle contracts; 5 pre-existing closure_repair failures)",
                 "R1 probe_engine mirror parity",
             ],
         },
         "human_decisions": {
-            "recorded_at_source": "OpenCode session 2026-08-24",
-            "human_review_deferred": "human review of translations DEFERRED until ALL subtitles E07-E12 are finalized (single future gate)",
-            "e08_e12_flow": "episodes E08-E12 will use the V238 flow of the updated app image",
+            "recorded_at_source": "OpenCode session 2026-08-25",
+            "human_review_deferred": "human review of translations DEFERRED until ALL subtitles E07-E12 finalized (single future gate)",
+            "review_and_release": "proxima fase: playback humano + revisao dos ~48 eventos deferidos + release por episodio",
         },
         "future_side_effects_authorized": False,
         "next_phase_planning_required": True,
@@ -118,7 +129,15 @@ def build_additive_object(now: str, fingerprint: str) -> dict[str, Any]:
 
 
 def transition(before: dict[str, Any], probe: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
-    if before.get("state") != PRESTATE_STATE or before.get("next_action") != PRESTATE_NEXT:
+    state_value = before.get("state")
+    next_value = before.get("next_action")
+    state_ok = isinstance(state_value, str) and state_value.startswith("SUBTRANSLATE_V238_")
+    next_ok = isinstance(next_value, str) and (
+        next_value in PRESTATE_NEXT_ACCEPTED
+        or next_value.endswith(("_NEXT_EPISODE_DECISION_REQUIRED",
+                                "_ASSEMBLY_REQUIRED",
+                                "_EXTERNAL_DECISION_REQUIRED_NO_AUTOMATIC_RESEND")))
+    if not state_ok or not next_ok:
         raise ReconcileBlocked("RECONCILIATION_PRESTATE_MISMATCH")
     if RECONCILIATION_KEY in before:
         raise ReconcileBlocked("RECONCILIATION_RECORD_ALREADY_EXISTS")
