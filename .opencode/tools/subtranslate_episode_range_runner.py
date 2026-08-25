@@ -1235,6 +1235,7 @@ def main(argv=None) -> int:
     # the toolchain manifest is invocation-independent (absolute == relative).
     config_path = Path(args.config).resolve()
     try:
+        bind_episode(load_config(config_path))
         if args.mode == "authorize":
             print(json.dumps(authorize(config_path), sort_keys=True, ensure_ascii=False))
             return 0
