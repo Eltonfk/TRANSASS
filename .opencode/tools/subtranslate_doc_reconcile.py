@@ -221,7 +221,9 @@ def apply_reconciliation() -> dict[str, Any]:
     report, _, after_project, before_project_bytes, before_handoff, after_handoff, title, _ = derive()
     project_info = regular(PROJECT)
     handoff_info = regular(HANDOFF)
-    backup = BACKUP_PARENT / "subtranslate-auto03e-infra-toolchain-reconciliation-r1"
+    backup = BACKUP_PARENT / (
+        "subtranslate-auto03e-v240-release-reconciliation-r1-"
+        f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
     if backup.exists() or backup.is_symlink():
         raise ReconcileBlocked("TRANSITION_BACKUP_ALREADY_EXISTS")
     backup.mkdir(mode=0o700)
