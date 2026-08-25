@@ -204,6 +204,10 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
             inv = json.loads(Path(inv_path).read_text(encoding="utf-8"))
             entries = inv.get("batches", inv) if isinstance(inv, dict) else inv
             for entry in entries:
+                # Legacy inventory format carries event_id_set_sha256; the
+                # plan-all format is validated at execution time instead.
+                if "event_id_set_sha256" not in entry:
+                    continue
                 idx = int(entry["batch_index"])
                 ids = batch_ids(packed[idx])
                 if len(ids) != int(entry["event_count"]) or membership_sha256(ids) != entry["event_id_set_sha256"]:
