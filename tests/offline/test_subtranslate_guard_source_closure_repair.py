@@ -418,13 +418,16 @@ class FoundationInstallerRepairTests(unittest.TestCase):
     def test_current_head_plan_rejects_expected_dirty_manifest_contract(self):
         # The real host may already have the guard installed at the fixed
         # INSTALL_ROOT, so patch CURRENT_SELECTOR to a temp path to keep the
-        # "no residue" assertion environment-independent.
+        # "no residue" assertion environment-independent.  REPOSITORY_AUTHORITY
+        # is patched to the checkout root so the installer finds the repo on
+        # CI (the default points at the author's machine).
         from unittest import mock
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         fake_selector = Path(tmp.name) / "current"
-        with mock.patch.object(self.installer, "CURRENT_SELECTOR", fake_selector):
+        with mock.patch.object(self.installer, "REPOSITORY_AUTHORITY", ROOT), \
+             mock.patch.object(self.installer, "CURRENT_SELECTOR", fake_selector):
             before = {path: digest(path) for path in (V1, V2, CANONICAL_DURABILITY, BUNDLE_DURABILITY, LIVE_PROBE)}
             with self.assertRaisesRegex(self.installer.FoundationError, "RELEASE_CONTRACT_MISMATCH"):
                 self.installer.build_foundation_plan(HEAD)
