@@ -1,7 +1,7 @@
 services:
-  subtranslate:
-    image: ${SUBTRANSLATE_IMAGE:-subtranslate:p2c3-20260813T223000Z}
-    container_name: subtranslate
+  transass:
+    image: ${SUBTRANSLATE_IMAGE:-subtranslate:v2.4.0}
+    container_name: transass
     restart: unless-stopped
     init: true
     user: "1000:1000"
@@ -17,8 +17,8 @@ services:
       - path: .env
         required: false
     environment:
-      TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v2_3_0}
-      TRANSLATOR_OLLAMA_URL: ${TRANSLATOR_OLLAMA_URL:-http://ollama:11434}
+      TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v2_3_8}
+      TRANSLATOR_OLLAMA_URL: ${TRANSLATOR_OLLAMA_URL:-http://host.docker.internal:11434}
       TRANSLATOR_OLLAMA_MODEL: ${TRANSLATOR_OLLAMA_MODEL:-qwen3.5:9b}
       TRANSLATOR_FALLBACK_OLLAMA_MODEL: ${TRANSLATOR_FALLBACK_OLLAMA_MODEL:-qwen3.5:9b}
       TRANSLATOR_REVIEW_MODEL: ${TRANSLATOR_REVIEW_MODEL:-qwen3.5:9b}
@@ -33,12 +33,15 @@ services:
       ANIME_SUBTITLE_LIBRARY_ROOT: /app/state/anime-subtitle-library
       TRANSLATOR_GLOSSARY_PATH: /app/state/glossary_v1.json
     volumes:
-      - /Tank/data/Shows:/shows:rw
-      - /docker/subtranslate/state:/app/state:rw
+      # Aponte MEDIA_ROOT para a pasta com seus vídeos/séries e STATE_DIR para
+      # onde o app deve guardar o estado (Library, filas, config de motor).
+      - ${MEDIA_ROOT:-./shows}:/shows:rw
+      - ${STATE_DIR:-./state}:/app/state:rw
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777
     ports:
-      - "192.168.1.5:5050:5000"
+      # BIND_ADDR=0.0.0.0 expõe na rede local; use 127.0.0.1 para só local.
+      - "${BIND_ADDR:-0.0.0.0}:${WEB_PORT:-5050}:5000"
     logging:
       driver: json-file
       options:

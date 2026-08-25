@@ -33,10 +33,21 @@ Traduz episódios inteiros de `.ass`/`.ssa` para português do Brasil com
 
 ## 🚀 Início rápido
 
+> 📖 Guia completo (requisitos, instalação, desinstalação, solução de
+> problemas, FAQ): **[docs/INSTALLATION.md](docs/INSTALLATION.md)**
+
+### Requisitos mínimos
+
+- **Docker** 24+ (caminho recomendado) **ou** Python 3.11+
+- 4 GB RAM · 2 GB disco · CPU 2+ núcleos
+- **GPU opcional** — sem GPU, use CPU (mais lento) ou uma API gratuita (Gemini)
+
 ### Com Docker (recomendado)
 
 ```sh
-cp .env.example .env          # ajuste as variáveis
+git clone https://github.com/palhacinho/transass.git
+cd transass
+cp .env.example .env          # ajuste MEDIA_ROOT (pasta dos vídeos) e STATE_DIR
 docker build --pull=false -f deploy/Dockerfile -t transass:latest .
 docker compose -f deploy/compose.yaml up -d
 # UI em http://localhost:5050
@@ -94,6 +105,7 @@ docs/                    # arquitetura, operações, segurança, roadmap
 
 ## 📚 Documentação
 
+- [Instalação e desinstalação](docs/INSTALLATION.md)
 - [Arquitetura](docs/ARCHITECTURE.md)
 - [Pipelines](docs/PIPELINES.md)
 - [Configuração](docs/CONFIGURATION.md)
