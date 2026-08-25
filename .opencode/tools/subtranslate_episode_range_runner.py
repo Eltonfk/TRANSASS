@@ -1304,6 +1304,35 @@ def deferred_and_partial_batches(state: dict[str, Any], total: int) -> list[tupl
     return out
 
 
+GLOBAL_TRANSPORT_CONFIG_PATH = Path("/docker/subtranslate/state/transport_config.json")
+
+
+def load_global_transport_config() -> dict[str, Any]:
+    """Read the web-configured transport config (primary/fallback/keys)."""
+    try:
+        if GLOBAL_TRANSPORT_CONFIG_PATH.is_file():
+            value = json.loads(GLOBAL_TRANSPORT_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                return value
+    except Exception:
+        pass
+    return {}
+
+
+def build_fallback_section(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Fallback engine section: episode config override, else the global
+    web-configured fallback, with its API key attached when available."""
+    global_tc = load_global_transport_config()
+    section = dict(config.get("transport_fallback") or global_tc.get("fallback") or {})
+    if not section:
+        return None
+    provider = str(section.get("provider", "")).lower()
+    keys = global_tc.get("keys") or {}
+    if not section.get("api_key") and provider in keys and keys[provider]:
+        section["api_key"] = keys[provider]
+    return section
+
+
 def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
               kind: str) -> dict[str, Any]:
     """One authorized retry for a deferred/failed batch: fresh evidence family
@@ -1414,28 +1443,41 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
                 "model": transport.model,
                 "model_digest": context["model_digest"],
                 "timeout_seconds": TIMEOUT_SECONDS}
-    call = DurableV226Call(context, request_body, metadata)
-    durable_state = call.prepare_request()
-    if durable_state.get("state") != "REQUEST_DURABLE":
-        raise RunnerBlocked(f"RETRY_REQUEST_NOT_DURABLE:b{batch_index}")
-    with call.exclusive_transport_claim() as owner:
-        if not owner:
-            raise RunnerBlocked(f"RETRY_TRANSPORT_ALREADY_CLAIMED:b{batch_index}")
-        call.begin_transport()
-        import requests
-        response = requests.post(transport.endpoint(), data=request_bytes,
-                                 headers=transport.headers(), timeout=TIMEOUT_SECONDS)
-        raw = bytes(response.content)
-        call.record_response(raw, status_code=int(response.status_code))
-    if int(response.status_code) != 200:
-        raise RunnerBlocked(f"RETRY_HTTP_STATUS:b{batch_index}:{response.status_code}")
-    content = transport.extract_content(raw)
-    if not isinstance(content, str):
-        raise RunnerBlocked(f"RETRY_RESPONSE_CONTENT_MISSING:b{batch_index}")
-    value = json.loads(content)
-    sources_by_id = extract_targets_by_id(canonical_payload)
-    projected, normalized, _legit_empty = validate_translation_tolerant(
-        value, list(target["unit_ids"]), sources_by_id, batch_index)
+    try:
+        call = DurableV226Call(context, request_body, metadata)
+        durable_state = call.prepare_request()
+        if durable_state.get("state") != "REQUEST_DURABLE":
+            raise RunnerBlocked(f"RETRY_REQUEST_NOT_DURABLE:b{batch_index}")
+        with call.exclusive_transport_claim() as owner:
+            if not owner:
+                raise RunnerBlocked(f"RETRY_TRANSPORT_ALREADY_CLAIMED:b{batch_index}")
+            call.begin_transport()
+            import requests
+            response = requests.post(transport.endpoint(), data=request_bytes,
+                                     headers=transport.headers(), timeout=TIMEOUT_SECONDS)
+            raw = bytes(response.content)
+            call.record_response(raw, status_code=int(response.status_code))
+        if int(response.status_code) != 200:
+            raise RunnerBlocked(f"RETRY_HTTP_STATUS:b{batch_index}:{response.status_code}")
+        content = transport.extract_content(raw)
+        if not isinstance(content, str):
+            raise RunnerBlocked(f"RETRY_RESPONSE_CONTENT_MISSING:b{batch_index}")
+        value = json.loads(content)
+        sources_by_id = extract_targets_by_id(canonical_payload)
+        projected, normalized, _legit_empty = validate_translation_tolerant(
+            value, list(target["unit_ids"]), sources_by_id, batch_index)
+    except RunnerBlocked as exc:
+        # Automatic fallback: when the primary engine fails this batch, retry
+        # once with the configured fallback engine (fresh evidence family).
+        if config.get("_fallback_used"):
+            raise
+        fallback_section = build_fallback_section(config)
+        if fallback_section is None:
+            raise
+        config2 = dict(config)
+        config2["transport"] = fallback_section
+        config2["_fallback_used"] = True
+        return retry_one(config2, config_path, batch_index, kind)
     if normalized:
         audit = {"policy": POLICY, "raw_schema_status": "INVALID_EXTRA_PROPERTY",
                  "derived_schema_status": "VALID_AFTER_DETERMINISTIC_PROJECTION"}
