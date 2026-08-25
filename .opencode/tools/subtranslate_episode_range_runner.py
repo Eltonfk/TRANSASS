@@ -23,6 +23,7 @@ derives from the episode config and canonical sources.
 from __future__ import annotations
 
 import argparse
+import re
 import base64
 import hashlib
 import importlib.util
@@ -341,11 +342,14 @@ def authorize(config_path: Path) -> dict[str, Any]:
         pass
     elif _AUTHORIZATION_KEY in before:
         # Re-authorization for THIS episode: the pointer must sit at ANY
-        # decision/assembly terminal (later episodes may have advanced it).
+        # episode-level terminal, or a per-batch decision/authorized pointer
+        # (later episodes and interrupted passes may have advanced it).
         na = before.get("next_action")
-        if not isinstance(na, str) or not (
-            na.endswith("_NEXT_EPISODE_DECISION_REQUIRED")
-            or na.endswith("_ASSEMBLY_REQUIRED")):
+        ok_terminal = isinstance(na, str) and (
+            na.endswith("_NEXT_EPISODE_DECISION_REQUIRED") or na.endswith("_ASSEMBLY_REQUIRED"))
+        ok_batch = isinstance(na, str) and bool(
+            re.match(rf"^{_LABEL}_B\d+_(EXTERNAL_DECISION_REQUIRED|BATCH_EXECUTION_AUTHORIZED)", na))
+        if not (ok_terminal or ok_batch):
             raise RunnerBlocked(f"RECONCILIATION_PRESTATE_MISMATCH:{na}")
     else:
         raise RunnerBlocked(
