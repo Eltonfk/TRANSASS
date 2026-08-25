@@ -436,7 +436,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
         after["latest_decision"] = f"{_LABEL}_ALL_BATCHES_RECONCILED_ASSEMBLY_REQUIRED"
         after["next_action"] = f"{_LABEL}_ASSEMBLY_REQUIRED"
     else:
-        after["latest_decision"] = TARGET_LATEST_DECISION
+        after["latest_decision"] = _TARGET_LATEST_DECISION
         after["next_action"] = decision_pointer(next_expected)
     after_project = (json.dumps(after, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
     title = "AUTO-03E-E08-EPISODE-INTEGRAL-AUTHORIZATION-R1"
