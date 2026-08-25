@@ -1358,17 +1358,18 @@ def pipeline_route():
     return jsonify(_pipeline_info())
 
 
-    @app.route("/health")
-    def health():
-        from _version import __version__
+@app.route("/health")
+def health():
+    from _version import __version__
 
-        return jsonify({"status": "ok", "version": __version__})
+    return jsonify({"status": "ok", "version": __version__})
 
-    @app.route("/version")
-    def version():
-        from _version import __version__
 
-        return jsonify({"version": __version__})
+@app.route("/version")
+def version():
+    from _version import __version__
+
+    return jsonify({"version": __version__})
 
 
 @app.route("/start", methods=["POST"])
