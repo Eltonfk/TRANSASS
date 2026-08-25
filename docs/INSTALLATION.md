@@ -111,6 +111,12 @@ legendas daquele vídeo (sidecars como `ep01.esp.ass` e faixas internas do MKV)
 e lista as opções; basta escolher qual traduzir. O valor escolhido é enviado no
 `/start` e usado tanto na resolução da fonte quanto no prompt do modelo.
 
+**Seleção por temporada (mais rápida)**: como temporadas vêm de uma fonte única
+com legendas no mesmo idioma, use o seletor **"Idioma da temporada"** acima da
+lista. O botão **"Detectar"** inspeciona o primeiro episódio catalogado e
+popula os idiomas disponíveis; ao escolher um, ele é aplicado a **todos** os
+episódios da pasta de uma vez (sem precisar marcar um a um).
+
 ---
 
 ## 3. Instalação manual (sem Docker)

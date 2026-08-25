@@ -43,6 +43,11 @@ escolhível e toolchain de operação generalizada.
   `anime_subtitle_translator` e `web_audit_retranslation`; novo endpoint
   `GET /source-options`; exposto na UI ⚙ Motor (padrão global) e por episódio.
   Karaokê/signs/songs preservados por design.
+- **Seletor de idioma por temporada**: na lista de episódios, o campo
+  **"Idioma da temporada"** (com botão **Detectar**) aplica um único idioma de
+  origem a todos os episódios da pasta de uma vez, aproveitando que temporadas
+  vêm de fonte única com legendas no mesmo idioma. Complementa o seletor
+  individual por episódio.
 - **Pipeline de episódio genérico**: `episode_config_builder`,
   `episode_planner --plan-all` (inventário completo do episódio em uma única
   passada determinística), `episode_range_runner` (authorize/status/execute/
