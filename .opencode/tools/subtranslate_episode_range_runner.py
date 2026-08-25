@@ -57,10 +57,35 @@ TIMEOUT_SECONDS = 240
 PLANNER_TIMEOUT = 300
 EXECUTOR_TIMEOUT = 600
 
-AUTHORIZATION_KEY = "auto03e_e08_episode_execution_authorization_r1"
-PRESTATE_STATE = "SUBTRANSLATE_V238_E07_R6C_COMPLETE_BATCHES_1_232_ALL_PARSED_VALID_ZERO_RETRY"
-PRESTATE_NEXT = "E08_E12_V238_FLOW_PLANNING_REQUIRED"
-TARGET_LATEST_DECISION = "E08_EPISODE_INTEGRAL_EXECUTION_AUTHORIZED_SINGLE_CALL_PER_BATCH_ZERO_RETRY"
+AUTHORIZATION_KEY = "auto03e_e08_episode_execution_authorization_r1"  # default; bound per episode
+_LABEL = "E08"
+_LOWER = "e08"
+_SERIES_PREFIX = "V238_ZLS_S01E08"
+_TARGET_LATEST_DECISION = (
+    "E08_EPISODE_INTEGRAL_EXECUTION_AUTHORIZED_SINGLE_CALL_PER_BATCH_ZERO_RETRY")
+
+
+def bind_episode(config: dict[str, Any]) -> None:
+    """Bind the module-level episode identity from the loaded config so every
+    canonical namespace (authorization keys, pointers, state prefixes) belongs
+    strictly to THIS episode."""
+    global _LABEL, _LOWER, _SERIES_PREFIX, _AUTHORIZATION_KEY, _TARGET_LATEST_DECISION
+    _LABEL = str(config["episode_label"]).upper()
+    _LOWER = _LABEL.lower()
+    _SERIES_PREFIX = str(config["family_id_template"]).split("_B{")[0]
+    _AUTHORIZATION_KEY = f"auto03e_{_LOWER}_episode_execution_authorization_r1"
+    _TARGET_LATEST_DECISION = (
+        f"{_LABEL}_EPISODE_INTEGRAL_EXECUTION_AUTHORIZED"
+        "_SINGLE_CALL_PER_BATCH_ZERO_RETRY")
+
+
+def prestate_ok(state_value: Any, next_action: Any) -> bool:
+    """Generic previous-mission-terminal prestate: a completed SUBTRANSLATE_V238
+    mission whose pointer is a human-decision terminal."""
+    if not isinstance(state_value, str) or not state_value.startswith("SUBTRANSLATE_V238_") \
+            or "COMPLETE" not in state_value:
+        return False
+    return isinstance(next_action, str) and next_action.endswith("_NEXT_EPISODE_DECISION_REQUIRED")
 
 TOOLCHAIN_COMPONENTS = (
     ".opencode/tools/subtranslate_episode_range_runner.py",
@@ -178,19 +203,19 @@ def operation_id_for(config: dict[str, Any], batch_index: int, stamp: str) -> st
 
 
 def batch_auth_key(batch_index: int) -> str:
-    return f"auto03e_e08_b{batch_index}_batch_execution_authorization_r1"
+    return f"auto03e_{_LOWER}_b{batch_index}_batch_execution_authorization_r1"
 
 
 def batch_recon_key(batch_index: int) -> str:
-    return f"auto03e_e08_b{batch_index}_post_execution_reconciliation_r1"
+    return f"auto03e_{_LOWER}_b{batch_index}_post_execution_reconciliation_r1"
 
 
 def decision_pointer(batch_index: int) -> str:
-    return f"E08_B{batch_index}_EXTERNAL_DECISION_REQUIRED_NO_AUTOMATIC_RESEND"
+    return f"{_LABEL}_B{batch_index}_EXTERNAL_DECISION_REQUIRED_NO_AUTOMATIC_RESEND"
 
 
 def authorized_pointer(batch_index: int) -> str:
-    return f"E08_B{batch_index}_BATCH_EXECUTION_AUTHORIZED"
+    return f"{_LABEL}_B{batch_index}_BATCH_EXECUTION_AUTHORIZED"
 
 
 def git_value(*args: str) -> str:
@@ -305,35 +330,41 @@ def authorize(config_path: Path) -> dict[str, Any]:
     before_handoff = HANDOFF.read_bytes()
     before = json.loads(before_project_bytes)
     canonical_state = before.get("state")
-    first_authorization = canonical_state == PRESTATE_STATE and AUTHORIZATION_KEY not in before
+    first_authorization = prestate_ok(canonical_state, before.get("next_action")) \
+        and _AUTHORIZATION_KEY not in before
     if first_authorization:
-        if before.get("next_action") != PRESTATE_NEXT:
-            raise RunnerBlocked("RECONCILIATION_PRESTATE_MISMATCH")
-    else:
-        # Episode already in progress under a previous authorization: the
-        # canonical state must belong to this episode's progressive namespace.
-        if not isinstance(canonical_state, str) or not canonical_state.startswith("SUBTRANSLATE_V238_ZLS_S01E08_"):
+        pass
+    elif _AUTHORIZATION_KEY in before:
+        # Re-authorization for THIS episode: pointer must sit at the first
+        # pending batch's decision state (or assembly, if everything landed).
+        next_pending = None
+        for n in range(int(before.get("expected_total_batches", 0)) or 0):
+            if batch_recon_key(n) not in before:
+                next_pending = n
+                break
+        expected = f"{_LABEL}_ASSEMBLY_REQUIRED" if next_pending is None else decision_pointer(next_pending)
+        if before.get("next_action") != expected:
             raise RunnerBlocked(
-                f"RECONCILIATION_PRESTATE_MISMATCH:{canonical_state}")
+                f"RECONCILIATION_PRESTATE_MISMATCH:{before.get('next_action')}")
+    else:
+        raise RunnerBlocked(
+            f"RECONCILIATION_PRESTATE_MISMATCH:{canonical_state}:{before.get('next_action')}")
     superseded = None
-    if AUTHORIZATION_KEY in before:
-        # Re-authorization path: the previous episode authorization moved the
-        # pointer forward; replacement is safe when every started batch is
-        # already RECONCILED (no mid-cycle orphan: auth object without its
-        # reconciliation counterpart).  Reconciled batches remain SKIP-safe
-        # and keep their own per-batch authorization lineage.
-        previous = before[AUTHORIZATION_KEY]
+    if _AUTHORIZATION_KEY in before:
+        # Re-authorization path for THIS episode: replacement is safe when every
+        # started batch is already RECONCILED or is a deferred parse failure.
+        previous = before[_AUTHORIZATION_KEY]
         if not isinstance(previous, dict):
             raise RunnerBlocked("EPISODE_AUTHORIZATION_PREVIOUS_INVALID")
         prior_total = int(previous.get("expected_total_batches", -1))
         mid_cycle = []
         deferred_parse = []
         for n in range(max(prior_total, 0)):
-            has_auth = f"auto03e_e08_b{n}_batch_execution_authorization_r1" in before
-            has_recon = f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before
+            has_auth = batch_auth_key(n) in before
+            has_recon = batch_recon_key(n) in before
             if not has_auth or has_recon:
                 continue
-            prev_record = before[f"auto03e_e08_b{n}_batch_execution_authorization_r1"]
+            prev_record = before[batch_auth_key(n)]
             family_dir = AUTHORITY_ROOT / "runtime-evidence" / str(prev_record.get("family_id") or "")
             calls_dir = family_dir / "calls"
             attempts = sorted(p for p in calls_dir.iterdir() if p.is_dir()) if calls_dir.is_dir() else []
@@ -355,7 +386,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
             "deferred_parse_failure_batches": deferred_parse,
             "reconciled_batches_carried_over": sorted(
                 n for n in range(max(prior_total, 0))
-                if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in before),
+                if batch_recon_key(n) in before),
         }
     probe = fresh_probe()
     plan0 = run_planner(config_path, 0, expected_total=None)
@@ -398,12 +429,12 @@ def authorize(config_path: Path) -> dict[str, Any]:
     # re-authorization mid-episode resumes instead of rewinding.
     next_expected = None
     for n in range(total):
-        if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in before:
+        if batch_recon_key(n) not in before:
             next_expected = n
             break
     if next_expected is None:
-        after["latest_decision"] = "E08_ALL_BATCHES_RECONCILED_ASSEMBLY_REQUIRED"
-        after["next_action"] = "E08_ASSEMBLY_REQUIRED"
+        after["latest_decision"] = f"{_LABEL}_ALL_BATCHES_RECONCILED_ASSEMBLY_REQUIRED"
+        after["next_action"] = f"{_LABEL}_ASSEMBLY_REQUIRED"
     else:
         after["latest_decision"] = TARGET_LATEST_DECISION
         after["next_action"] = decision_pointer(next_expected)
@@ -736,12 +767,12 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
     state[batch_recon_key(batch_index)] = reconciliation
     done = batch_index + 1
     if done >= total:
-        state["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{batch_index}_ALL_PARSED_VALID_ZERO_RETRY"
-        state["status"] = "E08_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
-        state["next_action"] = "E08_ASSEMBLY_REQUIRED"
+        state["state"] = f"SUBTRANSLATE_{_SERIES_PREFIX}_COMPLETE_BATCHES_0_{batch_index}_ALL_PARSED_VALID_ZERO_RETRY"
+        state["status"] = f"{_LABEL}_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
+        state["next_action"] = f"{_LABEL}_ASSEMBLY_REQUIRED"
     else:
-        state["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_IN_PROGRESS_BATCHES_0_{batch_index}_ALL_PARSED_VALID_ZERO_RETRY"
-        state["status"] = f"E08_BATCHES_DONE_{done}_OF_{total}_ZERO_RETRY"
+        state["state"] = f"SUBTRANSLATE_{_SERIES_PREFIX}_IN_PROGRESS_BATCHES_0_{batch_index}_ALL_PARSED_VALID_ZERO_RETRY"
+        state["status"] = f"{_LABEL}_BATCHES_DONE_{done}_OF_{total}_ZERO_RETRY"
         state["next_action"] = decision_pointer(done)
     atomic_write_json(PROJECT, state)
     return {
@@ -857,7 +888,7 @@ def execute(config_path: Path, max_batches: int | None = None) -> dict[str, Any]
                 # to the final retry pass and advance the decision pointer so
                 # the remaining batches can flow.
                 state["next_action"] = (
-                    "E08_ASSEMBLY_REQUIRED" if batch_index + 1 >= total
+                    f"{_LABEL}_ASSEMBLY_REQUIRED" if batch_index + 1 >= total
                     else decision_pointer(batch_index + 1))
                 atomic_write_json(PROJECT, state)
                 results.append({"batch_index": batch_index,
@@ -873,7 +904,7 @@ def execute(config_path: Path, max_batches: int | None = None) -> dict[str, Any]
             ran_this_call += 1
             report = progress_report(results, stopped, blocker, total)
             persist_progress(report)
-            if state.get("next_action") == "E08_ASSEMBLY_REQUIRED":
+            if state.get("next_action") == f"{_LABEL}_ASSEMBLY_REQUIRED":
                 break
     except Exception as exc:
         stopped = True
@@ -884,7 +915,7 @@ def execute(config_path: Path, max_batches: int | None = None) -> dict[str, Any]
         print(json.dumps({"status": "FAIL_STOP", **report}, sort_keys=True, ensure_ascii=False))
         return {"status": "FAIL_STOP", "report": report}
     summary = {**report, "status": "PASS",
-               "next_action": "E08_ASSEMBLY_REQUIRED"}
+               "next_action": f"{_LABEL}_ASSEMBLY_REQUIRED"}
     print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
     return summary
 
@@ -1112,24 +1143,24 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
 
     total = int(load_authorization_total(state))
     done_count = sum(1 for n in range(total)
-                     if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" in after)
+                     if batch_recon_key(n) in after)
     pending = [n for n in range(total)
-               if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in after]
+               if batch_recon_key(n) not in after]
     if not pending:
         if pending_human_review_ids:
             after["state"] = (
-                f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}"
+                f"SUBTRANSLATE_{_SERIES_PREFIX}_COMPLETE_BATCHES_0_{total - 1}"
                 f"_B{batch_index}_PARTIAL_PENDING_HUMAN_REVIEW_ALL_OTHERS_PARSED_VALID_ZERO_RETRY")
             after["status"] = (
-                f"E08_MISSION_COMPLETE_B{batch_index}_PARTIAL_PENDING_HUMAN_REVIEW"
+                f"{_LABEL}_MISSION_COMPLETE_B{batch_index}_PARTIAL_PENDING_HUMAN_REVIEW"
                 "_ALL_OTHERS_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY")
         else:
-            after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}_ALL_PARSED_VALID_ZERO_RETRY"
-            after["status"] = "E08_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
-        after["next_action"] = "E08_ASSEMBLY_REQUIRED"
+            after["state"] = f"SUBTRANSLATE_{_SERIES_PREFIX}_COMPLETE_BATCHES_0_{total - 1}_ALL_PARSED_VALID_ZERO_RETRY"
+            after["status"] = f"{_LABEL}_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
+        after["next_action"] = f"{_LABEL}_ASSEMBLY_REQUIRED"
     else:
-        after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_IN_PROGRESS_BATCHES_0_{max(pending) - 1}_ALL_PARSED_VALID_ZERO_RETRY"
-        after["status"] = f"E08_BATCHES_DONE_{done_count}_OF_{total}_ZERO_RETRY"
+        after["state"] = f"SUBTRANSLATE_{_SERIES_PREFIX}_IN_PROGRESS_BATCHES_0_{max(pending) - 1}_ALL_PARSED_VALID_ZERO_RETRY"
+        after["status"] = f"{_LABEL}_BATCHES_DONE_{done_count}_OF_{total}_ZERO_RETRY"
         after["next_action"] = decision_pointer(min(pending))
 
     after_handoff = write_handoff_addendum(
