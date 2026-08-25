@@ -177,7 +177,9 @@ class GeminiTransport(BaseTransport):
                          for m in user_messages],
             "generationConfig": {
                 "temperature": float(options.get("temperature", 0.0)),
-                "maxOutputTokens": int(options.get("num_predict", 1024)),
+                # Gemini truncates at maxOutputTokens; the canonical 1024 is
+                # too small for 8-event batches with long translations.
+                "maxOutputTokens": max(int(options.get("num_predict", 1024)), 8192),
                 "responseMimeType": "application/json",
             },
         }
