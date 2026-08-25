@@ -53,7 +53,7 @@ Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
 ### Com Docker (recomendado)
 
 ```sh
-git clone https://github.com/palhacinho/transass.git
+git clone https://github.com/Eltonfk/TRANSASS.git
 cd transass
 cp .env.example .env          # ajuste MEDIA_ROOT (pasta dos vídeos) e STATE_DIR
 docker build --pull=false -f deploy/Dockerfile -t transass:latest .

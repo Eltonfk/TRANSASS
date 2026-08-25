@@ -49,7 +49,7 @@ qualquer máquina.
 ### 2.2 Baixar o projeto
 
 ```sh
-git clone https://github.com/palhacinho/transass.git
+git clone https://github.com/Eltonfk/TRANSASS.git
 cd transass
 ```
 
@@ -103,7 +103,7 @@ tenta automaticamente.
 ## 3. Instalação manual (sem Docker)
 
 ```sh
-git clone https://github.com/palhacinho/transass.git
+git clone https://github.com/Eltonfk/TRANSASS.git
 cd transass
 
 python3 -m venv .venv

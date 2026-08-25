@@ -22,9 +22,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/palhacinho/transass"
-Repository = "https://github.com/palhacinho/transass"
-Documentation = "https://github.com/palhacinho/transass#readme"
+Homepage = "https://github.com/Eltonfk/TRANSASS"
+Repository = "https://github.com/Eltonfk/TRANSASS"
+Documentation = "https://github.com/Eltonfk/TRANSASS#readme"
 
 [tool.setuptools]
 # The core package uses flat imports under src/subtranslate and is executed
