@@ -66,7 +66,30 @@ def resolve_source(config: dict) -> Path:
     raise Blocked("EPISODE_SOURCE_NOT_FOUND")
 
 
-def extract_engine(revision: str) -> Path:
+ENGINE_CACHE_ROOT = Path("/tmp/opencode/subtranslate-engine-cache")
+
+
+def _safe_revision(revision: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in revision)
+
+
+def extract_engine(revision: str) -> tuple[Path, bool]:
+    """Extract the pinned engine sources for ``revision``.
+
+    A persistent per-revision cache under /tmp/opencode makes every planning
+    invocation after the first near-instant (the git extraction of ~100 files
+    used to run once per batch).  Returns ``(root, from_cache)``.  Cache write
+    failures degrade gracefully to the original throwaway tempdir behaviour.
+    """
+    cached = ENGINE_CACHE_ROOT / _safe_revision(revision)
+    marker = cached / ".engine-cache-complete"
+    try:
+        if marker.is_file():
+            info = cached.lstat()
+            if _stat.S_ISDIR(info.st_mode) and not _stat.S_ISLNK(info.st_mode):
+                return cached, True
+    except OSError:
+        pass
     root = Path(tempfile.mkdtemp(prefix="subtranslate-ep-planner-engine-"))
     try:
         listing = subprocess.run(
@@ -83,10 +106,20 @@ def extract_engine(revision: str) -> Path:
             dst = root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_text(content, encoding="utf-8")
+        try:
+            ENGINE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            if cached.exists():
+                shutil.rmtree(cached, ignore_errors=True)
+            shutil.copytree(root, cached)
+            (cached / ".engine-cache-complete").write_text(revision + "\n", encoding="utf-8")
+            shutil.rmtree(root, ignore_errors=True)
+            return cached, True
+        except OSError:
+            shutil.rmtree(cached, ignore_errors=True)
+            return root, False
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
         raise
-    return root
 
 
 def build_runner(source_path: Path, episode_title: str, engine_root: Path):
@@ -149,7 +182,7 @@ def batch_ids(units):
 def plan(config_path: str, batch_index: int) -> dict[str, Any]:
     config = load_config(config_path)
     source_path = resolve_source(config)
-    engine_root = extract_engine(config["engine_revision"])
+    engine_root, engine_from_cache = extract_engine(config["engine_revision"])
     try:
         runner, pipeline = build_runner(source_path, config["episode_title"], engine_root)
         packed = runner.plan_initial_batches()
@@ -202,6 +235,7 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
                 "packed_total": len(packed),
                 "inventory_validated": plan_validation,
                 "engine_revision": config["engine_revision"],
+                "engine_from_cache": engine_from_cache,
                 "source_path": str(source_path),
             },
             "execution_authorized": False,
@@ -210,7 +244,8 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
             "runtime_write": False,
         }
     finally:
-        shutil.rmtree(engine_root, ignore_errors=True)
+        if not engine_from_cache:
+            shutil.rmtree(engine_root, ignore_errors=True)
 
 
 def main(argv=None):
