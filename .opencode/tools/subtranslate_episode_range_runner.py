@@ -1312,7 +1312,12 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
     state = load_json(PROJECT)
     auth_record = state[batch_auth_key(batch_index)]
     original_family = str(auth_record["family_id"])
-    retry_family = original_family + "_R1"
+    # Next available retry ordinal: R1, R2, ... (each retry gets its own fresh
+    # evidence family and ledger, so previous attempts stay immutable).
+    ordinal = 1
+    while (AUTHORITY_ROOT / "runtime-evidence" / (original_family + f"_R{ordinal}")).exists():
+        ordinal += 1
+    retry_family = original_family + f"_R{ordinal}"
     retry_root = AUTHORITY_ROOT / "runtime-evidence" / retry_family
 
     inventory_entry = inventory_target_for(config, batch_index)
