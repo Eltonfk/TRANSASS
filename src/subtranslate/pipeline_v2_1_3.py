@@ -98,6 +98,10 @@ class Config:
     context_budget_tokens: int = 1100
     context_max_chars: int = 2600
     scene_gap_ms: int = 6000
+    # Source language of the subtitle being translated.  The target is always
+    # Brazilian Portuguese.  Karaoke/song lyrics and romanization glosses keep
+    # their preservation rules regardless of the source language.
+    source_language: str = "inglês"
     # Optional pluggable transport provider.  When set, Client.call performs
     # the POST through the provider (endpoint/headers/wire format) instead of
     # the raw Ollama URL, and extracts the assistant text via the provider.
@@ -1402,8 +1406,8 @@ class Client:
             # the same strict schema and event ID, but removes all optional
             # prose/context so the request is unambiguously a translation.
             prompt = (
-                "Você é um tradutor de legendas. Traduza o TARGET para português brasileiro natural. "
-                "A resposta anterior permaneceu em inglês; não repita o texto-fonte. "
+                f"Você é um tradutor de legendas. Traduza o TARGET de {self.config.source_language} para português brasileiro natural. "
+                f"A resposta anterior permaneceu em {self.config.source_language}; não repita o texto-fonte. "
                 "Preserve somente nomes próprios, siglas, códigos e termos explicitamente protegidos. "
                 "Responda somente JSON válido, exatamente com o id solicitado.\n\n"
                 f"TARGET: {json.dumps(targets, ensure_ascii=False)}\n"
@@ -1412,7 +1416,7 @@ class Client:
             )
         else:
             prompt = (
-            "Traduza somente os itens TARGET de inglês para português do Brasil. "
+            f"Traduza somente os itens TARGET de {self.config.source_language} para português do Brasil. "
             "Cada evento completo é uma unidade semântica. CONTEXT existe apenas para "
             "entender sujeito, tom, referência e continuidade; nunca copie ou traduza "
             "conteúdo do contexto para outro id. Não produza explicações. Não produza "
@@ -1421,7 +1425,7 @@ class Client:
             "Nomes, romanizações, onomatopeias e termos do glossário devem ser preservados quando não houver tradução confiável. "
             "Quando o TARGET for um gloss de romanização entre colchetes, traduza somente o gloss e preserve a base romanizada fora dele; não inclua os colchetes na resposta. "
             "Nesse caso, o gloss curto também deve ser traduzido (por exemplo, Attack para Ataque e Warm para Quente), enquanto a base permanece idêntica. "
-            "Nunca devolva o inglês integral quando houver tradução possível. "
+            f"Nunca devolva o {self.config.source_language} integral quando houver tradução possível. "
             "Use o contexto para traduzir o sentido idiomático em português brasileiro natural, inclusive em telefonia, comida, jogos e sorteios; evite tradução palavra por palavra quando a situação exigir uma expressão natural. "
             "Expressões coloquiais, intensificadores e idioms devem transmitir função pragmática e sentido, não uma tradução lexical palavra por palavra. "
             "Quando have had enough expressar limite ou saturação, use uma formulação idiomática de limite em PT-BR (já chega de.../não aguento mais...), e não uma quantidade consumida ou uma construção literal como 'cheguei do limite'. "

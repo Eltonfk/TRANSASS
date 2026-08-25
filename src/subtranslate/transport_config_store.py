@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
     "fallback": None,
     "keys": {},
+    "source_language": "inglês",
     "updated_at": None,
 }
 
@@ -60,6 +61,7 @@ def public_transport_config(path: Path) -> dict[str, Any]:
         "primary": config.get("primary"),
         "fallback": config.get("fallback"),
         "keys_configured": keys_configured,
+        "source_language": config.get("source_language") or "inglês",
         "updated_at": config.get("updated_at"),
     }
 
@@ -109,6 +111,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         "primary": primary_clean,
         "fallback": fallback_clean,
         "keys": keys_clean,
+        "source_language": str(payload.get("source_language") or "inglês").strip() or "inglês",
         "updated_at": datetime.now(UTC).isoformat(),
     }
 

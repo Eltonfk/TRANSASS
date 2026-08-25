@@ -401,6 +401,8 @@ def translate_subtitle_file_v2_2_5(
         # Pluggable transport provider (primary/fallback engine) injected from
         # the web transport config; Client.call uses it when present.
         config.transport = execution_context.get("transport")
+        # Source language of the subtitle (defaults to English).
+        config.source_language = execution_context.get("source_language") or "inglês"
     memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()

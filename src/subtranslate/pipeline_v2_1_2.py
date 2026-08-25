@@ -1127,7 +1127,7 @@ class Client:
             )
         else:
             prompt = (
-            "Traduza somente os itens TARGET de inglês para português do Brasil. "
+            f"Traduza somente os itens TARGET de {getattr(self.config, 'source_language', 'inglês')} para português do Brasil. "
             "Cada evento completo é uma unidade semântica. CONTEXT existe apenas para "
             "entender sujeito, tom, referência e continuidade; nunca copie ou traduza "
             "conteúdo do contexto para outro id. Não produza explicações. Não produza "

@@ -58,6 +58,8 @@ def _run_pipeline(args, pipeline: str, transport: Any | None) -> dict[str, Any]:
                 "ollama_url": os.environ.get("TRANSLATOR_OLLAMA_URL"),
                 "defer_intermediate_cleanup": pipeline == "v2_3_0",
                 "transport": transport,
+                "source_language": transport_config.get("source_language")
+                                   or os.environ.get("TRANSLATOR_SOURCE_LANGUAGE", "inglês"),
             },
         )
     finally:

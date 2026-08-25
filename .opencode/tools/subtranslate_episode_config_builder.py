@@ -61,6 +61,7 @@ def build(episode_label: str, episode_id: int, series_id: int, source_filename: 
         "plan_all_inventory_path": f"/tmp/opencode/{episode_label.lower()}_plan_inventory.json",
         "library_root": LIBRARY_ROOT,
         "episode_title": episode_label.upper(),
+        "source_language": "inglês",
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "source_size_bytes": info.st_size,
     }
