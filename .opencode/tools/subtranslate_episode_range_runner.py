@@ -1201,11 +1201,344 @@ def load_authorization_total(before: dict[str, Any]) -> int:
     return total
 
 
+def extract_targets_by_id(payload: dict[str, Any]) -> dict[int, str]:
+    content_str = payload["messages"][0]["content"]
+    start = content_str.index("TARGET: ") + len("TARGET: ")
+    end = content_str.index("\nGLOSSARY:", start)
+    return {r["id"]: r["text"] for r in json.loads(content_str[start:end])}
+
+
+def validate_translation_tolerant(value: Any, unit_ids: list[int],
+                                  sources_by_id: dict[int, str],
+                                  batch_index: int) -> tuple[dict[str, Any], bool, list[int]]:
+    """Strict schema validation, except an EMPTY translation is tolerated when
+    the SOURCE text itself is empty (nothing to translate).  Returns
+    (projected, had_extra_properties, legitimate_empty_ids)."""
+    if not isinstance(value, dict) or set(value) != {"translations"}:
+        raise RunnerBlocked(f"BATCH_RESPONSE_ROOT_SCHEMA_INVALID:b{batch_index}")
+    rows = value.get("translations")
+    if not isinstance(rows, list) or len(rows) != len(unit_ids):
+        raise RunnerBlocked(f"BATCH_RESPONSE_CARDINALITY_INVALID:b{batch_index}")
+    projected: list[dict[str, Any]] = []
+    normalized = False
+    legitimate_empty: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), int) \
+                or not isinstance(row.get("text"), str):
+            raise RunnerBlocked(f"BATCH_RESPONSE_ITEM_INVALID:b{batch_index}")
+        extra = set(row) - {"id", "text"}
+        normalized = normalized or bool(extra)
+        if not row["text"].strip() and sources_by_id.get(row["id"], "").strip():
+            raise RunnerBlocked(
+                f"BATCH_RESPONSE_EMPTY_FOR_NONEMPTY_SOURCE:b{batch_index}:id{row['id']}")
+        if not row["text"].strip():
+            legitimate_empty.append(row["id"])
+        projected.append({"id": row["id"], "text": row["text"]})
+    if [r["id"] for r in projected] != unit_ids:
+        raise RunnerBlocked(f"BATCH_RESPONSE_MEMBERSHIP_INVALID:b{batch_index}")
+    return {"translations": projected}, normalized, legitimate_empty
+
+
+def recompute_state_status(state: dict[str, Any], total: int, retries_applied: int) -> None:
+    done = sum(1 for n in range(total) if batch_recon_key(n) in state)
+    pending = [n for n in range(total) if batch_recon_key(n) not in state]
+    partial_pending = any(
+        isinstance(state.get(batch_recon_key(n)), dict)
+        and isinstance(state[batch_recon_key(n)].get("partial_acceptance"), dict)
+        and state[batch_recon_key(n)]["partial_acceptance"].get("pending_human_review_ids")
+        for n in range(total))
+    retry_suffix = "_AUTHORIZED_RETRIES_APPLIED" if retries_applied else "_ZERO_RETRY"
+    if not pending:
+        if partial_pending:
+            state["state"] = (
+                f"SUBTRANSLATE_{_SERIES_PREFIX}_COMPLETE_BATCHES_0_{total - 1}"
+                "_PARTIAL_PENDING_HUMAN_REVIEW_ALL_OTHERS_PARSED_VALID" + retry_suffix)
+            state["status"] = (
+                f"{_LABEL}_MISSION_COMPLETE_PARTIAL_PENDING_HUMAN_REVIEW"
+                "_ALL_OTHERS_PARSED_VALID_COVERAGE_FORMALIZED" + retry_suffix)
+        else:
+            state["state"] = (
+                f"SUBTRANSLATE_{_SERIES_PREFIX}_COMPLETE_BATCHES_0_{total - 1}"
+                "_ALL_PARSED_VALID" + retry_suffix)
+            state["status"] = (
+                f"{_LABEL}_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID"
+                "_COVERAGE_FORMALIZED" + retry_suffix)
+        state["next_action"] = f"{_LABEL}_ASSEMBLY_REQUIRED"
+    else:
+        state["state"] = (
+            f"SUBTRANSLATE_{_SERIES_PREFIX}_IN_PROGRESS_BATCHES_0_{max(pending) - 1}"
+            "_ALL_PARSED_VALID" + retry_suffix)
+        state["status"] = f"{_LABEL}_BATCHES_DONE_{done}_OF_{total}" + retry_suffix
+        state["next_action"] = decision_pointer(min(pending))
+
+
+def deferred_and_partial_batches(state: dict[str, Any], total: int) -> list[tuple[int, str]]:
+    out: list[tuple[int, str]] = []
+    for n in range(total):
+        auth_k, recon_k = batch_auth_key(n), batch_recon_key(n)
+        if auth_k in state and recon_k not in state:
+            out.append((n, "deferred"))
+            continue
+        rec = state.get(recon_k)
+        if isinstance(rec, dict) and isinstance(rec.get("partial_acceptance"), dict) \
+                and rec["partial_acceptance"].get("pending_human_review_ids"):
+            out.append((n, "partial"))
+    return out
+
+
+def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
+              kind: str) -> dict[str, Any]:
+    """One authorized retry for a deferred/failed batch: fresh evidence family
+    (_R1), same deterministic payload, new durable call, then canonical
+    reconciliation (new object for deferred, in-place upgrade for partial)."""
+    state = load_json(PROJECT)
+    auth_record = state[batch_auth_key(batch_index)]
+    original_family = str(auth_record["family_id"])
+    retry_family = original_family + "_R1"
+    retry_root = AUTHORITY_ROOT / "runtime-evidence" / retry_family
+
+    inventory_entry = inventory_target_for(config, batch_index)
+    if inventory_entry is not None:
+        target = {
+            "unit_ids": list(inventory_entry["unit_ids"]),
+            "unit_membership_sha256": inventory_entry["unit_membership_sha256"],
+            "request_payload_sha256": inventory_entry["request_payload_sha256"],
+            "request_payload_bytes": int(inventory_entry["request_payload_bytes"]),
+            "request_payload_canonical_b64": inventory_entry["request_payload_canonical_b64"],
+        }
+    else:
+        plan = run_planner(config_path, batch_index, expected_total=None)
+        target = plan["target"]
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ%f")
+    backup_dir = BACKUP_PARENT / f"subtranslate-{_LOWER}-b{batch_index}-retry-write-{stamp}"
+    manifest_files = backup_canonical(backup_dir)
+
+    payload_dir = retry_root / "planning" / logical_batch_id(batch_index)
+    payload_path = payload_dir / "request_payload.json"
+    expected_len = int(target["request_payload_bytes"])
+    expected_sha = target["request_payload_sha256"]
+    if payload_path.exists():
+        existing = payload_path.read_bytes()
+        if len(existing) != expected_len or sha256_bytes(existing) != expected_sha:
+            raise RunnerBlocked(f"RETRY_PAYLOAD_HASH_CONFLICT:b{batch_index}")
+    else:
+        payload_bytes = base64.b64decode(target["request_payload_canonical_b64"], validate=True)
+        if len(payload_bytes) != expected_len or sha256_bytes(payload_bytes) != expected_sha:
+            raise RunnerBlocked(f"RETRY_PAYLOAD_HASH_OR_SIZE_MISMATCH:b{batch_index}")
+        payload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(payload_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, payload_bytes)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_dir(payload_dir)
+
+    operation_id = operation_id_for(config, batch_index, stamp)
+    sys.path.insert(0, str(SRC_ROOT))
+    from v238_per_call_durability import DurableV226Call
+
+    regular(payload_path)
+    payload = json.loads(payload_path.read_bytes())
+    if payload.get("model") != MODEL or payload.get("stream") is not False \
+            or payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+        raise RunnerBlocked(f"RETRY_PAYLOAD_MODEL_MISMATCH:b{batch_index}")
+
+    context = {
+        "operation_id": operation_id,
+        "anime_series_id": str(config["series_id"]),
+        "episode_id": str(config["episode_id"]),
+        "episode_family_id": retry_family,
+        "source_sha256": config["source_sha256"],
+        "model": MODEL,
+        "model_digest": MODEL_DIGEST,
+        "durable_call_root": str(retry_root),
+        "episode_family_root": str(retry_root),
+        "episode_budget_ledger_path": str(retry_root / "episode-budget.json"),
+        "episode_budget_limits": {"planned_initial_calls": 1, "retry_reserve": 0,
+                                  "physical_ceiling": 1,
+                                  "operation_retry_transport_cap": 2,
+                                  "per_event_retry_transport_cap": 1},
+        "pipeline_id": "v2_3_8",
+        "stage_id": "FULL_TRANSLATION_V238",
+        "candidate_execution_contract": config["engine_revision"],
+        "configuration_hash": "0248eaff2384681e6bbf24e6e43eb4ca6cac123579fb68b7de42f3d5f5cba444",
+        "glossary_hash": "64b0f676fed3bc495903f290b69a3290eebe2d52f8e726886a1ae7ea813b360e",
+        "prompt_schema_hash": "05911c99936b46be9cd4d8878407a8e8986351e086f3414bf297d880b4b46f63",
+        "response_normalization_policy": POLICY,
+        "candidate_commit": git_value("rev-parse", "HEAD"),
+        "transport_claim_timeout_seconds": 0.0,
+    }
+    metadata = {"phase": "batch", "attempt_type": "INITIAL",
+                "logical_batch_id": logical_batch_id(batch_index),
+                "attempt_ordinal": 1, "parent_attempt_id": None,
+                "batch_index": batch_index, "unit_ids": list(target["unit_ids"]),
+                "event_count": len(target["unit_ids"]),
+                "unit_membership_sha256": target["unit_membership_sha256"],
+                "model": MODEL, "model_digest": MODEL_DIGEST,
+                "timeout_seconds": TIMEOUT_SECONDS}
+    call = DurableV226Call(context, payload, metadata)
+    durable_state = call.prepare_request()
+    if durable_state.get("state") != "REQUEST_DURABLE":
+        raise RunnerBlocked(f"RETRY_REQUEST_NOT_DURABLE:b{batch_index}")
+    with call.exclusive_transport_claim() as owner:
+        if not owner:
+            raise RunnerBlocked(f"RETRY_TRANSPORT_ALREADY_CLAIMED:b{batch_index}")
+        call.begin_transport()
+        import requests
+        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT_SECONDS)
+        raw = bytes(response.content)
+        call.record_response(raw, status_code=int(response.status_code))
+    if int(response.status_code) != 200:
+        raise RunnerBlocked(f"RETRY_HTTP_STATUS:b{batch_index}:{response.status_code}")
+    envelope = json.loads(raw.decode("utf-8"))
+    content = (envelope.get("message") or {}).get("content") if isinstance(envelope, dict) else None
+    if not isinstance(content, str):
+        raise RunnerBlocked(f"RETRY_RESPONSE_CONTENT_MISSING:b{batch_index}")
+    value = json.loads(content)
+    sources_by_id = extract_targets_by_id(payload)
+    projected, normalized, _legit_empty = validate_translation_tolerant(
+        value, list(target["unit_ids"]), sources_by_id, batch_index)
+    if normalized:
+        audit = {"policy": POLICY, "raw_schema_status": "INVALID_EXTRA_PROPERTY",
+                 "derived_schema_status": "VALID_AFTER_DETERMINISTIC_PROJECTION"}
+        call.record_derived_normalization(projected, audit)
+        call.mark_derived_parsed_valid()
+    else:
+        call.mark_parsed(valid=True)
+
+    attempt_dir = retry_root / "calls" / call.physical_attempt_id
+    state_json = json.loads((attempt_dir / "state.json").read_text(encoding="utf-8"))
+    terminal = state_json.get("state")
+    if terminal not in ("PARSED_VALID", "DERIVED_PARSED_VALID"):
+        raise RunnerBlocked(f"RETRY_ATTEMPT_NOT_PARSED_VALID:b{batch_index}:{terminal}")
+    response_meta = json.loads((attempt_dir / "response_metadata.json").read_text(encoding="utf-8"))
+
+    translations_by_id = {r["id"]: r["text"] for r in projected["translations"]}
+    coverage = {
+        "schema": f"subtranslate.v238.e08_b{batch_index}_retry_derived_coverage.v1",
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "physical_attempt_id": call.physical_attempt_id,
+        "logical_batch_id": logical_batch_id(batch_index),
+        "found_ids": list(target["unit_ids"]),
+        "missing_ids": [],
+        "expected_count": len(target["unit_ids"]),
+        "found_count": len(target["unit_ids"]),
+        "mapping": [{"id": tid, "source": sources_by_id.get(tid, ""),
+                     "translation": translations_by_id[tid]} for tid in target["unit_ids"]],
+        "provenance": {"request_payload": str(payload_path),
+                       "response_body": str(attempt_dir / "response.body")},
+    }
+    coverage_path = attempt_dir / "derived_coverage.json"
+    fd = os.open(str(coverage_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, json.dumps(coverage, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    fsync_dir(attempt_dir)
+
+    state = load_json(PROJECT)
+    retry_lineage = {
+        "kind": kind,
+        "original_family_id": original_family,
+        "original_parse_failure": True,
+        "retry_family_id": retry_family,
+        "retry_physical_attempt_id": call.physical_attempt_id,
+        "retry_logical_call_id": call.logical_call_id,
+        "retry_terminal_state": terminal,
+        "retry_response_sha256": str(response_meta.get("response_sha256") or ""),
+        "authorized_by": "human autonomous-season decision; documented authorized retry",
+    }
+    if kind == "deferred":
+        reconciliation = {
+            "execution": {
+                "action_id": ACTION_ID, "executor_id": RUNNER_ID,
+                "batch_index": batch_index, "operation_id": operation_id,
+                "family_id": retry_family,
+                "episode_id": str(config["episode_id"]),
+                "logical_batch_id": logical_batch_id(batch_index),
+                "unit_ids": list(target["unit_ids"]),
+                "unit_membership_sha256": target["unit_membership_sha256"],
+                "request_payload_sha256": target["request_payload_sha256"],
+                "response_sha256": str(response_meta.get("response_sha256") or ""),
+                "physical_attempt_id": call.physical_attempt_id,
+                "logical_call_id": call.logical_call_id,
+                "terminal_state": terminal,
+                "model_calls": 1, "http_posts": 1, "retries": 0,
+                "model": MODEL, "policy": POLICY,
+            },
+            "coverage_formalized": {
+                "artifact": str(coverage_path),
+                "found_ids": list(target["unit_ids"]),
+                "missing_ids": [],
+            },
+            "retry_lineage": retry_lineage,
+            "future_side_effects_authorized": False,
+            "next_batch_started": False,
+            "canonical_reconciliation_required": False,
+            "created_at_utc": datetime.now(UTC).isoformat(),
+        }
+        state[batch_recon_key(batch_index)] = reconciliation
+    else:
+        rec = state[batch_recon_key(batch_index)]
+        pa = rec.get("partial_acceptance") or {}
+        pending_ids = list(pa.get("pending_human_review_ids") or [])
+        resolved = [tid for tid in pending_ids if translations_by_id.get(tid, "").strip()]
+        still_pending = [tid for tid in pending_ids if not translations_by_id.get(tid, "").strip()]
+        rec["retry_lineage"] = {**retry_lineage, "resolved_by_retry_ids": resolved,
+                                "still_pending_human_review_ids": still_pending}
+        rec["coverage_formalized"]["retry_artifact"] = str(coverage_path)
+        if not still_pending:
+            rec["partial_acceptance"]["pending_human_review_ids"] = []
+
+    retries_applied = sum(1 for r in [1])
+    recompute_state_status(state, total, retries_applied)
+    atomic_write_json(PROJECT, state)
+    return {"batch_index": batch_index, "kind": kind, "status": "COMPLETED",
+            "retry_family_id": retry_family,
+            "physical_attempt_id": call.physical_attempt_id,
+            "terminal_state": terminal,
+            "coverage_artifact": str(coverage_path),
+            "canonical_backup_root": str(backup_dir)}
+
+
+def retry_failed(config_path: Path) -> dict[str, Any]:
+    config = load_config(config_path)
+    bind_episode(config)
+    _, auth_record, total = load_authorization(config_path)
+    fresh_probe()
+    targets = deferred_and_partial_batches(load_json(PROJECT), total)
+    results = []
+    for batch_index, kind in targets:
+        try:
+            result = retry_one(config, config_path, batch_index, kind)
+            results.append(result)
+        except Exception as exc:
+            results.append({"batch_index": batch_index, "kind": kind,
+                            "status": "FAILED_AGAIN",
+                            "blocker": f"{type(exc).__name__}:{exc}"})
+    failed_again = [r for r in results if r["status"] == "FAILED_AGAIN"]
+    resolved = [r for r in results if r["status"] == "COMPLETED"]
+    summary = {
+        "status": "PASS" if not failed_again else "PARTIAL",
+        "mode": "RETRY_FAILED", "episode_label": _LABEL,
+        "targets": len(targets), "resolved_count": len(resolved),
+        "failed_again": failed_again,
+        "results": results,
+        "note": "re-run --mode execute to reconcile retried batches; "
+                "persistent failures go to the single human-review gate",
+    }
+    print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
+    return summary
+
+
 def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str | None, total: int) -> dict[str, Any]:
     completed = [r for r in results if r["status"] == "COMPLETED"]
     skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
     return {
-        "episode_label": "E08",
+        "episode_label": _LABEL,
         "expected_total_batches": total,
         "batches_completed": [r["batch_index"] for r in completed],
         "batches_skipped_resumed": [r["batch_index"] for r in skipped],
@@ -1218,7 +1551,7 @@ def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str |
 
 def persist_progress(report: dict[str, Any]) -> None:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    path = Path(f"/tmp/opencode/e08_episode_report_{stamp}.json")
+    path = Path(f"/tmp/opencode/{_LOWER}_episode_report_{stamp}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
     print(f"progress report persisted: {path}", file=sys.stderr)
@@ -1228,7 +1561,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG))
     parser.add_argument("--mode", required=True,
-                        choices=("authorize", "status", "execute", "recover-batch", "reconcile-batch"))
+                        choices=("authorize", "status", "execute", "recover-batch",
+                                 "reconcile-batch", "retry-failed"))
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--max-batches", type=int, default=None,
                         help="execute at most K pending batches, then exit cleanly")
@@ -1253,6 +1587,9 @@ def main(argv=None) -> int:
             if args.batch is None:
                 raise RunnerBlocked("RECONCILE_REQUIRES_BATCH")
             print(json.dumps(reconcile_existing_batch(config_path, args.batch), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.mode == "retry-failed":
+            print(json.dumps(retry_failed(config_path), sort_keys=True, ensure_ascii=False))
             return 0
         result = execute(config_path, max_batches=args.max_batches)
         return 0 if result.get("status") == "PASS" else 1
