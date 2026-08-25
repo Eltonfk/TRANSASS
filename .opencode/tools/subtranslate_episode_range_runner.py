@@ -1432,7 +1432,7 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
     if not isinstance(content, str):
         raise RunnerBlocked(f"RETRY_RESPONSE_CONTENT_MISSING:b{batch_index}")
     value = json.loads(content)
-    sources_by_id = extract_targets_by_id(payload)
+    sources_by_id = extract_targets_by_id(canonical_payload)
     projected, normalized, _legit_empty = validate_translation_tolerant(
         value, list(target["unit_ids"]), sources_by_id, batch_index)
     if normalized:
