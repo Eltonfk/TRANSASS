@@ -10,5 +10,6 @@
   "family_id_template": "V238_ZLS_S01E08_B{batch_index}_BATCH",
   "operation_id_template": "SUBTRANSLATE_V238_ZLS_S01E08_B{batch_index}_{timestamp}",
   "library_root": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R5_FINAL_CANDIDATE/memory",
+  "plan_inventory_path": "/tmp/opencode/e08_plan_inventory.json",
   "episode_title": "E08"
 }

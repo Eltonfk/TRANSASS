@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import shutil
 import stat as _stat
 import subprocess
@@ -260,14 +261,73 @@ def plan(config_path: str, batch_index: int) -> dict[str, Any]:
             shutil.rmtree(engine_root, ignore_errors=True)
 
 
+def plan_all_inventory(config_path: str, output_path: str) -> dict[str, Any]:
+    """Single-pass full-episode planning: one runner instantiation derives the
+    binding facts of EVERY batch (unit ids, membership hash, exact transport
+    payload).  Strictly read-only except the inventory file itself."""
+    import time
+
+    t0 = time.perf_counter()
+    config = load_config(config_path)
+    source_path = resolve_source(config)
+    engine_root, _from_cache = extract_engine(config["engine_revision"])
+    try:
+        runner, pipeline = build_runner(source_path, config["episode_title"], engine_root)
+        packed = runner.plan_initial_batches()
+        batches: list[dict[str, Any]] = []
+        for idx, units in enumerate(packed):
+            unit_ids = batch_ids(units)
+            if not unit_ids:
+                raise Blocked(f"EPISODE_TARGET_BATCH_EMPTY:{idx}")
+            payload = capture_payload(pipeline, runner, units)
+            payload_bytes = canonical_bytes(payload)
+            batches.append({
+                "batch_index": idx,
+                "unit_ids": unit_ids,
+                "event_count": len(unit_ids),
+                "unit_membership_sha256": membership_sha256(unit_ids),
+                "request_payload_sha256": sha256_bytes(payload_bytes),
+                "request_payload_bytes": len(payload_bytes),
+                "request_payload_canonical_b64": base64.b64encode(payload_bytes).decode("ascii"),
+            })
+        result = {
+            "status": "READY",
+            "mode": "PLAN_ALL_INVENTORY",
+            "action_id": ACTION_ID,
+            "executor_id": EXECUTOR_ID,
+            "side_effects_performed": False,
+            "engine_revision": config["engine_revision"],
+            "source_sha256": config["source_sha256"],
+            "packed_total": len(packed),
+            "batches": batches,
+            "timing_seconds": {"total_s": round(time.perf_counter() - t0, 3)},
+        }
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(str(out), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, json.dumps(result, sort_keys=True).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return result
+    finally:
+        shutil.rmtree(engine_root, ignore_errors=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--batch", type=int, required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--batch", type=int)
+    group.add_argument("--plan-all", type=str, metavar="OUTPUT_JSON")
     parser.add_argument("--plan", action="store_true", required=True)
     args = parser.parse_args(argv)
     try:
-        result = plan(args.config, args.batch)
+        if args.plan_all is not None:
+            result = plan_all_inventory(args.config, args.plan_all)
+        else:
+            result = plan(args.config, args.batch)
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))
         return 0
     except Exception as exc:

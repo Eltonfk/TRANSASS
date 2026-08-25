@@ -449,9 +449,41 @@ def classify(state: dict[str, Any], batch_index: int) -> str:
     return "RUN"
 
 
+def inventory_target_for(config: dict[str, Any], batch_index: int) -> dict[str, Any] | None:
+    """When the episode config declares a plan_inventory_path produced by the
+    single-pass planner (--plan-all), derive this batch's binding facts from
+    it instantly instead of paying a full runner instantiation per batch."""
+    inv_path = config.get("plan_inventory_path")
+    if not inv_path:
+        return None
+    path = Path(inv_path)
+    if not path.is_file():
+        return None
+    regular(path)
+    inventory = json.loads(path.read_text(encoding="utf-8"))
+    if inventory.get("engine_revision") != config["engine_revision"] \
+            or inventory.get("source_sha256") != config["source_sha256"]:
+        raise RunnerBlocked(
+            f"PLAN_INVENTORY_IDENTITY_MISMATCH:{path.name}")
+    for entry in inventory.get("batches", []):
+        if int(entry.get("batch_index", -1)) == batch_index:
+            return entry
+    return None
+
+
 def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
                   auth_record: dict[str, Any], total: int) -> dict[str, Any]:
-    plan = run_planner(config_path, batch_index, expected_total=total)
+    inventory_entry = inventory_target_for(config, batch_index)
+    if inventory_entry is not None:
+        plan = {"status": "READY", "target": {
+            "unit_ids": list(inventory_entry["unit_ids"]),
+            "unit_membership_sha256": inventory_entry["unit_membership_sha256"],
+            "request_payload_sha256": inventory_entry["request_payload_sha256"],
+            "request_payload_bytes": int(inventory_entry["request_payload_bytes"]),
+            "request_payload_canonical_b64": inventory_entry["request_payload_canonical_b64"],
+        }, "validation": {"packed_total": total, "from_inventory": True}}
+    else:
+        plan = run_planner(config_path, batch_index, expected_total=total)
     target = plan["target"]
     family = family_id_for(config, batch_index)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
