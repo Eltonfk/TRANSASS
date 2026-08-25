@@ -20,6 +20,8 @@ from typing import Any
 CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
 AUTHORITY_ROOT = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review")
 RUNTIME_EVIDENCE_ROOT = AUTHORITY_ROOT / "runtime-evidence"
+HISTORY_RUNTIME_EVIDENCE_ROOT = Path(
+    "/home/palhacinho/codex-projects/anime-subtitle-translator-review-history/runtime-evidence")
 
 ACTION_ID = "EPISODE_ASSEMBLY"
 EXECUTOR_ID = "EPISODE_ASSEMBLY_V1"
@@ -64,12 +66,21 @@ def resolve_source(config: dict[str, Any]) -> Path:
 
 
 def family_roots(config: dict[str, Any]) -> list[Path]:
-    """Family directories belonging strictly to this episode."""
-    prefix = config["family_id_template"].split("{")[0]
+    """Family directories belonging strictly to this episode, in BOTH the hot
+    authority root and the history root (hygiene R2 may have migrated them)."""
+    prefix = config["family_id_template"].split("_B{")[0]
     if not prefix:
         raise Blocked("FAMILY_PREFIX_EMPTY")
-    return sorted(p for p in RUNTIME_EVIDENCE_ROOT.iterdir()
-                  if p.is_dir() and p.name.startswith(prefix) and "_BATCH" in p.name)
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for base in (RUNTIME_EVIDENCE_ROOT, HISTORY_RUNTIME_EVIDENCE_ROOT):
+        if not base.is_dir():
+            continue
+        for p in base.iterdir():
+            if p.is_dir() and p.name.startswith(prefix) and "_BATCH" in p.name and p.name not in seen:
+                seen.add(p.name)
+                roots.append(p)
+    return sorted(roots, key=lambda p: p.name)
 
 
 def scan_translations(roots: list[Path]) -> dict[int, str]:
