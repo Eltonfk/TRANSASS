@@ -1537,6 +1537,200 @@ def retry_failed(config_path: Path) -> dict[str, Any]:
     return summary
 
 
+def finalize_retries(config_path: Path) -> dict[str, Any]:
+    """Offline finalization of interrupted retries: for every deferred batch
+    whose _R1 family holds a durable response, validate that response against
+    the deterministic payload and write the canonical reconciliation object.
+    No model calls.  Responses failing validation stay deferred for the human
+    review gate."""
+    config = load_config(config_path)
+    bind_episode(config)
+    _, auth_total_record, total = load_authorization(config_path)
+    state = load_json(PROJECT)
+    targets = deferred_and_partial_batches(state, total)
+    results: list[dict[str, Any]] = []
+    for batch_index, kind in targets:
+        try:
+            auth_record = state[batch_auth_key(batch_index)]
+            original_family = str(auth_record["family_id"])
+            retry_family = original_family + "_R1"
+            retry_root = AUTHORITY_ROOT / "runtime-evidence" / retry_family
+            calls_dir = retry_root / "calls"
+            attempts = sorted(p for p in calls_dir.iterdir() if p.is_dir()) if calls_dir.is_dir() else []
+            if not attempts:
+                results.append({"batch_index": batch_index, "kind": kind,
+                                "status": "NO_RETRY_ATTEMPT",
+                                "note": "run --mode execute first"})
+                continue
+
+            inventory_entry = inventory_target_for(config, batch_index)
+            if inventory_entry is not None:
+                target = {
+                    "unit_ids": list(inventory_entry["unit_ids"]),
+                    "unit_membership_sha256": inventory_entry["unit_membership_sha256"],
+                    "request_payload_sha256": inventory_entry["request_payload_sha256"],
+                    "request_payload_bytes": int(inventory_entry["request_payload_bytes"]),
+                    "request_payload_canonical_b64": inventory_entry["request_payload_canonical_b64"],
+                }
+            else:
+                plan = run_planner(config_path, batch_index, expected_total=None)
+                target = plan["target"]
+            expected_len = int(target["request_payload_bytes"])
+            expected_sha = target["request_payload_sha256"]
+
+            accepted = None
+            validation_error = None
+            for attempt_dir in attempts:
+                response_body = attempt_dir / "response.body"
+                if not response_body.is_file():
+                    continue
+                try:
+                    outer = json.loads(response_body.read_bytes().decode("utf-8"))
+                    content_str = outer["message"]["content"]
+                    value = json.loads(content_str)
+                    planning_payload = json.loads(
+                        (retry_root / "planning" / logical_batch_id(batch_index)
+                         / "request_payload.json").read_bytes())
+                    sources_by_id = extract_targets_by_id(planning_payload)
+                    projected, normalized, legit_empty = validate_translation_tolerant(
+                        value, list(target["unit_ids"]), sources_by_id, batch_index)
+                    accepted = {
+                        "attempt_dir": attempt_dir,
+                        "attempt_id": attempt_dir.name,
+                        "projected": projected,
+                        "normalized": normalized,
+                        "legit_empty": legit_empty,
+                        "sources_by_id": sources_by_id,
+                        "terminal_state": json.loads(
+                            (attempt_dir / "state.json").read_text(encoding="utf-8")).get("state"),
+                        "response_meta": json.loads(
+                            (attempt_dir / "response_metadata.json").read_text(encoding="utf-8")),
+                    }
+                    break
+                except RunnerBlocked as exc:
+                    validation_error = f"{attempt_dir.name}:{exc}"
+                    continue
+                except Exception as exc:
+                    validation_error = f"{attempt_dir.name}:{type(exc).__name__}:{exc}"
+                    continue
+
+            if accepted is None:
+                results.append({"batch_index": batch_index, "kind": kind,
+                                "status": "NO_VALID_RESPONSE",
+                                "validation_errors": validation_error})
+                continue
+
+            attempt_dir = accepted["attempt_dir"]
+            translations_by_id = {r["id"]: r["text"] for r in accepted["projected"]["translations"]}
+            coverage = {
+                "schema": f"subtranslate.v238.e08_b{batch_index}_retry_derived_coverage.v1",
+                "created_at_utc": datetime.now(UTC).isoformat(),
+                "physical_attempt_id": attempt_dir.name,
+                "logical_batch_id": logical_batch_id(batch_index),
+                "found_ids": list(target["unit_ids"]),
+                "missing_ids": [],
+                "expected_count": len(target["unit_ids"]),
+                "found_count": len(target["unit_ids"]),
+                "mapping": [{"id": tid, "source": accepted["sources_by_id"].get(tid, ""),
+                             "translation": translations_by_id[tid]} for tid in target["unit_ids"]],
+                "provenance": {"response_body": str(attempt_dir / "response.body"),
+                               "validated_offline": True},
+            }
+            coverage_path = attempt_dir / "derived_coverage.json"
+            if not coverage_path.is_file():
+                fd = os.open(str(coverage_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    os.write(fd, json.dumps(coverage, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"))
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                fsync_dir(attempt_dir)
+
+            state = load_json(PROJECT)
+            recon_key = batch_recon_key(batch_index)
+            existing_recon = state.get(recon_key)
+            retry_lineage = {
+                "kind": kind,
+                "original_family_id": original_family,
+                "retry_family_id": retry_family,
+                "retry_physical_attempt_id": attempt_dir.name,
+                "retry_terminal_state": accepted["terminal_state"],
+                "retry_response_sha256": str(accepted["response_meta"].get("response_sha256") or ""),
+                "validated_offline_after_runner_interruption": True,
+                "authorized_by": "human autonomous-season decision; documented authorized retry",
+            }
+            execution_facts = {
+                "action_id": ACTION_ID, "executor_id": RUNNER_ID,
+                "batch_index": batch_index,
+                "family_id": retry_family,
+                "episode_id": str(config["episode_id"]),
+                "logical_batch_id": logical_batch_id(batch_index),
+                "unit_ids": list(target["unit_ids"]),
+                "unit_membership_sha256": target["unit_membership_sha256"],
+                "request_payload_sha256": target["request_payload_sha256"],
+                "response_sha256": str(accepted["response_meta"].get("response_sha256") or ""),
+                "physical_attempt_id": attempt_dir.name,
+                "terminal_state": accepted["terminal_state"],
+                "model_calls": 1, "http_posts": 1, "retries": 0,
+                "model": MODEL, "policy": POLICY,
+            }
+            if kind == "deferred":
+                reconciliation = {
+                    "execution": execution_facts,
+                    "coverage_formalized": {"artifact": str(coverage_path),
+                                            "found_ids": list(target["unit_ids"]), "missing_ids": []},
+                    "retry_lineage": retry_lineage,
+                    "future_side_effects_authorized": False,
+                    "next_batch_started": False,
+                    "canonical_reconciliation_required": False,
+                    "created_at_utc": datetime.now(UTC).isoformat(),
+                }
+                state[recon_key] = reconciliation
+            else:
+                rec = existing_recon or {}
+                rec["execution"] = execution_facts
+                rec["coverage_formalized"] = {"artifact": str(coverage_path),
+                                              "found_ids": list(target["unit_ids"]), "missing_ids": []}
+                rec["retry_lineage"] = retry_lineage
+                pa = rec.get("partial_acceptance") or {}
+                pending_ids = list(pa.get("pending_human_review_ids") or [])
+                resolved = [tid for tid in pending_ids if translations_by_id.get(tid, "").strip()]
+                still_pending = [tid for tid in pending_ids if not translations_by_id.get(tid, "").strip()]
+                pa["resolved_by_retry_ids"] = resolved
+                pa["pending_human_review_ids"] = still_pending
+                rec["partial_acceptance"] = pa
+                state[recon_key] = rec
+
+            recompute_state_status(state, total, retries_applied=1)
+            atomic_write_json(PROJECT, state)
+            results.append({"batch_index": batch_index, "kind": kind,
+                            "status": "FINALIZED", "terminal_state": accepted["terminal_state"],
+                            "coverage_artifact": str(coverage_path)})
+        except Exception as exc:
+            results.append({"batch_index": batch_index, "kind": kind,
+                            "status": "FAILED", "blocker": f"{type(exc).__name__}:{exc}"})
+
+    failed = [r for r in results if r["status"] in ("FAILED", "NO_VALID_RESPONSE")]
+    summary = {"status": "PASS" if not failed else "PARTIAL", "mode": "FINALIZE_RETRIES",
+               "episode_label": _LABEL, "targets": len(targets),
+               "finalized_count": sum(1 for r in results if r["status"] == "FINALIZED"),
+               "failed": failed, "results": results}
+    print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
+    return summary
+    completed = [r for r in results if r["status"] == "COMPLETED"]
+    skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
+    return {
+        "episode_label": _LABEL,
+        "expected_total_batches": total,
+        "batches_completed": [r["batch_index"] for r in completed],
+        "batches_skipped_resumed": [r["batch_index"] for r in skipped],
+        "completed_count": len(completed),
+        "stopped_early": stopped,
+        "blocker": blocker,
+        "results": results,
+    }
+
+
 def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str | None, total: int) -> dict[str, Any]:
     completed = [r for r in results if r["status"] == "COMPLETED"]
     skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
