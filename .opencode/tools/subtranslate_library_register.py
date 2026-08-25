@@ -42,7 +42,7 @@ def main() -> int:
     backup_dir = BACKUP_PARENT / f"subtranslate-library-register-v240-{stamp}"
     backup_dir.mkdir(mode=0o700)
     backed_up = []
-    for db in LIBRARY_ROOT.rglob("*.db"):
+    for db in list(LIBRARY_ROOT.rglob("*.db")) + list(LIBRARY_ROOT.rglob("*.sqlite3")):
         dst = backup_dir / db.name
         shutil.copyfile(db, dst)
         backed_up.append(str(dst))
