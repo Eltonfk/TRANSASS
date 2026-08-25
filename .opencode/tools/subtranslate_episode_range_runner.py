@@ -481,10 +481,10 @@ def classify(state: dict[str, Any], batch_index: int) -> str:
 
 
 def inventory_target_for(config: dict[str, Any], batch_index: int) -> dict[str, Any] | None:
-    """When the episode config declares a plan_inventory_path produced by the
+    """When the episode config declares a plan_all_inventory_path produced by the
     single-pass planner (--plan-all), derive this batch's binding facts from
     it instantly instead of paying a full runner instantiation per batch."""
-    inv_path = config.get("plan_inventory_path")
+    inv_path = config.get("plan_all_inventory_path")
     if not inv_path:
         return None
     path = Path(inv_path)
