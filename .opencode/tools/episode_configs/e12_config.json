@@ -13,5 +13,9 @@
     "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_E08_E12_SOURCES/e12.ass"
   ],
   "source_sha256": "6701c6535b54d291c96677537c2659b7d0f0f4f24a80748b372c12c9857c602e",
-  "source_size_bytes": 111133
+  "source_size_bytes": 111133,
+  "transport": {
+    "model": "gemini-3.6-flash",
+    "provider": "gemini"
+  }
 }

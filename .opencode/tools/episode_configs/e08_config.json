@@ -1,15 +1,19 @@
 {
+  "engine_revision": "d9dbaa8264992903c1c008461c5ae3ab4cc4fc84",
+  "episode_id": 80,
   "episode_label": "E08",
-  "source_sha256": "3beff91bb050f870c7d54b55991caf63e2369cdcbff2f18d987ac650c627277f",
+  "episode_title": "E08",
+  "family_id_template": "V238_ZLS_S01E08_B{batch_index}_BATCH",
+  "library_root": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R5_FINAL_CANDIDATE/memory",
+  "operation_id_template": "SUBTRANSLATE_V238_ZLS_S01E08_B{batch_index}_{timestamp}",
+  "plan_inventory_path": "/tmp/opencode/e08_plan_inventory.json",
+  "series_id": 3,
   "source_candidates": [
     "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_E08_E12_SOURCES/e08.ass"
   ],
-  "episode_id": 80,
-  "series_id": 3,
-  "engine_revision": "d9dbaa8264992903c1c008461c5ae3ab4cc4fc84",
-  "family_id_template": "V238_ZLS_S01E08_B{batch_index}_BATCH",
-  "operation_id_template": "SUBTRANSLATE_V238_ZLS_S01E08_B{batch_index}_{timestamp}",
-  "library_root": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R5_FINAL_CANDIDATE/memory",
-  "plan_inventory_path": "/tmp/opencode/e08_plan_inventory.json",
-  "episode_title": "E08"
+  "source_sha256": "3beff91bb050f870c7d54b55991caf63e2369cdcbff2f18d987ac650c627277f",
+  "transport": {
+    "model": "gemini-3.6-flash",
+    "provider": "gemini"
+  }
 }
