@@ -1,2 +1,3 @@
-# The canonical offline runner uses Python's stdlib unittest and needs no
-# additional test-only package. Runtime dependencies remain in requirements.lock.
+# Test-only dependencies for the offline suite (CI).
+# Runtime dependencies remain in requirements.lock.
+pytest>=8.0
