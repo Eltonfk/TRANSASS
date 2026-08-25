@@ -85,7 +85,9 @@ def prestate_ok(state_value: Any, next_action: Any) -> bool:
     if not isinstance(state_value, str) or not state_value.startswith("SUBTRANSLATE_V238_") \
             or "COMPLETE" not in state_value:
         return False
-    return isinstance(next_action, str) and next_action.endswith("_NEXT_EPISODE_DECISION_REQUIRED")
+    return isinstance(next_action, str) and (
+        next_action.endswith("_NEXT_EPISODE_DECISION_REQUIRED")
+        or next_action.endswith("_ASSEMBLY_REQUIRED"))
 
 TOOLCHAIN_COMPONENTS = (
     ".opencode/tools/subtranslate_episode_range_runner.py",
