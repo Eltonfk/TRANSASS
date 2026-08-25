@@ -31,6 +31,3 @@ Documentation = "https://github.com/palhacinho/transass#readme"
 # with PYTHONPATH=src/subtranslate or inside the Docker image.  This project
 # metadata exists for tooling/CI; runtime packaging is Docker-first.
 packages = []
-
-[tool.pytest.ini_options]
-testpaths = ["tests/offline"]

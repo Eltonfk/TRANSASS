@@ -23,6 +23,12 @@ jobs:
           pip install -r requirements-test.lock
 
       - name: Run offline test suite
+        env:
+          # The web app creates its state dir at import time; point it at a
+          # writable temp path on CI instead of the container default /app.
+          TRANSLATOR_WEB_STATE_DIR: /tmp/transass-state
+          ANIME_SUBTITLE_LIBRARY_ROOT: /tmp/transass-state/anime-subtitle-library
+          TRANSLATOR_GLOSSARY_PATH: /tmp/transass-state/glossary_v1.json
         run: |
           PYTHONPATH=src/subtranslate python3 -m pytest tests/offline -v
 
