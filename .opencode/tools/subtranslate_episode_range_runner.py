@@ -602,6 +602,17 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
     if payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
         raise RunnerBlocked(f"BATCH_PAYLOAD_OPTIONS_MISMATCH:b{batch_index}")
 
+    from transport_providers import api_key_from_env, transport_from_config
+    transport_section = dict(config.get("transport") or {})
+    provider_name = str(transport_section.get("provider", "ollama")).lower()
+    if not transport_section.get("api_key"):
+        env_key = api_key_from_env(provider_name)
+        if env_key:
+            transport_section["api_key"] = env_key
+    transport = transport_from_config(transport_section, payload)
+    request_body = transport.build_request(payload)
+    request_bytes = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+
     exec_stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ%f")
     executor_backup = BACKUP_PARENT / f"subtranslate-auto03e-e08-b{batch_index}-batch-execution-r1-{exec_stamp}"
     if executor_backup.exists():
@@ -628,8 +639,9 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
         "episode_id": str(config["episode_id"]),
         "episode_family_id": family,
         "source_sha256": config["source_sha256"],
-        "model": MODEL,
-        "model_digest": MODEL_DIGEST,
+        "model": transport.model,
+        "model_digest": (MODEL_DIGEST if transport.name == "ollama"
+                         else sha256_bytes(f"{transport.name}:{transport.model}".encode())),
         "durable_call_root": str(AUTHORITY_ROOT / "runtime-evidence" / family),
         "episode_family_root": str(AUTHORITY_ROOT / "runtime-evidence" / family),
         "episode_budget_ledger_path": str(AUTHORITY_ROOT / "runtime-evidence" / family / "episode-budget.json"),
@@ -649,8 +661,9 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
                 "attempt_ordinal": 1, "parent_attempt_id": None, "batch_index": batch_index,
                 "unit_ids": list(target["unit_ids"]), "event_count": len(target["unit_ids"]),
                 "unit_membership_sha256": target["unit_membership_sha256"],
-                "model": MODEL, "model_digest": MODEL_DIGEST, "timeout_seconds": TIMEOUT_SECONDS}
-    call = DurableV226Call(context, payload, metadata)
+                "model": transport.model,
+                "model_digest": context["model_digest"], "timeout_seconds": TIMEOUT_SECONDS}
+    call = DurableV226Call(context, request_bytes, metadata)
     durable_state = call.prepare_request()
     if durable_state.get("state") != "REQUEST_DURABLE":
         raise RunnerBlocked(f"BATCH_REQUEST_NOT_DURABLE:b{batch_index}")
@@ -659,18 +672,20 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
             raise RunnerBlocked(f"BATCH_TRANSPORT_ALREADY_CLAIMED:b{batch_index}")
         call.begin_transport()
         import requests
-        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT_SECONDS)
+        response = requests.post(transport.endpoint(), data=request_bytes,
+                                 headers=transport.headers(), timeout=TIMEOUT_SECONDS)
         raw = bytes(response.content)
         call.record_response(raw, status_code=int(response.status_code))
     if int(response.status_code) != 200:
         raise RunnerBlocked(f"BATCH_HTTP_STATUS:b{batch_index}:{response.status_code}")
     try:
-        envelope = json.loads(raw.decode("utf-8"))
-        content = (envelope.get("message") or {}).get("content") if isinstance(envelope, dict) else None
+        content = transport.extract_content(raw)
         if not isinstance(content, str):
             raise RunnerBlocked(f"BATCH_RESPONSE_CONTENT_MISSING:b{batch_index}")
         value = json.loads(content)
-        projected, normalized = validate_translation(value, list(target["unit_ids"]), batch_index)
+        sources_by_id = extract_targets_by_id(payload)
+        projected, normalized, _legit_empty = validate_translation_tolerant(
+            value, list(target["unit_ids"]), sources_by_id, batch_index)
     except Exception as exc:
         call.mark_parsed(valid=False, error=f"{type(exc).__name__}:{exc}")
         raise
@@ -1343,10 +1358,20 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
     from v238_per_call_durability import DurableV226Call
 
     regular(payload_path)
-    payload = json.loads(payload_path.read_bytes())
-    if payload.get("model") != MODEL or payload.get("stream") is not False \
-            or payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
-        raise RunnerBlocked(f"RETRY_PAYLOAD_MODEL_MISMATCH:b{batch_index}")
+    canonical_payload = json.loads(payload_path.read_bytes())
+    if canonical_payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+        raise RunnerBlocked(f"RETRY_PAYLOAD_OPTIONS_MISMATCH:b{batch_index}")
+
+    from transport_providers import api_key_from_env, transport_from_config
+    transport_section = dict(config.get("transport") or {})
+    provider_name = str(transport_section.get("provider", "ollama")).lower()
+    if not transport_section.get("api_key"):
+        env_key = api_key_from_env(provider_name)
+        if env_key:
+            transport_section["api_key"] = env_key
+    transport = transport_from_config(transport_section, canonical_payload)
+    request_body = transport.build_request(canonical_payload)
+    request_bytes = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
 
     context = {
         "operation_id": operation_id,
@@ -1354,8 +1379,9 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
         "episode_id": str(config["episode_id"]),
         "episode_family_id": retry_family,
         "source_sha256": config["source_sha256"],
-        "model": MODEL,
-        "model_digest": MODEL_DIGEST,
+        "model": transport.model,
+        "model_digest": (MODEL_DIGEST if transport.name == "ollama"
+                         else sha256_bytes(f"{transport.name}:{transport.model}".encode())),
         "durable_call_root": str(retry_root),
         "episode_family_root": str(retry_root),
         "episode_budget_ledger_path": str(retry_root / "episode-budget.json"),
@@ -1379,9 +1405,10 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
                 "batch_index": batch_index, "unit_ids": list(target["unit_ids"]),
                 "event_count": len(target["unit_ids"]),
                 "unit_membership_sha256": target["unit_membership_sha256"],
-                "model": MODEL, "model_digest": MODEL_DIGEST,
+                "model": transport.model,
+                "model_digest": context["model_digest"],
                 "timeout_seconds": TIMEOUT_SECONDS}
-    call = DurableV226Call(context, payload, metadata)
+    call = DurableV226Call(context, request_bytes, metadata)
     durable_state = call.prepare_request()
     if durable_state.get("state") != "REQUEST_DURABLE":
         raise RunnerBlocked(f"RETRY_REQUEST_NOT_DURABLE:b{batch_index}")
@@ -1390,13 +1417,13 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
             raise RunnerBlocked(f"RETRY_TRANSPORT_ALREADY_CLAIMED:b{batch_index}")
         call.begin_transport()
         import requests
-        response = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT_SECONDS)
+        response = requests.post(transport.endpoint(), data=request_bytes,
+                                 headers=transport.headers(), timeout=TIMEOUT_SECONDS)
         raw = bytes(response.content)
         call.record_response(raw, status_code=int(response.status_code))
     if int(response.status_code) != 200:
         raise RunnerBlocked(f"RETRY_HTTP_STATUS:b{batch_index}:{response.status_code}")
-    envelope = json.loads(raw.decode("utf-8"))
-    content = (envelope.get("message") or {}).get("content") if isinstance(envelope, dict) else None
+    content = transport.extract_content(raw)
     if not isinstance(content, str):
         raise RunnerBlocked(f"RETRY_RESPONSE_CONTENT_MISSING:b{batch_index}")
     value = json.loads(content)
@@ -1470,7 +1497,8 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
                 "logical_call_id": call.logical_call_id,
                 "terminal_state": terminal,
                 "model_calls": 1, "http_posts": 1, "retries": 0,
-                "model": MODEL, "policy": POLICY,
+                "model": transport.model, "policy": POLICY,
+                "transport_provider": transport.name,
             },
             "coverage_formalized": {
                 "artifact": str(coverage_path),
@@ -1672,7 +1700,8 @@ def finalize_retries(config_path: Path) -> dict[str, Any]:
                 "physical_attempt_id": attempt_dir.name,
                 "terminal_state": accepted["terminal_state"],
                 "model_calls": 1, "http_posts": 1, "retries": 0,
-                "model": MODEL, "policy": POLICY,
+                "model": transport.model, "policy": POLICY,
+                "transport_provider": transport.name,
             }
             if kind == "deferred":
                 reconciliation = {
