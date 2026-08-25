@@ -8,6 +8,7 @@
   "library_root": "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R5_FINAL_CANDIDATE/memory",
   "operation_id_template": "SUBTRANSLATE_V238_ZLS_S0109_B{batch_index}_{timestamp}",
   "plan_all_inventory_path": "/tmp/opencode/e09_plan_inventory.json",
+  "transport": {"provider": "gemini", "model": "gemini-2.0-flash"},
   "series_id": 3,
   "source_candidates": [
     "/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_E08_E12_SOURCES/e09.ass"
