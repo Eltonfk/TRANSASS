@@ -22,7 +22,7 @@ jobs:
           pip install -r requirements.lock
           pip install -r requirements-test.lock
 
-      - name: Run offline test suite
+      - name: Run offline unit test suite
         env:
           # The web app creates its state dir at import time; point it at a
           # writable temp path on CI instead of the container default /app.
@@ -30,7 +30,19 @@ jobs:
           ANIME_SUBTITLE_LIBRARY_ROOT: /tmp/transass-state/anime-subtitle-library
           TRANSLATOR_GLOSSARY_PATH: /tmp/transass-state/glossary_v1.json
         run: |
-          PYTHONPATH=src/subtranslate python3 -m pytest tests/offline -v
+          # CI runs the environment-independent unit suite.  The remaining
+          # tests/offline files are operational tests that require the
+          # author's canonical state / runtime evidence (see docs/TESTING.md).
+          PYTHONPATH=src/subtranslate python3 -m pytest -v \
+            tests/offline/test_v238_canonical_port.py \
+            tests/offline/test_transport_providers.py \
+            tests/offline/test_subtranslate_readonly_probe.py \
+            tests/offline/test_subtranslate_context_inspect.py \
+            tests/offline/test_subtranslate_next_routing.py \
+            tests/offline/test_subtranslate_command_dispatch.py \
+            tests/offline/test_subtranslate_guard_source_closure.py \
+            tests/offline/test_subtranslate_guard_source_closure_repair.py \
+            tests/offline/test_subtranslate_guard_mediation_source_closure.py
 
       - name: Compile check
         run: |
