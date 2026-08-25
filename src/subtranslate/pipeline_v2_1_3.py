@@ -98,6 +98,10 @@ class Config:
     context_budget_tokens: int = 1100
     context_max_chars: int = 2600
     scene_gap_ms: int = 6000
+    # Optional pluggable transport provider.  When set, Client.call performs
+    # the POST through the provider (endpoint/headers/wire format) instead of
+    # the raw Ollama URL, and extracts the assistant text via the provider.
+    transport: Any = None
     max_retries: int = 2
     operation_retry_transport_cap: int | None = None
     per_event_retry_transport_cap: int | None = None
@@ -1315,6 +1319,36 @@ class Client:
         """
         return payload
 
+    def _post_transport(self, payload: dict[str, Any]) -> tuple[Any, bytes]:
+        """POST via the configured transport provider, or the raw Ollama URL
+        when no provider is set.  Returns (response, raw_body_bytes)."""
+        transport = getattr(self.config, "transport", None)
+        if transport is not None:
+            request_body = transport.build_request(payload)
+            request_bytes = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+            response = requests.post(transport.endpoint(), data=request_bytes,
+                                     headers=transport.headers(),
+                                     timeout=self.config.timeout_seconds)
+            raw_body = bytes(getattr(response, "content", b""))
+            return response, raw_body
+        response = requests.post(self.config.ollama_url, json=payload,
+                                 timeout=self.config.timeout_seconds)
+        raw_body = getattr(response, "content", None)
+        if raw_body is None:
+            text_body = getattr(response, "text", None)
+            if isinstance(text_body, str):
+                raw_body = text_body.encode("utf-8")
+            else:
+                raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
+        return response, bytes(raw_body)
+
+    def _extract_content(self, raw_body: bytes, body: dict[str, Any]) -> str:
+        """Assistant text from the response: provider-aware when configured."""
+        transport = getattr(self.config, "transport", None)
+        if transport is not None:
+            return transport.extract_content(raw_body)
+        return (body.get("message") or {}).get("content")
+
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
         durable_context = getattr(self.config, "durable_context", None)
@@ -1505,18 +1539,11 @@ class Client:
                             observation["durable_state"] = "TRANSPORT_IN_PROGRESS"
                             durable_call._fault("before_post")
                             durable_call._assert_retry_boundary()
-                            response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                            response, raw_body = self._post_transport(payload)
                             durable_call._fault("after_response_received_before_capture")
                             status_code = int(response.status_code)
                             observation["http_status"] = status_code
-                            raw_body = getattr(response, "content", None)
-                            if raw_body is None:
-                                text_body = getattr(response, "text", None)
-                                if isinstance(text_body, str):
-                                    raw_body = text_body.encode("utf-8")
-                                else:
-                                    raw_body = json.dumps(response.json(), ensure_ascii=False).encode("utf-8")
-                            durable_call.record_response(bytes(raw_body), status_code=status_code)
+                            durable_call.record_response(raw_body, status_code=status_code)
                             observation.update({
                                 "physical_transport": True,
                                 "model_call_delta": 1,
@@ -1531,7 +1558,7 @@ class Client:
                                 raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
                             body = json.loads(bytes(raw_body).decode("utf-8"))
             else:
-                response = requests.post(self.config.ollama_url, json=payload, timeout=self.config.timeout_seconds)
+                response, raw_body = self._post_transport(payload)
                 observation["http_status"] = response.status_code
                 observation.update({
                     "physical_transport": True,
@@ -1540,8 +1567,8 @@ class Client:
                     "durable_response_delta": 1,
                 })
                 response.raise_for_status()
-                body = response.json()
-            content = json.dumps(body, ensure_ascii=False) if (derived_body or subset_reused) else (body.get("message") or {}).get("content")
+                body = json.loads(raw_body.decode("utf-8"))
+            content = json.dumps(body, ensure_ascii=False) if (derived_body or subset_reused) else self._extract_content(raw_body, body)
             observation["content_chars"] = len(content) if isinstance(content, str) else None
             observation["content_sha256"] = hashlib.sha256(content.encode()).hexdigest() if isinstance(content, str) else None
             if self.config.diagnostic_capture and isinstance(content, str):

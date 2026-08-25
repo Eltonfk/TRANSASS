@@ -17,25 +17,27 @@ from pathlib import Path
 
 from pipeline_orchestrator import execute_pipeline_plan
 from pipeline_lineage import public_summary
+from transport_providers import transport_from_config
+from transport_config_store import load_transport_config
+
+TRANSPORT_CONFIG_PATH = Path(os.environ.get(
+    "TRANSPORT_CONFIG_PATH", "/app/state/transport_config.json"))
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--memory-root", type=Path)
-    parser.add_argument("--anime-series-id", type=int)
-    parser.add_argument("--episode-id", type=int)
-    parser.add_argument("--job-id", default="web-retranslation")
-    parser.add_argument("--pipeline", default=os.environ.get("TRANSLATOR_PIPELINE", "legacy"))
-    parser.add_argument("--series-title", default="Anime")
-    parser.add_argument("--episode-title", default="Episode")
-    args = parser.parse_args()
-    if args.source.suffix.lower() not in {".ass", ".ssa"}:
-        raise SystemExit("FONTE ORIGINAL NÃO DISPONÍVEL: formato não suportado")
-    if args.output.exists():
-        raise SystemExit("saída de retradução já existe")
-    pipeline = str(args.pipeline).lower()
+def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str]) -> Any | None:
+    if not engine:
+        return None
+    section = dict(engine)
+    provider = str(section.get("provider", "")).lower()
+    if not section.get("api_key") and provider in keys and keys[provider]:
+        section["api_key"] = keys[provider]
+    try:
+        return transport_from_config(section, {"model": section.get("model")})
+    except Exception:
+        return None
+
+
+def _run_pipeline(args, pipeline: str, transport: Any | None) -> dict[str, Any]:
     scratch = Path(tempfile.mkdtemp(prefix=".web-retranslation-", dir="/tmp"))
     try:
         safe_series = re.sub(r"[^\w .!'-]+", "_", args.series_title).strip() or "Anime"
@@ -55,16 +57,52 @@ def main() -> int:
                 "model_override": os.environ.get("TRANSLATOR_OLLAMA_MODEL"),
                 "ollama_url": os.environ.get("TRANSLATOR_OLLAMA_URL"),
                 "defer_intermediate_cleanup": pipeline == "v2_3_0",
+                "transport": transport,
             },
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--memory-root", type=Path)
+    parser.add_argument("--anime-series-id", type=int)
+    parser.add_argument("--episode-id", type=int)
+    parser.add_argument("--job-id", default="web-retranslation")
+    parser.add_argument("--pipeline", default=os.environ.get("TRANSLATOR_PIPELINE", "legacy"))
+    parser.add_argument("--series-title", default="Anime")
+    parser.add_argument("--episode-title", default="Episode")
+    args = parser.parse_args()
+    if args.source.suffix.lower() not in {".ass", ".ssa"}:
+        raise SystemExit("FONTE ORIGINAL NÃO DISPONÍVEL: formato não suportado")
+    if args.output.exists():
+        raise SystemExit("saída de retradução já existe")
+    pipeline = str(args.pipeline).lower()
+
+    # Transport config from the web UI: primary engine, optional fallback.
+    transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
+    keys = transport_config.get("keys") or {}
+    primary = _provider_for(transport_config.get("primary"), keys)
+    fallback = _provider_for(transport_config.get("fallback"), keys)
+
+    result = _run_pipeline(args, pipeline, primary)
+    used_fallback = False
+    if (not isinstance(result, dict) or not args.output.is_file()) and fallback is not None:
+        # Primary failed to produce the output: retry once with the fallback.
+        used_fallback = True
+        result = _run_pipeline(args, pipeline, fallback)
+
     internal = (result or {}).get("_internal") if isinstance(result, dict) else None
     stage_handle = Path(internal["stage_artifact_path"]).name if isinstance(internal, dict) and internal.get("stage_artifact_path") else None
     stage_sha256 = internal.get("stage_sha256") if isinstance(internal, dict) else None
     result = public_summary(result, stage_handle=stage_handle, stage_sha256=stage_sha256)
     result["pipeline"] = pipeline
     result["output"] = args.output.name
+    result["transport_used"] = "fallback" if used_fallback else "primary"
     print("WEB_RETRANSLATION_SUMMARY " + json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 
