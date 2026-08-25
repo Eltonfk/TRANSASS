@@ -89,7 +89,7 @@ def prestate_ok(state_value: Any, next_action: Any) -> bool:
         return False
     if not isinstance(next_action, str):
         return False
-    if next_action.endswith(("_NEXT_EPISODE_DECISION_REQUIRED", "_ASSEMBLY_REQUIRED")):
+    if next_action.endswith("_DECISION_REQUIRED") or next_action.endswith("_ASSEMBLY_REQUIRED"):
         return True
     return bool(re.search(r"_B\d+_EXTERNAL_DECISION_REQUIRED", next_action))
 
@@ -346,7 +346,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
         # (later episodes and interrupted passes may have advanced it).
         na = before.get("next_action")
         ok_terminal = isinstance(na, str) and (
-            na.endswith("_NEXT_EPISODE_DECISION_REQUIRED") or na.endswith("_ASSEMBLY_REQUIRED"))
+            na.endswith("_DECISION_REQUIRED") or na.endswith("_ASSEMBLY_REQUIRED"))
         ok_batch = isinstance(na, str) and bool(
             re.search(r"_B\d+_(EXTERNAL_DECISION_REQUIRED|BATCH_EXECUTION_AUTHORIZED)", na))
         if not (ok_terminal or ok_batch):
