@@ -75,20 +75,26 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def candidate_directories(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Eligible directories: existing on disk AND canonically reconciled."""
+    """Eligible directories, episode-agnostic: every batch family whose
+    canonical reconciliation is proven by the matching
+    post_execution_reconciliation object in PROJECT_STATE.json."""
     out: list[dict[str, Any]] = []
-    for label, recon_template, dir_template, rng in (
-        ("E07", E07_RECON_KEY, E07_DIR_TEMPLATE, E07_RANGE),
-        ("E08", E08_RECON_KEY, E08_DIR_TEMPLATE, E08_RANGE),
-    ):
-        for n in rng:
-            if recon_template.format(batch_index=n) not in state:
-                continue
-            name = dir_template.format(batch_index=n)
-            source = RUNTIME_ROOT / name
-            if not source.is_dir():
-                continue
-            out.append({"episode": label, "batch_index": n, "name": name, "source": source})
+    seen: set[str] = set()
+    for key, record in state.items():
+        if not key.endswith("_batch_execution_authorization_r1") or not isinstance(record, dict):
+            continue
+        family = str(record.get("family_id") or "")
+        if not family or family in seen:
+            continue
+        recon_key = key.replace(
+            "_batch_execution_authorization_r1", "_post_execution_reconciliation_r1")
+        if recon_key not in state:
+            continue  # mid-cycle: never detach an unreconciled family
+        seen.add(family)
+        source = RUNTIME_ROOT / family
+        if source.is_dir():
+            out.append({"episode": str(record.get("episode_id") or "?"),
+                        "name": family, "source": source})
     return out
 
 
