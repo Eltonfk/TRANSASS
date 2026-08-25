@@ -338,14 +338,19 @@ def authorize(config_path: Path) -> dict[str, Any]:
         pass
     elif _AUTHORIZATION_KEY in before:
         # Re-authorization for THIS episode: pointer must sit at the first
-        # pending batch's decision state (or assembly, if everything landed).
+        # pending batch's decision state, its authorized (mid-cycle) state, or
+        # assembly if everything landed.
         next_pending = None
         for n in range(int(before.get("expected_total_batches", 0)) or 0):
             if batch_recon_key(n) not in before:
                 next_pending = n
                 break
-        expected = f"{_LABEL}_ASSEMBLY_REQUIRED" if next_pending is None else decision_pointer(next_pending)
-        if before.get("next_action") != expected:
+        acceptable = {
+            f"{_LABEL}_ASSEMBLY_REQUIRED" if next_pending is None else decision_pointer(next_pending)
+        }
+        if next_pending is not None:
+            acceptable.add(authorized_pointer(next_pending))
+        if before.get("next_action") not in acceptable:
             raise RunnerBlocked(
                 f"RECONCILIATION_PRESTATE_MISMATCH:{before.get('next_action')}")
     else:
