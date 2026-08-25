@@ -81,13 +81,16 @@ def bind_episode(config: dict[str, Any]) -> None:
 
 def prestate_ok(state_value: Any, next_action: Any) -> bool:
     """Generic previous-mission-terminal prestate: a completed SUBTRANSLATE_V238
-    mission whose pointer is a human-decision terminal."""
+    mission whose pointer is an episode-level terminal OR a per-batch decision
+    pointer left by an interrupted final pass."""
     if not isinstance(state_value, str) or not state_value.startswith("SUBTRANSLATE_V238_") \
             or "COMPLETE" not in state_value:
         return False
-    return isinstance(next_action, str) and (
-        next_action.endswith("_NEXT_EPISODE_DECISION_REQUIRED")
-        or next_action.endswith("_ASSEMBLY_REQUIRED"))
+    if not isinstance(next_action, str):
+        return False
+    if next_action.endswith(("_NEXT_EPISODE_DECISION_REQUIRED", "_ASSEMBLY_REQUIRED")):
+        return True
+    return bool(re.match(r"^SUBTRANSLATE_V238_.*_B\d+_EXTERNAL_DECISION_REQUIRED", next_action))
 
 TOOLCHAIN_COMPONENTS = (
     ".opencode/tools/subtranslate_episode_range_runner.py",
