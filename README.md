@@ -38,6 +38,9 @@ Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
   nomenclatura correta.
 - **Segurança por design** — API keys nunca expostas pela API, armazenadas com
   permissão `600` em arquivo host-local; path traversal bloqueado.
+- **Idioma de origem configurável** — traduz de **qualquer idioma** da legenda
+  fonte para português do Brasil (inglês por padrão; ex.: espanhol, japonês,
+  francês). Karaokê/signs/songs preservados por design.
 
 ## 🚀 Início rápido
 

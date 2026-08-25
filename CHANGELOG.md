@@ -34,6 +34,13 @@ escolhível e toolchain de operação generalizada.
   `ollama` (local/GPU), `openai_compat` (Groq, OpenRouter, LM Studio, vLLM,
   llama.cpp server), `gemini` (Google free tier). API keys exclusivamente por
   variável de ambiente.
+- **Idioma de origem configurável**: o prompt de tradução aceita qualquer
+  idioma de origem (`source_language`, padrão `inglês`) para português do
+  Brasil. Parametrizado em `pipeline_v2_1_3`, `pipeline_v2_1_2` e
+  `anime_subtitle_translator`; exposto na UI ⚙ Motor e via
+  `TRANSLATOR_SOURCE_LANGUAGE`. Karaokê/signs/songs preservados por design.
+  (Resolução automática de fonte no MKV ainda prioriza track/texto inglês
+  quando disponível.)
 - **Pipeline de episódio genérico**: `episode_config_builder`,
   `episode_planner --plan-all` (inventário completo do episódio em uma única
   passada determinística), `episode_range_runner` (authorize/status/execute/
