@@ -5,13 +5,21 @@
 [![Tests](https://img.shields.io/badge/tests-216%20offline%20passing-brightgreen.svg)](tests/offline)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](deploy/Dockerfile)
 
-**Transass** é um serviço de tradução de legendas de anime com pipeline canônico,
-durabilidade forense por chamada, motor de tradução escolhível (local ou API) e
-fallback automático entre motores.
+**Transass** traduz legendas de anime para português do Brasil.
 
-Traduz episódios inteiros de `.ass`/`.ssa` para português do Brasil com
-**zero retries silenciosos**: cada lote de tradução tem evidência durável
-(ledger, tentativa física, cobertura derivada) e reconciliação canônica.
+Sobre o nome: **Trans** é de *translation* — aqui a gente troca o **idioma**,
+não o gênero (respeitamos todos, inclusive os zumbis). E **ass**? ... é bunda.
+Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
+
+- Traduz episódios inteiros de `.ass`/`.ssa` com **durabilidade forense**:
+  cada lote tem ledger, tentativa física e cobertura derivada — **zero retries
+  silenciosos** (se falhou, você vai saber).
+- **Motor de tradução escolhível**: Ollama local (GPU ou CPU), Gemini (grátis)
+  ou qualquer API OpenAI-compatível (Groq, OpenRouter, LM Studio...).
+- **Fallback automático**: se o motor principal falhar um lote, o alternativo
+  tenta sozinho — como um plano B, mas sem drama.
+- **Interface web** com fila segura, Biblioteca com lineage, revisão humana e
+  publicação direta no Jellyfin (`.pt-BR.ass` ao lado dos vídeos).
 
 > Antes chamado de *Subtranslate*, o projeto foi renomeado para **Transass**.
 
