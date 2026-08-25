@@ -94,7 +94,9 @@ def main() -> int:
     parser.add_argument("--summary", action="store_true", required=True)
     parser.parse_args()
     try:
-        payload = summary(probe())
+        probe_result = probe()
+        payload = summary(probe_result)
+        payload["app_version"] = probe_result.get("app_version")
         payload["canonical_keys"] = canonical_keys()
         print(json.dumps(payload, sort_keys=True, ensure_ascii=False))
         return 0

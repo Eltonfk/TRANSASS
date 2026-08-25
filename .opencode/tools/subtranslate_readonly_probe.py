@@ -379,6 +379,30 @@ def _marker(text: str, patterns: tuple[str, ...]) -> bool:
     return all(pattern in text for pattern in patterns)
 
 
+APP_VERSION_PATH = CANDIDATE_ROOT / "src/subtranslate/_version.py"
+
+
+def read_app_version() -> str | None:
+    """Read the application SemVer from src/subtranslate/_version.py without
+    executing it.  Returns None when unreadable (never blocks the snapshot)."""
+    try:
+        info = APP_VERSION_PATH.lstat()
+        if _stat.S_ISLNK(info.st_mode) or not _stat.S_ISREG(info.st_mode):
+            return None
+        text = APP_VERSION_PATH.read_text(encoding="utf-8")
+        marker = '__version__ = "'
+        start = text.find(marker)
+        if start < 0:
+            return None
+        start += len(marker)
+        end = text.find('"', start)
+        if end <= start:
+            return None
+        return text[start:end]
+    except OSError:
+        return None
+
+
 def probe() -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     unknowns: list[dict[str, Any]] = []
@@ -539,7 +563,8 @@ def probe() -> dict[str, Any]:
             value = observed[observed_key]
             expected = canonical_current.get(canonical_key)
             accounting["comparisons"][observed_key] = "UNKNOWN" if value is None or expected is None else ("MATCH" if value == expected else "MISMATCH")
-    result = {"schema_version": SCHEMA_VERSION, "probe_version": PROBE_VERSION, "canonical": canonical,
+    result = {"schema_version": SCHEMA_VERSION, "probe_version": PROBE_VERSION,
+              "app_version": read_app_version(), "canonical": canonical,
               "candidate_git": candidate_git, "runtime": runtime, "accounting": accounting,
               "context_hygiene": context_hygiene,
               "execution_toolchain": execution_toolchain,
