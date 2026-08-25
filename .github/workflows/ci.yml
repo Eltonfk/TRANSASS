@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, candidate/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-test.lock
+
+      - name: Run offline test suite
+        run: |
+          PYTHONPATH=src/subtranslate python3 -m pytest tests/offline -v
+
+      - name: Compile check
+        run: |
+          python3 -m compileall -q src/subtranslate
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build --pull=false -f deploy/Dockerfile -t transass:ci .

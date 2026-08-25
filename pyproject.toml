@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transass"
+version = "2.4.0"
+description = "Serviço de tradução de legendas de anime com pipeline canônico, durabilidade forense e motor de tradução escolhível."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Transass contributors"}]
+keywords = ["subtitles", "translation", "anime", "ass", "jellyfin", "ollama", "gemini"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+[project.urls]
+Homepage = "https://github.com/palhacinho/transass"
+Repository = "https://github.com/palhacinho/transass"
+Documentation = "https://github.com/palhacinho/transass#readme"
+
+[tool.setuptools]
+# The core package uses flat imports under src/subtranslate and is executed
+# with PYTHONPATH=src/subtranslate or inside the Docker image.  This project
+# metadata exists for tooling/CI; runtime packaging is Docker-first.
+packages = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests/offline"]

@@ -1,14 +1,20 @@
 # Changelog
 
-Todas as mudanças notáveis do **Subtranslate** são documentadas neste arquivo.
+Todas as mudanças notáveis do **Transass** (anteriormente *Subtranslate*) são
+documentadas neste arquivo.
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
 ## [2.4.0] — 2026-08-25
 
-Primeira release versionada. Consolida a linha canônica V238 com a temporada
-completa traduzida, motor de tradução escolhível e toolchain de operação
-generalizada.
+Primeira release versionada e preparada para publicação no GitHub. Consolida a
+linha canônica V238 com a temporada completa traduzida, motor de tradução
+escolhível e toolchain de operação generalizada.
+
+### Renomeado
+- Projeto renomeado de **Subtranslate** para **Transass** (produto, UI e
+  documentação). O pacote interno `src/subtranslate/` mantém o nome por
+  compatibilidade de imports.
 
 ### Adicionado
 - **Fallback automático de motor**: quando o motor principal falha um lote

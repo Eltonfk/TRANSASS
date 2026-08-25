@@ -26,3 +26,14 @@ coverage.xml
 *.ts
 secrets/
 credentials/
+# Local agent/tooling configuration with machine-specific paths
+.opencode/
+opencode.json
+# API keys and secrets (never commit)
+*api_key*
+*.key
+*.pem
+.DS_Store
+.idea/
+.vscode/
+*.egg-info/
