@@ -953,12 +953,73 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
     attempt_id = attempt_dir.name
     state_json = json.loads((attempt_dir / "state.json").read_text(encoding="utf-8"))
     terminal = state_json.get("state")
-    if terminal not in ("PARSED_VALID", "DERIVED_PARSED_VALID"):
+    partial_invalid = (
+        terminal == "PARSED_INVALID"
+        and (attempt_dir / "parse_failure.json").is_file()
+        and (attempt_dir / "response.body").is_file()
+    )
+    if terminal not in ("PARSED_VALID", "DERIVED_PARSED_VALID") and not partial_invalid:
         raise RunnerBlocked(
             f"BATCH_RECONCILE_ATTEMPT_NOT_TERMINAL:b{batch_index}:{terminal}")
     coverage_path = attempt_dir / "derived_coverage.json"
-    if not coverage_path.is_file():
+    if not coverage_path.is_file() and not partial_invalid:
         raise RunnerBlocked(f"BATCH_RECONCILE_COVERAGE_MISSING:b{batch_index}")
+
+    pending_human_review_ids: list[int] = []
+    partial_basis = None
+    mapping: list[dict[str, Any]] = []
+    if partial_invalid:
+        # Structural acceptance of a PARSED_INVALID response: every unit id is
+        # present with a string text; EMPTY translations for NON-EMPTY sources
+        # are NOT fabricated — they are deferred to the single human-review
+        # gate already scheduled after all episodes are finalized.
+        planning_payload = (
+            AUTHORITY_ROOT / "runtime-evidence" / family / "planning"
+            / logical_batch_id(batch_index) / "request_payload.json")
+        content_str = json.loads(planning_payload.read_bytes())["messages"][0]["content"]
+        start = content_str.index("TARGET: ") + len("TARGET: ")
+        end = content_str.index("\nGLOSSARY:", start)
+        targets_by_id = {r["id"]: r["text"] for r in json.loads(content_str[start:end])}
+        outer = json.loads((attempt_dir / "response.body").read_bytes())
+        rows = json.loads(outer["message"]["content"])["translations"]
+        expected_ids = list(auth_record["unit_ids"])
+        if sorted(r.get("id") for r in rows) != sorted(expected_ids):
+            raise RunnerBlocked(f"BATCH_PARTIAL_MEMBERSHIP_INVALID:b{batch_index}")
+        for row in rows:
+            tid = row["id"]
+            text = row.get("text")
+            if not isinstance(text, str):
+                raise RunnerBlocked(f"BATCH_PARTIAL_ITEM_INVALID:b{batch_index}:{tid}")
+            if not text.strip() and targets_by_id.get(tid, "").strip():
+                pending_human_review_ids.append(tid)
+            mapping.append({"id": tid, "source": targets_by_id.get(tid, ""),
+                            "translation": text})
+        partial_basis = {
+            "policy": POLICY,
+            "raw_schema_status": "INVALID_EMPTY_TRANSLATION_FOR_NONEMPTY_SOURCE",
+            "deferred_to_human_review_ids": pending_human_review_ids,
+            "note": "no translation fabricated; original evidence preserved",
+        }
+        coverage = {
+            "schema": f"subtranslate.v238.e08_b{batch_index}_derived_partial_coverage.v1",
+            "created_at_utc": datetime.now(UTC).isoformat(),
+            "physical_attempt_id": attempt_dir.name,
+            "logical_batch_id": logical_batch_id(batch_index),
+            "expected_count": len(expected_ids),
+            "found_count": len(expected_ids),
+            "pending_human_review_ids": pending_human_review_ids,
+            "mapping": mapping,
+            "provenance": {"request_payload": str(planning_payload),
+                           "response_body": str(attempt_dir / "response.body")},
+        }
+        coverage_path = attempt_dir / "derived_partial_coverage.json"
+        fd = os.open(str(coverage_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, json.dumps(coverage, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fsync_dir(attempt_dir)
     response_meta = json.loads((attempt_dir / "response_metadata.json").read_text(encoding="utf-8"))
     response_sha = str(response_meta.get("response_sha256") or "")
 
@@ -995,6 +1056,10 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
             "found_ids": expected_from_coverage(coverage_path),
             "missing_ids": [],
         },
+        "partial_acceptance": ({
+            "pending_human_review_ids": pending_human_review_ids,
+            "basis": partial_basis,
+        } if partial_invalid else None),
         "authorization_lineage": {
             "episode_authorization_key": AUTHORIZATION_KEY,
             "runner": "AUTO-03E-EPISODE-RANGE-RUNNER retroactive reconciliation",
@@ -1019,8 +1084,16 @@ def reconcile_existing_batch(config_path: Path, batch_index: int) -> dict[str, A
     pending = [n for n in range(total)
                if f"auto03e_e08_b{n}_post_execution_reconciliation_r1" not in after]
     if not pending:
-        after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}_ALL_PARSED_VALID_ZERO_RETRY"
-        after["status"] = "E08_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
+        if pending_human_review_ids:
+            after["state"] = (
+                f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}"
+                f"_B{batch_index}_PARTIAL_PENDING_HUMAN_REVIEW_ALL_OTHERS_PARSED_VALID_ZERO_RETRY")
+            after["status"] = (
+                f"E08_MISSION_COMPLETE_B{batch_index}_PARTIAL_PENDING_HUMAN_REVIEW"
+                "_ALL_OTHERS_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY")
+        else:
+            after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_COMPLETE_BATCHES_0_{total - 1}_ALL_PARSED_VALID_ZERO_RETRY"
+            after["status"] = "E08_MISSION_COMPLETE_ALL_BATCHES_PARSED_VALID_COVERAGE_FORMALIZED_ZERO_RETRY"
         after["next_action"] = "E08_ASSEMBLY_REQUIRED"
     else:
         after["state"] = f"SUBTRANSLATE_V238_ZLS_S01E08_IN_PROGRESS_BATCHES_0_{max(pending) - 1}_ALL_PARSED_VALID_ZERO_RETRY"
