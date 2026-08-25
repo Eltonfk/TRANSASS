@@ -1309,6 +1309,7 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
     """One authorized retry for a deferred/failed batch: fresh evidence family
     (_R1), same deterministic payload, new durable call, then canonical
     reconciliation (new object for deferred, in-place upgrade for partial)."""
+    _, _, total = load_authorization(config_path)
     state = load_json(PROJECT)
     auth_record = state[batch_auth_key(batch_index)]
     original_family = str(auth_record["family_id"])
