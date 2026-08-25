@@ -26,8 +26,7 @@ coverage.xml
 *.ts
 secrets/
 credentials/
-# Local agent/tooling configuration with machine-specific paths
-.opencode/
+# Local agent configuration with machine-specific paths
 opencode.json
 # API keys and secrets (never commit)
 *api_key*
