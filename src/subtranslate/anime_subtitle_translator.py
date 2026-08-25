@@ -79,9 +79,34 @@ REVIEW_MODEL = os.environ.get("TRANSLATOR_REVIEW_MODEL", "")
 REVIEW_MAX_PER_FILE = max(0, int(os.environ.get("TRANSLATOR_REVIEW_MAX_PER_FILE", "30")))
 GLOSSARY_FILE = Path(os.environ.get("TRANSLATOR_GLOSSARY_FILE", "/app/glossaries/glossary.json"))
 TRANSLATOR_PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
+# Idioma de origem da legenda (destino sempre português do Brasil). Configurável
+# por episódio via variável de ambiente, definida pela camada web no start.
+SOURCE_LANGUAGE = (os.environ.get("TRANSLATOR_SOURCE_LANGUAGE") or "inglês").strip() or "inglês"
 # Nomes de Style/Effect (ASS) que indicam OP/ED/música — ajuste conforme os fansubs que você usa
 SONG_KEYWORDS = {"op", "ed", "opening", "ending", "song", "theme", "lyric", "lyrics", "karaoke", "romaji", "kanji", "insert"}
 # -------------------------------------------
+
+# Mapa de idioma de origem (pt-BR) -> códigos de faixa de legenda suportados.
+SOURCE_LANGUAGE_CODES = {
+    "inglês": ["eng", "en", "english"],
+    "espanhol": ["spa", "es", "esp", "spanish"],
+    "japonês": ["jpn", "ja", "jap", "japanese"],
+    "francês": ["fre", "fra", "fr", "french"],
+    "coreano": ["kor", "ko", "korean"],
+    "chinês": ["chi", "zho", "zh", "chinese", "cmn"],
+    "alemão": ["ger", "de", "german"],
+    "italiano": ["ita", "it", "italian"],
+    "russo": ["rus", "ru", "russian"],
+    "português": ["por", "pt", "portuguese"],
+}
+
+
+def _source_lang_matches(track_lang: str) -> bool:
+    raw = str(track_lang or "").strip().casefold()
+    if not raw or raw == "und":
+        return False
+    codes = SOURCE_LANGUAGE_CODES.get(SOURCE_LANGUAGE, [SOURCE_LANGUAGE.casefold()])
+    return raw in codes
 
 TAG_PATTERN = re.compile(r"(\{[^}]*\})")   # blocos de override tags {\...}
 ASS_MARKUP_PATTERN = re.compile(r"(\{[^}]*\}|\\N)")
@@ -523,7 +548,13 @@ def find_subtitle_stream(video_path: Path):
         lang = s.get("tags", {}).get("language", "")
         title = (s.get("tags", {}).get("title", "") or "").lower()
         is_signs_songs = any(kw in title for kw in SIGNS_SONGS_TITLE_KEYWORDS)
-        return (lang_priority.get(lang, 2), 1 if is_signs_songs else 0)
+        # O idioma configurado (SOURCE_LANGUAGE) tem prioridade máxima; os
+        # demais seguem a ordem histórica eng/jpn como fallback.
+        if _source_lang_matches(lang):
+            lang_rank = 0
+        else:
+            lang_rank = lang_priority.get(lang, 2) + 1
+        return (lang_rank, 1 if is_signs_songs else 0)
 
     supported_streams.sort(key=score)
     best = supported_streams[0]
@@ -531,7 +562,7 @@ def find_subtitle_stream(video_path: Path):
     title = best.get("tags", {}).get("title", "(sem título)")
     lang = best.get("tags", {}).get("language", "und")
     print(
-        f"   Faixa de legenda escolhida: idioma={lang}, título='{title}' "
+        f"   Faixa de legenda escolhida: idioma={lang} (origem configurada: {SOURCE_LANGUAGE}), título='{title}' "
         f"(de {len(supported_streams)} faixa(s) suportada(s))"
     )
 

@@ -99,15 +99,17 @@ O **fallback** é opcional: se o motor principal falhar um lote, o alternativo
 tenta automaticamente.
 
 **Idioma de origem**: no mesmo diálogo ⚙ Motor, o campo **"Idioma de origem da
-legenda"** define de qual idioma a legenda fonte será traduzida (destino sempre
-português do Brasil). Padrão: `inglês`. Exemplos válidos: `espanhol`,
-`japonês`, `francês`, `coreano`. Karaokê e signs/songs são preservados
-automaticamente (não são traduzidos). Também pode ser definido via variável de
-ambiente `TRANSLATOR_SOURCE_LANGUAGE` no `.env`.
+legenda"** define o idioma padrão da legenda fonte (destino sempre português do
+Brasil). Padrão: `inglês`. Exemplos válidos: `espanhol`, `japonês`, `francês`,
+`coreano`. Karaokê e signs/songs são preservados automaticamente (não são
+traduzidos). Também pode ser definido via variável de ambiente
+`TRANSLATOR_SOURCE_LANGUAGE` no `.env`.
 
-> Nota: a resolução automática de fonte no MKV ainda prioriza a track/texto em
-> inglês quando disponível; para outros idiomas de origem, forneça um sidecar
-> (ex.: `episodio.esp.ass`) ou selecione a track explicitamente.
+**Seleção por episódio na lista**: cada episódio na fila tem um seletor de
+idioma de origem. Ao clicar nele, o app **descobre todos os idiomas** das
+legendas daquele vídeo (sidecars como `ep01.esp.ass` e faixas internas do MKV)
+e lista as opções; basta escolher qual traduzir. O valor escolhido é enviado no
+`/start` e usado tanto na resolução da fonte quanto no prompt do modelo.
 
 ---
 

@@ -39,6 +39,43 @@ TEXTUAL_SUBTITLE_CODECS = {
 BITMAP_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "vobsub"}
 SIDE_CAR_EXTENSIONS = {".ass", ".ssa", ".srt"}
 ENGLISH_NAMES = {"en", "eng", "english", "en-us", "en_us", "en-gb", "en_gb"}
+
+# Source language selection map: pt-BR display name -> subtitle track/sidecar
+# language codes (ISO 639-2/3 and common short forms).  The target language is
+# always Brazilian Portuguese; only the source is configurable.
+LANGUAGE_NAME_TO_CODES = {
+    "inglês": ["eng", "en", "english"],
+    "espanhol": ["spa", "es", "esp", "spanish"],
+    "japonês": ["jpn", "ja", "jap", "japanese"],
+    "francês": ["fre", "fra", "fr", "french"],
+    "coreano": ["kor", "ko", "korean"],
+    "chinês": ["chi", "zho", "zh", "chinese", "cmn"],
+    "alemão": ["ger", "de", "german"],
+    "italiano": ["ita", "it", "italian"],
+    "russo": ["rus", "ru", "russian"],
+    "português": ["por", "pt", "portuguese"],
+}
+CODE_TO_LANGUAGE_NAME = {}
+for _name, _codes in LANGUAGE_NAME_TO_CODES.items():
+    for _code in _codes:
+        CODE_TO_LANGUAGE_NAME[_code] = _name
+
+
+def _normalize_lang_code(code: object) -> str:
+    return str(code or "").strip().casefold()
+
+
+def _language_matches(track_lang: object, source_language: str) -> bool:
+    """True when a track/sidecar language matches the configured source language."""
+    track = _normalize_lang_code(track_lang)
+    if not track or track == "und":
+        return False
+    codes = LANGUAGE_NAME_TO_CODES.get(source_language, [source_language.casefold()])
+    return track in codes
+
+
+def _display_language(source_language: str) -> str:
+    return source_language.strip().title() if source_language else "Inglês"
 TEXT_FORMAT_EXTENSIONS = {
     "ass": ".ass",
     "ssa": ".ssa",
@@ -436,14 +473,22 @@ def _probe_subtitle_tracks(video_path: Path) -> list[dict[str, Any]]:
     return tracks
 
 
-def _sidecar_candidates(video_path: Path) -> list[Path]:
-    """Find explicit ENG sidecars adjacent to a video; never recurse."""
+def _sidecar_candidates(video_path: Path, source_language: str = "inglês") -> list[Path]:
+    """Find explicit sidecars for the configured source language; never recurse.
+
+    When ``source_language`` is None, every textual sidecar is returned
+    (used by language discovery, which reports each sidecar's language).
+    """
     prefix = video_path.stem.casefold()
     candidates: list[Path] = []
     try:
         siblings = list(video_path.parent.iterdir())
     except OSError:
         return []
+    codes = LANGUAGE_NAME_TO_CODES.get(source_language, [source_language.casefold()]) if source_language else None
+    pattern = None
+    if codes:
+        pattern = r"(?:^|[._ -])(" + "|".join(re.escape(c) for c in codes) + r")(?:$|[._ -])"
     for item in siblings:
         if not item.is_file() or item.suffix.casefold() not in SIDE_CAR_EXTENSIONS:
             continue
@@ -451,7 +496,9 @@ def _sidecar_candidates(video_path: Path) -> list[Path]:
         if not stem.startswith(prefix):
             continue
         tail = stem[len(prefix):]
-        if re.search(r"(?:^|[._ -])(?:eng|en|english)(?:$|[._ -])", tail):
+        if source_language is None:
+            candidates.append(item)
+        elif pattern and re.search(pattern, tail):
             candidates.append(item)
     return sorted(candidates)
 
@@ -461,10 +508,15 @@ def _track_is_signs_or_songs(track: dict[str, Any]) -> bool:
     return bool(re.search(r"\b(signs?|songs?|karaoke|lyrics?)\b", title))
 
 
-def _select_english_track(tracks: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]]]:
-    english = [track for track in tracks if _language_is_english(track.get("language"))]
-    textual = [track for track in english if track.get("textual")]
-    bitmap = [track for track in english if track.get("bitmap")]
+def _select_track_for_language(tracks: list[dict[str, Any]], source_language: str = "inglês") -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]]]:
+    """Select a dialogue track for the configured source language.
+
+    Mirrors the previous English-only logic but is language-agnostic: it picks
+    the textual, non-signs/songs track whose language matches ``source_language``.
+    """
+    matching = [track for track in tracks if _language_matches(track.get("language"), source_language)]
+    textual = [track for track in matching if track.get("textual")]
+    bitmap = [track for track in matching if track.get("bitmap")]
     dialogue = [track for track in textual if not _track_is_signs_or_songs(track)]
     if len(dialogue) == 1:
         return dialogue[0], None, bitmap
@@ -472,7 +524,7 @@ def _select_english_track(tracks: list[dict[str, Any]]) -> tuple[dict[str, Any] 
         preferred = [track for track in dialogue if track.get("default") and not track.get("forced")]
         if len(preferred) == 1:
             return preferred[0], None, bitmap
-        return None, "múltiplas tracks ENG textuais plausíveis", bitmap
+        return None, f"múltiplas tracks {source_language} textuais plausíveis", bitmap
     if len(textual) == 1:
         # A lone signs/songs track is not a safe full-dialogue source.  Keep
         # it visible as an ambiguity (or alongside a bitmap/PGS track) rather
@@ -481,9 +533,9 @@ def _select_english_track(tracks: list[dict[str, Any]]) -> tuple[dict[str, Any] 
             return None, "somente track Signs/Songs textual; fonte de diálogo não confirmada", bitmap
         return textual[0], None, bitmap
     if len(textual) > 1:
-        return None, "múltiplas tracks ENG textuais sem desempate seguro", bitmap
+        return None, f"múltiplas tracks {source_language} textuais sem desempate seguro", bitmap
     if bitmap:
-        return None, "PGS/bitmap ENG detectada; OCR não suportado", bitmap
+        return None, f"PGS/bitmap {source_language} detectada; OCR não suportado", bitmap
     return None, None, bitmap
 
 
@@ -538,41 +590,43 @@ def _public_source_status(result: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if key in allowed}
 
 
-def resolve_episode_source(library: Any, episode_id: int, record_id: int | None = None, *, materialize: bool = False, job_id: str | None = None) -> dict[str, Any]:
+def resolve_episode_source(library: Any, episode_id: int, record_id: int | None = None, *, materialize: bool = False, job_id: str | None = None, source_language: str = "inglês") -> dict[str, Any]:
     """Resolve an original textual source for an anime episode.
 
-    Priority is library lineage, explicit ENG sidecar, then one unambiguous
-    textual ENG track in the associated MKV.  Bitmap subtitles are reported,
-    never treated as text.
+    Priority is library lineage, explicit sidecar for ``source_language``, then
+    one unambiguous textual track in that language in the associated MKV.
+    Bitmap subtitles are reported, never treated as text.  The target language
+    is always Brazilian Portuguese; only the source is configurable.
     """
+    lang_label = _display_language(source_language)
     old = library.get_record(int(record_id)) if record_id else None
     if old:
         linked = resolve_source_record(library, int(old["id"]), materialize=materialize)
         if linked.get("available"):
             fmt = str(linked.get("format") or "").upper()
-            result = {**linked, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"English {fmt} — Biblioteca".strip()}
+            result = {**linked, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"{lang_label} {fmt} — Biblioteca".strip()}
             return result if materialize else {**result, "path": result.get("path")}
     try:
         video_path = library._episode_video(int(episode_id))
     except Exception as exc:
         return {"available": False, "status": "SOURCE_NOT_FOUND", "display": "Fonte não encontrada", "reason": str(exc)}
 
-    sidecars = _sidecar_candidates(video_path)
+    sidecars = _sidecar_candidates(video_path, source_language)
     if len(sidecars) == 1:
         source_path = sidecars[0]
         if materialize:
             ingested = _ingest_source(library, episode_id, source_path, source_kind="EXTERNAL", job_id=job_id)
             if materialize:
                 ingested.update(_materialize_library_record(library, int(ingested["record_id"])))
-            return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": "English ASS/SRT — Sidecar ENG", **ingested}
-        return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": f"{source_path.suffix[1:].upper()} — Sidecar ENG", "path": str(source_path), "candidates": [source_path.name]}
+            return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": f"{lang_label} ASS/SRT — Sidecar", **ingested}
+        return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": f"{source_path.suffix[1:].upper()} — Sidecar {lang_label}", "path": str(source_path), "candidates": [source_path.name]}
     if len(sidecars) > 1:
-        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "SIDECAR_ENG", "display": "Múltiplos sidecars ENG", "reason": "escolha explícita necessária", "candidates": [item.name for item in sidecars]}
+        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "SIDECAR_ENG", "display": f"Múltiplos sidecars {lang_label}", "reason": "escolha explícita necessária", "candidates": [item.name for item in sidecars]}
 
     tracks = _probe_subtitle_tracks(video_path)
-    selected, selection_reason, bitmaps = _select_english_track(tracks)
+    selected, selection_reason, bitmaps = _select_track_for_language(tracks, source_language)
     if selected:
-        result = {"available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT", "kind": "EMBEDDED_TEXT", "display": f"{str(selected.get('codec') or '').upper()} — track ENG interna {selected.get('index')}", "track": selected}
+        result = {"available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT", "kind": "EMBEDDED_TEXT", "display": f"{str(selected.get('codec') or '').upper()} — track {lang_label} interna {selected.get('index')}", "track": selected}
         if materialize:
             result.update(_extract_track(library, episode_id, video_path, selected, job_id=job_id))
             if result.get("record_id") is not None:
@@ -581,7 +635,52 @@ def resolve_episode_source(library: Any, episode_id: int, record_id: int | None 
             result["path"] = None
         return result
     if bitmaps:
-        return {"available": False, "status": "SOURCE_AVAILABLE_PGS_UNSUPPORTED", "kind": "PGS", "display": "PGS — OCR não suportado", "reason": selection_reason or "track ENG bitmap detectada", "track": bitmaps}
+        return {"available": False, "status": "SOURCE_AVAILABLE_PGS_UNSUPPORTED", "kind": "PGS", "display": "PGS — OCR não suportado", "reason": selection_reason or f"track {lang_label} bitmap detectada", "track": bitmaps}
     if selection_reason:
-        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "EMBEDDED_TEXT", "display": "Múltiplas tracks ENG", "reason": selection_reason, "track": tracks}
-    return {"available": False, "status": "SOURCE_NOT_FOUND", "kind": "NONE", "display": "Fonte ENG não encontrada", "reason": "nenhuma fonte ENG textual arquivada, sidecar ou track interna"}
+        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "EMBEDDED_TEXT", "display": f"Múltiplas tracks {lang_label}", "reason": selection_reason, "track": tracks}
+    return {"available": False, "status": "SOURCE_NOT_FOUND", "kind": "NONE", "display": f"Fonte {lang_label} não encontrada", "reason": f"nenhuma fonte {lang_label} textual arquivada, sidecar ou track interna"}
+
+
+def detect_source_options(video_path: Path) -> list[dict[str, Any]]:
+    """Discover every translatable subtitle source for an episode.
+
+    Returns sidecars and embedded tracks of any language (textual or bitmap),
+    each annotated with its detected language, whether it is signs/songs only,
+    and whether it is a safe dialogue source.  The UI uses this to let the user
+    pick which language to translate.
+    """
+    options: list[dict[str, Any]] = []
+    for sidecar in _sidecar_candidates(video_path, source_language=None):
+        stem = sidecar.stem.casefold()
+        prefix = video_path.stem.casefold()
+        tail = stem[len(prefix):] if stem.startswith(prefix) else stem
+        detected = None
+        for code, name in CODE_TO_LANGUAGE_NAME.items():
+            if re.search(r"(?:^|[._ -])" + re.escape(code) + r"(?:$|[._ -])", tail):
+                detected = name
+                break
+        options.append({
+            "kind": "sidecar",
+            "language": detected or "desconhecido",
+            "name": sidecar.name,
+            "path": str(sidecar),
+            "textual": sidecar.suffix.casefold() in SIDE_CAR_EXTENSIONS,
+            "bitmap": False,
+            "signs_songs_only": False,
+        })
+    for track in _probe_subtitle_tracks(video_path):
+        lang_code = _normalize_lang_code(track.get("language"))
+        detected = CODE_TO_LANGUAGE_NAME.get(lang_code, lang_code or "desconhecido")
+        options.append({
+            "kind": "track",
+            "language": detected,
+            "index": track.get("index"),
+            "title": track.get("title"),
+            "codec": track.get("codec"),
+            "textual": bool(track.get("textual")),
+            "bitmap": bool(track.get("bitmap")),
+            "signs_songs_only": _track_is_signs_or_songs(track),
+            "default": bool(track.get("default")),
+            "forced": bool(track.get("forced")),
+        })
+    return options

@@ -14,7 +14,9 @@ credentials remain outside Git.
 
 `TRANSLATOR_SOURCE_LANGUAGE` selects the subtitle source language translated to
 Brazilian Portuguese (the target is always PT-BR). Default: `inglês`. The web UI
-⚙ Motor dialog exposes the same field. Karaokê/signs/songs preservation is
-independent of this setting. Source resolution still prefers an English track
-when present; for other source languages provide a sidecar or select the track
-explicitly.
+⚙ Motor dialog exposes the same field as the global default, and each episode row
+in the queue has a per-episode language selector populated from
+`GET /source-options` (which discovers every sidecar and embedded track
+language, including signs/songs-only tracks). Karaokê/signs/songs preservation
+is independent of this setting. The chosen language drives both source
+resolution and the translation prompt.
