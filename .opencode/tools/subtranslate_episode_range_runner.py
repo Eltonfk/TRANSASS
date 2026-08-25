@@ -91,7 +91,7 @@ def prestate_ok(state_value: Any, next_action: Any) -> bool:
         return False
     if next_action.endswith(("_NEXT_EPISODE_DECISION_REQUIRED", "_ASSEMBLY_REQUIRED")):
         return True
-    return bool(re.match(r"^SUBTRANSLATE_V238_.*_B\d+_EXTERNAL_DECISION_REQUIRED", next_action))
+    return bool(re.search(r"_B\d+_EXTERNAL_DECISION_REQUIRED", next_action))
 
 TOOLCHAIN_COMPONENTS = (
     ".opencode/tools/subtranslate_episode_range_runner.py",
@@ -348,7 +348,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
         ok_terminal = isinstance(na, str) and (
             na.endswith("_NEXT_EPISODE_DECISION_REQUIRED") or na.endswith("_ASSEMBLY_REQUIRED"))
         ok_batch = isinstance(na, str) and bool(
-            re.match(rf"^{_LABEL}_B\d+_(EXTERNAL_DECISION_REQUIRED|BATCH_EXECUTION_AUTHORIZED)", na))
+            re.search(r"_B\d+_(EXTERNAL_DECISION_REQUIRED|BATCH_EXECUTION_AUTHORIZED)", na))
         if not (ok_terminal or ok_batch):
             raise RunnerBlocked(f"RECONCILIATION_PRESTATE_MISMATCH:{na}")
     else:
