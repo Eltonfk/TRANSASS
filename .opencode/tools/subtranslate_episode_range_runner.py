@@ -450,7 +450,7 @@ def authorize(config_path: Path) -> dict[str, Any]:
     after_handoff = write_handoff_addendum(before_handoff, title, summary,
                                            str(probe["snapshot_fingerprint"]), after["next_action"])
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = BACKUP_PARENT / f"subtranslate-auto03e-e08-episode-integral-authorization-r1-{stamp}"
+    backup_dir = BACKUP_PARENT / f"subtranslate-auto03e-{_LOWER}-episode-integral-authorization-r1-{stamp}"
     publish_both(before_project_bytes, after_project, before_handoff, after_handoff, backup_dir)
     return {"status": "PASS", "transition": "authorize", "expected_total_batches": total,
             "project_state_sha256": digest(after_project), "handoff_sha256": digest(after_handoff),
@@ -1609,7 +1609,6 @@ def retry_failed(config_path: Path) -> dict[str, Any]:
         "note": "re-run --mode execute to reconcile retried batches; "
                 "persistent failures go to the single human-review gate",
     }
-    print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
     return summary
 
 
@@ -1792,9 +1791,10 @@ def finalize_retries(config_path: Path) -> dict[str, Any]:
                "episode_label": _LABEL, "targets": len(targets),
                "finalized_count": sum(1 for r in results if r["status"] == "FINALIZED"),
                "failed": failed, "results": results}
-    print(json.dumps(summary, sort_keys=True, ensure_ascii=False))
     return summary
-    completed = [r for r in results if r["status"] == "COMPLETED"]
+
+
+def progress_report(results: list[dict[str, Any]], stopped: bool, blocker: str | None, total: int) -> dict[str, Any]:
     skipped = [r for r in results if r["status"] == "SKIPPED_ALREADY_RECONCILED"]
     return {
         "episode_label": _LABEL,
@@ -1869,8 +1869,6 @@ def main(argv=None) -> int:
             print(json.dumps(finalize_retries(config_path), sort_keys=True, ensure_ascii=False))
             return 0
         result = execute(config_path, max_batches=args.max_batches)
-        return 0 if result.get("status") == "PASS" else 1
-        result = execute(config_path)
         return 0 if result.get("status") == "PASS" else 1
     except Exception as exc:
         print(json.dumps({"status": "FAIL_STOP", "action_id": ACTION_ID,

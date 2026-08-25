@@ -55,7 +55,7 @@ def public_transport_config(path: Path) -> dict[str, Any]:
     """API-safe view: providers/models plus key-presence booleans only."""
     config = load_transport_config(path)
     keys_configured = {provider: bool(config.get("keys", {}).get(provider))
-                       for provider in ALLOWED_PROVIDERS}
+                       for provider in ALLOWED_PROVIDERS if provider != "ollama"}
     return {
         "primary": config.get("primary"),
         "fallback": config.get("fallback"),
