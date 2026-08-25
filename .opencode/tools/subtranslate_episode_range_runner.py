@@ -663,7 +663,7 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
                 "unit_membership_sha256": target["unit_membership_sha256"],
                 "model": transport.model,
                 "model_digest": context["model_digest"], "timeout_seconds": TIMEOUT_SECONDS}
-    call = DurableV226Call(context, request_bytes, metadata)
+    call = DurableV226Call(context, request_body, metadata)
     durable_state = call.prepare_request()
     if durable_state.get("state") != "REQUEST_DURABLE":
         raise RunnerBlocked(f"BATCH_REQUEST_NOT_DURABLE:b{batch_index}")
@@ -1413,7 +1413,7 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
                 "model": transport.model,
                 "model_digest": context["model_digest"],
                 "timeout_seconds": TIMEOUT_SECONDS}
-    call = DurableV226Call(context, request_bytes, metadata)
+    call = DurableV226Call(context, request_body, metadata)
     durable_state = call.prepare_request()
     if durable_state.get("state") != "REQUEST_DURABLE":
         raise RunnerBlocked(f"RETRY_REQUEST_NOT_DURABLE:b{batch_index}")
