@@ -84,6 +84,15 @@ def is_effective_source_copy(source: str, output: str) -> bool:
     return bool(source_key) and source_key == output_key
 
 
+def _resolve_source_language(execution_context: dict[str, Any] | None) -> str:
+    """Source language precedence: explicit context, then env default, English."""
+    return (
+        (execution_context or {}).get("source_language")
+        or os.environ.get("TRANSLATOR_SOURCE_LANGUAGE")
+        or "inglês"
+    )
+
+
 def preserve_interrupted_speech_features(source: str, output: str) -> str:
     """Restore only source-proven stutter/terminal interruption markers.
 
@@ -401,8 +410,11 @@ def translate_subtitle_file_v2_2_5(
         # Pluggable transport provider (primary/fallback engine) injected from
         # the web transport config; Client.call uses it when present.
         config.transport = execution_context.get("transport")
-        # Source language of the subtitle (defaults to English).
-        config.source_language = execution_context.get("source_language") or "inglês"
+    # Source language of the subtitle: explicit context wins, then the
+    # configured environment default (web queue injects it per job), then
+    # English.  Applied even without an execution context so direct plan
+    # calls (e.g. v2_3_0 via the orchestrator) honor the configured language.
+    config.source_language = _resolve_source_language(execution_context)
     memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()

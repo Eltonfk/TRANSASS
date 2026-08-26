@@ -37,7 +37,7 @@ def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str]) -> Any | 
         return None
 
 
-def _run_pipeline(args, pipeline: str, transport: Any | None) -> dict[str, Any]:
+def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: str) -> dict[str, Any]:
     scratch = Path(tempfile.mkdtemp(prefix=".web-retranslation-", dir="/tmp"))
     try:
         safe_series = re.sub(r"[^\w .!'-]+", "_", args.series_title).strip() or "Anime"
@@ -58,8 +58,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None) -> dict[str, Any]:
                 "ollama_url": os.environ.get("TRANSLATOR_OLLAMA_URL"),
                 "defer_intermediate_cleanup": pipeline == "v2_3_0",
                 "transport": transport,
-                "source_language": transport_config.get("source_language")
-                                   or os.environ.get("TRANSLATOR_SOURCE_LANGUAGE", "inglês"),
+                "source_language": source_language,
             },
         )
     finally:
@@ -90,13 +89,22 @@ def main() -> int:
     keys = transport_config.get("keys") or {}
     primary = _provider_for(transport_config.get("primary"), keys)
     fallback = _provider_for(transport_config.get("fallback"), keys)
+    # Source language precedence: the per-job environment injected by the web
+    # queue wins, then the global transport config, then English.  The env
+    # must come first because the transport store always materializes a
+    # non-empty default that would otherwise mask the per-job selection.
+    source_language = (
+        os.environ.get("TRANSLATOR_SOURCE_LANGUAGE")
+        or transport_config.get("source_language")
+        or "inglês"
+    )
 
-    result = _run_pipeline(args, pipeline, primary)
+    result = _run_pipeline(args, pipeline, primary, source_language)
     used_fallback = False
     if (not isinstance(result, dict) or not args.output.is_file()) and fallback is not None:
         # Primary failed to produce the output: retry once with the fallback.
         used_fallback = True
-        result = _run_pipeline(args, pipeline, fallback)
+        result = _run_pipeline(args, pipeline, fallback, source_language)
 
     internal = (result or {}).get("_internal") if isinstance(result, dict) else None
     stage_handle = Path(internal["stage_artifact_path"]).name if isinstance(internal, dict) and internal.get("stage_artifact_path") else None

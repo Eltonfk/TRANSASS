@@ -517,6 +517,10 @@ def canonicalize_glossary_variants(text: str, glossary: dict[str, str]) -> str:
 
 
 SIGNS_SONGS_TITLE_KEYWORDS = ("sign", "song", "lyric", "op/ed", "op&ed", "karaoke")
+# Faixas "forced" carregam só sinais/notas traduzidos, quase nenhum diálogo —
+# traduzi-las gera uma legenda praticamente vazia. Devem perder para a faixa
+# completa mesmo quando as duas são do idioma configurado.
+FORCED_TITLE_KEYWORDS = ("forced",)
 
 
 def find_subtitle_stream(video_path: Path):
@@ -548,13 +552,22 @@ def find_subtitle_stream(video_path: Path):
         lang = s.get("tags", {}).get("language", "")
         title = (s.get("tags", {}).get("title", "") or "").lower()
         is_signs_songs = any(kw in title for kw in SIGNS_SONGS_TITLE_KEYWORDS)
+        is_forced = any(kw in title for kw in FORCED_TITLE_KEYWORDS)
         # O idioma configurado (SOURCE_LANGUAGE) tem prioridade máxima; os
         # demais seguem a ordem histórica eng/jpn como fallback.
         if _source_lang_matches(lang):
             lang_rank = 0
         else:
             lang_rank = lang_priority.get(lang, 2) + 1
-        return (lang_rank, 1 if is_signs_songs else 0)
+        # Desempates determinísticos: faixa de diálogo completa primeiro
+        # (não-signs/forced), depois faixa default, depois menor índice.
+        default_flag = int((s.get("disposition", {}) or {}).get("default", 0) or 0)
+        return (
+            lang_rank,
+            1 if (is_signs_songs or is_forced) else 0,
+            1 - default_flag,
+            s.get("index", 0),
+        )
 
     supported_streams.sort(key=score)
     best = supported_streams[0]
