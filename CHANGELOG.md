@@ -4,6 +4,22 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.9] - 2026-08-26
+
+### Adicionado
+- **Detecção de resíduo do idioma de origem alimentando retries**: os
+  detectores históricos só mediam evidência léxica **inglesa** — texto
+  francês não traduzido caía apenas em flags de auditoria
+  (`SHORT_ENGLISH_POSSIBLE`) e nunca disparava o retry limitado. Agora, quando
+  o idioma configurado é francês (estrutura extensível a outros), marcadores
+  de alta precisão (palavras que não existem em pt-BR, elisões `l'/d'/j'/qu'`,
+  construção `ne..pas`, diacríticos exclusivos ù/û/î/ï/ë/œ) classificam o
+  resíduo como `SHORT_ENGLISH_HIGH_CONFIDENCE` (fragmentos curtos) ou
+  `UNTRANSLATED_DIALOGUE` (diálogo longo), ambos elegíveis ao retry existente.
+- Evidência de auditoria: campos `source_residue` com marcadores e padrões.
+- Inglês e idiomas desconhecidos permanecem exatamente como antes
+  (detector desligado — zero mudança de comportamento).
+
 ## [2.4.8] - 2026-08-26
 
 ### Alterado

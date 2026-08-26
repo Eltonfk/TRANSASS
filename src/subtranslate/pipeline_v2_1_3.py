@@ -902,7 +902,87 @@ def likely_english_sentence_source(event: Event, english_dictionary: set[str] | 
     return (sentence_signal and common_hits >= 1) or (len(words) >= 5 and (common_hits >= 2 or syntax_hits >= 2))
 
 
-def high_confidence_untranslated_dialogue(event: Event, source: str, output: str, english_dictionary: set[str] | None = None, protected_terms: set[str] | None = None) -> bool:
+# ---------------------------------------------------------------------------
+# Source-language residue detection (non-English sources)
+#
+# The historical detectors above are English-centric: they measure how much
+# of an output still looks like English.  When the configured source language
+# is something else (e.g. francês), untranslated residue never produces
+# English lexical hits, lands only in audit-only flags and never triggers a
+# retry.  These tables close that gap with a precision-first design: every
+# marker below is guaranteed NOT to be a valid pt-BR word, so a legitimate
+# Portuguese translation cannot trip the detector.
+# ---------------------------------------------------------------------------
+
+FRENCH_RESIDUE_WORDS = frozenset({
+    # pronomes/sujeitos
+    "je", "tu", "il", "elle", "ils", "elles", "nous", "vous", "lui", "eux", "soi",
+    # formas de ser/estar/ter/haver
+    "suis", "est", "sont", "sommes", "êtes", "était", "étaient", "être",
+    "avoir", "ayant",
+    # preposições/advérbios/pronomes interrogativos
+    "avec", "sans", "sous", "chez", "dans", "très", "alors", "donc", "où",
+    "quoi", "quand", "comment", "pourquoi", "toujours",
+    # cortesia e substantivos frequentes
+    "oui", "merci", "bonjour", "bonsoir", "madame", "monsieur", "adresse",
+    "société", "femme", "homme", "enfant", "petit", "ville", "nuit", "matin",
+    "soir",
+})
+
+_FRENCH_ELISION_RE = re.compile(r"\b(?:l|d|j|n|s|c|qu|m|t)['’]", re.IGNORECASE)
+_FRENCH_NE_PAS_RE = re.compile(r"\bne\s+[\w'’]+\s+(?:pas|plus|jamais|rien)\b", re.IGNORECASE)
+# Diacríticos que o pt-BR nunca usa (é/è/ê/à/ç/ô/â são compartilhados).
+_FRENCH_STRONG_DIACRITICS_RE = re.compile(r"[ùûîïëœæ]", re.IGNORECASE)
+
+_SOURCE_LANGUAGE_CANONICAL = {
+    "inglês": "english", "english": "english", "eng": "english", "en": "english",
+    "francês": "french", "french": "french", "fre": "french", "fra": "french", "fr": "french",
+}
+
+
+def canonical_source_language(name: str | None) -> str:
+    return _SOURCE_LANGUAGE_CANONICAL.get((name or "").strip().casefold(), "other")
+
+
+def source_residue_evidence(text: str, source_language: str | None) -> dict[str, Any]:
+    """Count unambiguous markers of the configured source language in text.
+
+    Unknown languages and English return zero hits: English keeps its own
+    dedicated detectors and unknown languages stay conservative (audit-only).
+    """
+    language = canonical_source_language(source_language)
+    empty: dict[str, Any] = {
+        "language": language, "word_hits": [], "pattern_hits": 0,
+        "diacritic_hits": 0, "count": 0,
+    }
+    if language != "french" or not text:
+        return empty
+    lowered = text.lower()
+    word_hits = sorted({word for word in WORD_RE.findall(lowered) if word in FRENCH_RESIDUE_WORDS})
+    pattern_hits = len(_FRENCH_ELISION_RE.findall(text)) + len(_FRENCH_NE_PAS_RE.findall(text))
+    diacritic_hits = len(_FRENCH_STRONG_DIACRITICS_RE.findall(text))
+    return {
+        "language": language, "word_hits": word_hits, "pattern_hits": pattern_hits,
+        "diacritic_hits": diacritic_hits, "count": len(word_hits) + pattern_hits,
+    }
+
+
+def source_residue_strong(evidence: dict[str, Any], overlap: float | None = None) -> bool:
+    """Whether residue evidence is strong enough to justify an automatic retry."""
+    if evidence.get("language") != "french":
+        return False
+    if evidence["count"] >= 2:
+        return True
+    if evidence["count"] >= 1 and (
+        evidence["pattern_hits"] >= 1 or (overlap is not None and overlap >= 0.60)
+    ):
+        return True
+    if evidence["pattern_hits"] >= 1 and evidence["diacritic_hits"] >= 1:
+        return True
+    return False
+
+
+def high_confidence_untranslated_dialogue(event: Event, source: str, output: str, english_dictionary: set[str] | None = None, protected_terms: set[str] | None = None, source_language: str = "inglês") -> bool:
     """Identify a sentence that is still substantially English after a call.
 
     This is intentionally stricter than ``POSSIBLE_UNTRANSLATED_OUTPUT``.  It
@@ -936,6 +1016,13 @@ def high_confidence_untranslated_dialogue(event: Event, source: str, output: str
             return False
     elif event.classification not in {"MAIN_DIALOGUE", "NARRATION_OR_THOUGHT", "SDH", "SONG_AMBIGUOUS"}:
         return False
+    # Non-English source languages: residue is measured against the configured
+    # source language instead of the English dictionary.
+    residue = source_residue_evidence(output, source_language)
+    if residue["count"]:
+        overlap_quick = len(set(source_words) & set(output_words)) / max(1, len(set(source_words)))
+        if source_residue_strong(residue, overlap_quick):
+            return True
     if source_norm == output_norm:
         # Full unchanged sentence: either broad dictionary coverage or several
         # English function words is required.  This catches clauses such as
@@ -1212,7 +1299,7 @@ def normalize_idiomatic_output(source: str, output: str, context: dict[str, Any]
     return normalized, changed
 
 
-def content_flags(event: Event, output: str, context: dict[str, Any], english_dictionary: set[str] | None = None, protected_terms: set[str] | None = None) -> list[str]:
+def content_flags(event: Event, output: str, context: dict[str, Any], english_dictionary: set[str] | None = None, protected_terms: set[str] | None = None, source_language: str = "inglês") -> list[str]:
     linguistic = TAG_RE.sub("", output).replace(r"\N", " ").strip()
     flags: list[str] = []
     source_has_content = bool(re.search(r"[\wÀ-ÿ]", event.clean_text, re.UNICODE))
@@ -1221,7 +1308,7 @@ def content_flags(event: Event, output: str, context: dict[str, Any], english_di
         flags.append("CONTENT_LOSS")
     flags.extend(flag for flag in delimiter_flags(event.clean_text, linguistic) if flag not in flags)
     flags.extend(flag for flag in linguistic_flags(event.clean_text, linguistic, context, english_dictionary, protected_terms) if flag not in flags)
-    if high_confidence_untranslated_dialogue(event, event.clean_text, linguistic, english_dictionary, protected_terms):
+    if high_confidence_untranslated_dialogue(event, event.clean_text, linguistic, english_dictionary, protected_terms, source_language):
         flags.append("UNTRANSLATED_DIALOGUE")
     flags.extend(flag for flag in idiomatic_flags(event.clean_text, linguistic) if flag not in flags)
     for flag in validate_inline_tags(event.original_text, output):
@@ -1776,7 +1863,7 @@ class Runner:
         result.final_segments = response.get("segments")
         result.final_model = model
         if not any(flag in flags for flag in CRITICAL_FLAGS):
-            for flag in content_flags(event, text, self.contexts[event.id], self.english_dictionary, self.protected_terms):
+            for flag in content_flags(event, text, self.contexts[event.id], self.english_dictionary, self.protected_terms, source_language=getattr(self.config, "source_language", "inglês")):
                 if flag not in result.flags:
                     result.flags.append(flag)
         critical = set(flags) & CRITICAL_FLAGS

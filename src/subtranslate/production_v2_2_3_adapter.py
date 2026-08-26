@@ -30,6 +30,8 @@ from pipeline_v2_1_3 import (
     Unit,
     is_multi_speaker,
     load_events,
+    source_residue_evidence,
+    source_residue_strong,
     validate_structure,
     write_ass,
 )
@@ -174,6 +176,7 @@ def classify_short_english_fragment(
     output: str,
     context: dict[str, Any] | None = None,
     protected_terms: set[str] | None = None,
+    source_language: str = "inglês",
 ) -> dict[str, Any]:
     """Conservatively classify a short residual without mutating its text."""
     source = normalize_short_fragment_for_detection(event.clean_text)
@@ -209,6 +212,20 @@ def classify_short_english_fragment(
         "same_lexical": same_lexical,
         "source_output_overlap": round(overlap, 4),
     })
+    # Non-English configured source: strong residue in the candidate is the
+    # same failure class as an English residual fragment and feeds the same
+    # bounded retry path (HIGH_CONFIDENCE).
+    residue = source_residue_evidence(candidate["visible"] or output, source_language)
+    if residue["count"]:
+        result["source_residue"] = residue
+        if source_residue_strong(residue, overlap):
+            result["status"] = SHORT_ENGLISH_HIGH_CONFIDENCE
+            result["retry_eligible"] = True
+            result["evidence"].extend([
+                f"source_residue:{residue['language']}:{','.join(residue['word_hits']) or '-'}",
+                f"residue_patterns:{residue['pattern_hits']}",
+            ])
+            return result
     # A single title-cased unknown token is a name/term candidate, never an
     # automatic retry.  It remains visible to ordinary review via POSSIBLE.
     single_unknown_title = (
@@ -281,6 +298,7 @@ class V223MemoryRunner(V222MemoryRunner):
             result.final_text or "",
             self.contexts.get(event.id, {}),
             self.protected_terms,
+            source_language=getattr(self.config, "source_language", "inglês"),
         )
         self.v223_classifier_evidence[event.id] = assessment
         if assessment["status"] == SHORT_ENGLISH_HIGH_CONFIDENCE:
@@ -354,6 +372,7 @@ class V223MemoryRunner(V222MemoryRunner):
                 item.get("final_text") or "",
                 self.contexts.get(event.id, {}),
                 self.protected_terms,
+                source_language=getattr(self.config, "source_language", "inglês"),
             )
             if assessment["status"] != SHORT_ENGLISH_HIGH_CONFIDENCE:
                 item["flags"] = [

@@ -5,4 +5,4 @@ context inspector and release tooling.  Bump together with CHANGELOG.md and the
 annotated Git tag.
 """
 
-__version__ = "2.4.8"
+__version__ = "2.4.9"

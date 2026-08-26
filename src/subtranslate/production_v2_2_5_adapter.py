@@ -253,6 +253,7 @@ class V225MemoryRunner(V224MemoryRunner):
             getattr(result, "final_text", "") or "",
             self.contexts.get(event.id, {}),
             self.protected_terms,
+            source_language=getattr(self.config, "source_language", "inglês"),
         )
         protected = assessment.get("status") != SHORT_ENGLISH_HIGH_CONFIDENCE
         return bool(
@@ -337,6 +338,7 @@ class V225MemoryRunner(V224MemoryRunner):
                 item.get("final_text") or "",
                 self.contexts.get(event.id, {}),
                 self.protected_terms,
+                source_language=getattr(self.config, "source_language", "inglês"),
             )
             if assessment.get("status") == SHORT_ENGLISH_HIGH_CONFIDENCE:
                 item["status"] = "failed"
