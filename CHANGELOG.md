@@ -1,89 +1,103 @@
 # Changelog
 
-Todas as mudanças notáveis do **Transass** (anteriormente *Subtranslate*) são
-documentadas neste arquivo.
-Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
-e versionamento [SemVer](https://semver.org/lang/pt-BR/).
+Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
+Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
+`/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
-## [2.4.0] — 2026-08-25
+## [2.4.7] - 2026-08-26
 
-Primeira release versionada e preparada para publicação no GitHub. Consolida a
-linha canônica V238 com a temporada completa traduzida, motor de tradução
-escolhível e toolchain de operação generalizada.
+### Corrigido
+- **Retradução com idioma errado**: o runner resolvia o idioma como
+  `config global → ambiente`; como o store sempre materializa um default
+  não-vazio ("inglês"), o prompt saía *"traduza de inglês"* mesmo com texto
+  francês — causa principal do resíduo francês nas retraduções.
+  Precedência agora: **ambiente por job → config global → inglês**.
+- Idioma de origem por episódio ligado ponta-a-ponta na retradução:
+  UI envia a seleção → `/retranslate(/preflight)` → resolução da fonte →
+  campo `source_language` no job → ambiente do processo do runner.
 
-### Renomeado
-- Projeto renomeado de **Subtranslate** para **Transass** (produto, UI e
-  documentação). O pacote interno `src/subtranslate/` mantém o nome por
-  compatibilidade de imports.
+## [2.4.6] - 2026-08-26
 
-### Adicionado
-- **Fallback automático de motor**: quando o motor principal falha um lote
-  (HTTP, parse ou validação), o runner tenta automaticamente o motor
-  alternativo configurado (via `transport_config.json` da UI web ou
-  `transport_fallback` no config do episódio), com evidência durável própria
-  por tentativa. Provado em produção: Gemini resolveu os lotes que o Qwen
-  falhou 2× seguidas (E09 B150/B194, E10 B2, E11 B96, E12 B47).
-- **UI web de configuração de motor** (⚙ Motor): motor principal + fallback
-  opcional + API keys, persistidos em `/app/state/transport_config.json`
-  (permissão 600, host-local). Keys nunca expostas pela API — apenas
-  `keys_configured`.
-- **Tradução integral da temporada Zombie Land Saga (E07–E12)**: 10.549 eventos,
-  8.372 traduções aplicadas, 2.177 eventos preservados por design (músicas,
-  signos, técnicos), 1.266 lotes executados com zero retries silenciosos.
-- **Motor de tradução escolhível** (`transport` no config do episódio):
-  `ollama` (local/GPU), `openai_compat` (Groq, OpenRouter, LM Studio, vLLM,
-  llama.cpp server), `gemini` (Google free tier). API keys exclusivamente por
-  variável de ambiente.
-- **Idioma de origem configurável + seleção por episódio**: o app agora
-  **descobre todos os idiomas** das legendas (sidecars e faixas internas do
-  MKV, incluindo signs/songs) e lista as opções em um seletor por episódio na
-  fila. O idioma escolhido alimenta tanto a resolução da fonte
-  (`resolve_episode_source`/`find_subtitle_stream`) quanto o prompt de
-  tradução. Parametrizado em `pipeline_v2_1_3`, `pipeline_v2_1_2`,
-  `anime_subtitle_translator` e `web_audit_retranslation`; novo endpoint
-  `GET /source-options`; exposto na UI ⚙ Motor (padrão global) e por episódio.
-  Karaokê/signs/songs preservados por design.
-- **Seletor de idioma por temporada**: na lista de episódios, o campo
-  **"Idioma da temporada"** (com botão **Detectar**) aplica um único idioma de
-  origem a todos os episódios da pasta de uma vez, aproveitando que temporadas
-  vêm de fonte única com legendas no mesmo idioma. Complementa o seletor
-  individual por episódio.
-- **Pipeline de episódio genérico**: `episode_config_builder`,
-  `episode_planner --plan-all` (inventário completo do episódio em uma única
-  passada determinística), `episode_range_runner` (authorize/status/execute/
-  recover-batch/reconcile-batch/retry-failed/finalize-retries),
-  `episode_assembly`.
-- **Probe somente-leitura v0.4.1**: snapshot íntegro com lock transitório
-  tratado como estado normal; `app_version` exposta; `context_inspect --summary`
-  com inventário de chaves canônicas (`canonical_keys`).
-- **Higiene R2** (`subtranslate_hygiene_detach.py`): migração episode-agnóstica
-  de famílias reconciliadas para o history root com manifest completo e
-  rollback guiado.
-- **Reconciliação documental** (`subtranslate_doc_reconcile.py`): objetos
-  aditivos atômicos com backup e verificação pós-escrita.
-- Deploy web em produção com o pipeline V238 completo (imagem
-  `v2.3.8-dockerfile-rc4567`).
+### Corrigido
+- **NameError em `web_retranslation_runner._run_pipeline`**
+  (`transport_config` fora de escopo) — toda retradução falhava com código 1.
+- **Escolha de faixa embutida**: faixas "Forced"/"Signs & Songs" do idioma
+  configurado perdiam para a faixa de diálogo completa; desempate
+  determinístico por flag `default` e índice. ("French [Forced]" era
+  escolhida no lugar de "French [Full]" no Paranoia Agent S01E01.)
+- Caminho V226 honra `TRANSLATOR_SOURCE_LANGUAGE` do ambiente quando não há
+  `execution_context` (necessário para o plano v2_3_0 via orquestrador).
 
 ### Alterado
-- `/health` expõe `version`; novo endpoint `/version`.
-- Executor de lote transport-aware: request real enviado à API escolhida é a
-  evidência durável gravada.
-- Retomada idempotente: payloads, backups e autorizações toleram re-execução
-  após interrupções.
+- Pipeline padrão da web: `v2_3_8` → `v2_3_0`. O plano v2_3_8 exige o
+  contexto canônico de execução live (`response_provider` + identidade de
+  checkpoint), ainda não conectado ao caminho web — a primeira tentativa real
+  falhou fechada (`V238_EXECUTION_CONTEXT_REQUIRED`), sem publicar nada.
+  Conectar o runtime canônico à web é trabalho futuro planejado, com gate e
+  auditoria próprios.
 
-### Conhecido
-- Lotes com parse failure persistente (E09·B150/B194, E10·B2, E11·B96,
-  E12·B47, E08 evento 1486) ficam sinalizados para a revisão humana única —
-  textos originais preservados nas legendas.
+## [2.4.5] - 2026-08-26
 
-## [2.3.8] — linha V238 (estado original)
+### Corrigido
+- **Seleção de episódios individuais**: a UI envia o caminho completo na
+  biblioteca (`ep.source`); `_selected_sources` duplicava o caminho
+  (`pasta + caminho`) e devolvia "seleção de episódios inválida".
+  Agora aceita as duas formas, mantendo contenção em `BASE_LIBRARY`.
+- Badge de fonte reflete o **idioma selecionado** (antes sempre o global
+  "inglês"): `/episodes?source_language=…`, cache por idioma e novo endpoint
+  `GET /source-status` com atualização imediata ao trocar o idioma.
 
-- Pipeline canônico V238: durabilidade por família (ledgers exactly-once),
-  normalização V3, semantic style ownership, seletores RC3–RC10,
-  prompt contracts RC7a–RC7b1, materialização base.
-- App web Flask para auditoria, retradução seletiva, Library
-  (subtitle_record/review_session/human_feedback), glossário versionado e
-  memória de tradução.
-- Toolchain operacional: probe somente-leitura, transições canônicas,
-  backup canônico, recovery ledger reprepare.
-- Sem deploy público, sem release versionada, sem remote Git.
+## [2.4.4] - 2026-08-26
+
+### Corrigido
+- Auto-classificação ANIME: resolução do caminho absoluto do vídeo antes da
+  detecção (relative path causava `no_embedded_ass_ssa`). Verificado em
+  produção: Paranoia Agent/Season 1 → 13 episódios catalogados.
+
+## [2.4.3] - 2026-08-26
+
+### Adicionado
+- `POST /library/auto-classify`: classifica série como ANIME quando vídeos da
+  pasta possuem ASS/SSA embutido; registra episódios; respeita NON_ANIME
+  explícito. Disparado pelo botão "Usar esta pasta". 6 testes offline.
+
+## [2.4.2] - 2026-08-26
+
+### Corrigido/Alterado
+- `/source-options` aceita `path` relativo do vídeo além de `episode_id`
+  (detecção funciona em qualquer pasta navegada, não só catálogo ANIME);
+  seletor por episódio compacto.
+
+## [2.4.0 – 2.4.1] - 2026-08-25
+
+### Adicionado
+- **Idioma de origem configurável (qualquer idioma → PT-BR)** com preservação
+  de karaokê/letras; mapas de códigos de idioma; prompts parametrizados.
+- Detecção de todos os idiomas de legenda do vídeo; seletor por episódio e
+  seletor por temporada com botão "Detectar"; configuração de transporte
+  (primário/fallback) pela UI incluindo idioma global.
+
+---
+
+## Histórico anterior (linha V2.3.8 / Transass Web) — resumo
+
+- **Renomeação** Subtranslate → **Transass** (pacote interno `src/subtranslate`).
+- **App web Flask**: fila com exactly-once, sessões, persistência atômica de
+  estado, publicação por rename no mesmo diretório, polling compacto.
+- **Biblioteca SQLite** (`anime_subtitle_library`): séries/episódios/objetos
+  com dedupe por SHA-256, registros com lineage, ingest hooks de fonte
+  extraída/externa/traduzida, classificações ANIME/NON_ANIME/UNKNOWN.
+- **Pipelines registrados** (`pipeline_registry`): legacy → v2_1_2 … v2_2_6,
+  v2_3_0 (full + aumento de karaokê) e v2_3_8 (estágio durável + karaokê),
+  com archive/lineage por plano.
+- **Runtime canônico V2.3.8**: estágio de tradução full durável, política
+  llama de fallback único em grupo, `DurableResponseProvider`
+  (LIVE_CAPTURED / OFFLINE_REPLAY / TEST_FAKE), materializador base V226,
+  orçamento de chamadas, capturas duráveis e replay — provado pelos gates
+  B4/B5 via tooling dedicado (fora do caminho web).
+- **Transportes plugáveis**: ollama / openai_compat / gemini com fallback
+  primário→secundário configurável pela UI.
+- **Qualidade/auditoria**: validação estrutural, flags
+  (POSSIBLE_UNTRANSLATED_OUTPUT, SHORT_ENGLISH_POSSIBLE, …), auditoria por
+  episódio/série, retradução com pré-flight fail-closed, memória de tradução
+  aprovada e glossário por série.
