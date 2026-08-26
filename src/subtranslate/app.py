@@ -1414,21 +1414,39 @@ def transport_config_post():
 
 @app.route("/source-options")
 def source_options_route():
-    """List every translatable subtitle source (any language) for an episode."""
+    """List every translatable subtitle source (any language) for an episode.
+
+    Accepts either ``episode_id`` (cataloged episode) or ``path`` (relative
+    video path inside the library). The ``path`` form lets the UI detect
+    source languages for any browsed video, even when the series is not yet
+    classified as ANIME in the Library.
+    """
     from web_audit_retranslation import detect_source_options
 
     episode_id = request.args.get("episode_id")
-    if not episode_id or not str(episode_id).isdigit():
-        return jsonify({"error": "episode_id inválido"}), 400
-    try:
-        video_path = subtitle_library._episode_video(int(episode_id))
-    except Exception as error:
-        return jsonify({"error": f"episódio não catalogado: {error}"}), 404
+    rel_path = request.args.get("path")
+    video_path = None
+    resolved_episode_id = None
+    if episode_id and str(episode_id).isdigit():
+        try:
+            video_path = subtitle_library._episode_video(int(episode_id))
+            resolved_episode_id = int(episode_id)
+        except Exception as error:
+            return jsonify({"error": f"episódio não catalogado: {error}"}), 404
+    elif rel_path:
+        try:
+            video_path = _resolve_relative(rel_path)
+        except Exception as error:
+            return jsonify({"error": f"caminho inválido: {error}"}), 400
+        if not video_path.is_file():
+            return jsonify({"error": "arquivo de vídeo não encontrado"}), 404
+    else:
+        return jsonify({"error": "episode_id ou path obrigatório"}), 400
     try:
         options = detect_source_options(video_path)
     except Exception as error:
         return jsonify({"error": f"não foi possível inspecionar as faixas: {error}"}), 500
-    return jsonify({"episode_id": int(episode_id), "options": options})
+    return jsonify({"episode_id": resolved_episode_id, "path": str(video_path), "options": options})
 
 
 @app.route("/start", methods=["POST"])
@@ -2395,10 +2413,10 @@ async function loadEpisodes(){if(!selectedFolder){$('episodes').innerHTML='<span
 function badge(status){const cls=status==='COMPLETED'||status==='ALREADY_TRANSLATED'?'ok':status==='FAILED'?'fail':['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING','PAUSED'].includes(status)?'wait':'neutral';const label=status==='ALREADY_TRANSLATED'?'Já traduzido':status==='NOT_STARTED'?'Não iniciado':status;return `<span class="badge ${cls}">${esc(label)}</span>`}
 function auditBadge(ep){const s=ep.audit_status||'NÃO AUDITADA';const cls=s==='SEM PROBLEMAS DETECTADOS'?'ok':s==='PROBLEMAS DETECTADOS'?'fail':['AUDITORIA PARCIAL','REVISÃO RECOMENDADA'].includes(s)?'wait':'neutral';const short=s==='SEM PROBLEMAS DETECTADOS'?'✓ sem problemas':s==='PROBLEMAS DETECTADOS'?'⚠ problemas':s==='AUDITORIA PARCIAL'?'◐ parcial':s==='REVISÃO RECOMENDADA'?'◐ revisão recomendada':'— não auditada';return `<span class="badge ${cls}" title="${esc(s)}">${short}</span>`}
 function sourceBadge(ep){const s=ep.source_status||{};const status=s.status||'SOURCE_NOT_FOUND';const cls=s.available?'ok':status==='SOURCE_AMBIGUOUS'||status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'||status==='SOURCE_STATUS_ERROR'?'wait':'neutral';const text=s.display||(status==='SOURCE_AVAILABLE_LIBRARY'?'✓ Biblioteca':status==='SOURCE_AVAILABLE_SIDECAR'?'✓ Sidecar':status==='SOURCE_AVAILABLE_INTERNAL_TEXT'?'✓ Track interna':status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'?'⚠ PGS — OCR não suportado':status==='SOURCE_AMBIGUOUS'?'⚠ Fonte ambígua':status==='SOURCE_STATUS_ERROR'?'⚠ Metadata da fonte':'✕ Fonte não encontrada');return `<span class="badge ${cls}" title="${esc(s.reason||s.display||text)}">${text}</span>`}
-function renderEpisodes(){const box=$('episodes');if(!episodes.length){box.innerHTML='<span class="muted">Nenhum vídeo encontrado nesta pasta.</span>';return}box.replaceChildren(...episodes.map(ep=>{const row=document.createElement('label');row.className='episode';const key=episodeKey(ep),disabled=['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING'].includes(ep.status);const lang=episodeSourceLang[key]||seasonLangValue||globalSourceLang;const sel=`<select class="srclang" data-key="${esc(key)}" data-epid="${esc(ep.library_episode_id||'')}" title="Idioma de origem da legenda"><option value="${esc(lang)}">${esc(lang)}</option></select>`;row.innerHTML=`<input type="checkbox" data-selection-key="${esc(key)}" data-source="${esc(ep.source)}" data-episode-id="${esc(ep.library_episode_id||'')}" ${selectedEpisodeKeys.has(key)?'checked':''} ${disabled?'disabled':''}><b>${esc(ep.episode||'—')}</b><span class="epname" title="${esc(ep.name)}">${esc(ep.name)}</span>${badge(ep.status)}${auditBadge(ep)}${sourceBadge(ep)}${sel}`;return row}));bindSelection()}
-async function populateLangSelect(sel){const epid=sel.dataset.epid;if(!epid||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const d=await api('/source-options?episode_id='+encodeURIComponent(epid));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('')}catch(e){console.error('source-options',e)}}
+function renderEpisodes(){const box=$('episodes');if(!episodes.length){box.innerHTML='<span class="muted">Nenhum vídeo encontrado nesta pasta.</span>';return}box.replaceChildren(...episodes.map(ep=>{const row=document.createElement('label');row.className='episode';const key=episodeKey(ep),disabled=['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING'].includes(ep.status);const lang=episodeSourceLang[key]||seasonLangValue||globalSourceLang;const sel=`<select class="srclang" data-key="${esc(key)}" data-epid="${esc(ep.library_episode_id||'')}" data-path="${esc(ep.source||'')}" title="Idioma de origem da legenda" style="min-height:30px;max-width:150px;padding:4px 6px"><option value="${esc(lang)}">${esc(lang)}</option></select>`;row.innerHTML=`<input type="checkbox" data-selection-key="${esc(key)}" data-source="${esc(ep.source)}" data-episode-id="${esc(ep.library_episode_id||'')}" ${selectedEpisodeKeys.has(key)?'checked':''} ${disabled?'disabled':''}><b>${esc(ep.episode||'—')}</b><span class="epname" title="${esc(ep.name)}">${esc(ep.name)}</span>${badge(ep.status)}${auditBadge(ep)}${sourceBadge(ep)}${sel}`;return row}));bindSelection()}
+async function populateLangSelect(sel){const epid=sel.dataset.epid;const rel=sel.dataset.path;if((!epid&&!rel)||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const q=epid?('episode_id='+encodeURIComponent(epid)):('path='+encodeURIComponent(rel));const d=await api('/source-options?'+q);const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('')}catch(e){console.error('source-options',e)}}
 function applySeasonLang(lang){seasonLangValue=lang;episodes.forEach(ep=>{const key=episodeKey(ep);episodeSourceLang[key]=lang;const el=langSelects[key];if(el)el.value=lang})}
-async function detectSeasonLang(){const ep=episodes.find(e=>e.library_episode_id);if(!ep)return alert('Nenhum episódio catalogado para detectar.');try{const d=await api('/source-options?episode_id='+encodeURIComponent(ep.library_episode_id));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return alert('Nenhum idioma de legenda detectado na temporada.');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('');applySeasonLang(cur||opts[0])}catch(e){alert('Não foi possível detectar os idiomas: '+e.message)}}
+async function detectSeasonLang(){const ep=episodes.find(e=>e.source)||episodes[0];if(!ep||!ep.source)return alert('Nenhum vídeo selecionado para detectar.');try{const d=await api('/source-options?path='+encodeURIComponent(ep.source));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return alert('Nenhum idioma de legenda detectado na temporada.');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('');applySeasonLang(cur||opts[0])}catch(e){alert('Não foi possível detectar os idiomas: '+e.message)}}
 async function start(){try{const sel=episodes.filter(ep=>selected().includes(ep.source)&&ep.status!=='ALREADY_TRANSLATED');if(!sel.length)return alert('Selecione pelo menos um episódio sem PT-BR.');const source_languages={};sel.forEach(ep=>{const key=episodeKey(ep);const el=langSelects[key];source_languages[ep.source]=el?el.value:globalSourceLang});await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:selectedFolder,episodes:sel.map(ep=>ep.source),source_languages,dry_run:$('dryrun').checked})});await refresh()}catch(e){alert(e.message)}}
 async function auditSelectedSeason(){try{const series=await seriesForFolder();if(!series)return alert('A pasta atual não está associada a uma série ANIME catalogada.');const m=selectedFolder.match(/(?:^|\/)Season\s*([0-9]+)/i);const body=m?{season:m[1]}:{};const d=await api('/audit/series/'+series.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});alert(`Auditoria concluída: ${d.counts['PROBLEMAS DETECTADOS']||0} com problemas, ${d.counts['REVISÃO RECOMENDADA']||0} para revisão, ${d.counts['AUDITORIA PARCIAL']||0} parciais.`);await loadEpisodes();await loadArchive()}catch(e){alert(e.message)}}
 async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return alert('Selecione episódios com fonte original arquivada.');if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode_ids:ids,bulk:true})});const c=preview.counts||{};if(c.blocked){return alert(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`)}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode_ids:ids,confirm:confirmBatch,bulk:confirmBatch})});await refresh()}catch(e){alert(e.message)}}
