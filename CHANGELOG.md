@@ -4,6 +4,17 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.8] - 2026-08-26
+
+### Alterado
+- **Imagem Docker 612MB → 324MB (-47%)**: o ffmpeg do Debian foi substituído
+  por build estático (7.0.2) fixado por SHA-256, instalado via
+  `deploy/install_static_ffmpeg.py` (fail-closed se o artefato upstream
+  mudar). Remove ~450MB de bibliotecas de GPU/LLVM/síntese de voz que o
+  caminho de extração de legendas nunca usa.
+- Validado em produção: ffprobe lista as faixas corretamente e a extração da
+  faixa 4 (French [Full]) produz os mesmos 243 eventos da tradução publicada.
+
 ## [2.4.7] - 2026-08-26
 
 ### Corrigido

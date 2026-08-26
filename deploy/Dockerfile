@@ -1,7 +1,11 @@
 FROM python:3.11-slim@sha256:94c50be2dc994b873b55bc123e95e6dbade08095b3dfd790f51c34de3f08cbb7
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+# Static ffmpeg/ffprobe pinned by SHA-256 (fail-closed if upstream changes).
+# Replaces the Debian ffmpeg package (~450MB of GPU/LLVM/voice libraries the
+# subtitle extraction path never uses); binaries land in /usr/local/bin.
+COPY deploy/install_static_ffmpeg.py /tmp/install_static_ffmpeg.py
+RUN python3 /tmp/install_static_ffmpeg.py && rm /tmp/install_static_ffmpeg.py \
+    && ffmpeg -version | head -1 && ffprobe -version | head -1
 
 WORKDIR /app
 COPY requirements.lock .
