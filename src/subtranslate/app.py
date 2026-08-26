@@ -12,6 +12,7 @@ import html
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1449,6 +1450,102 @@ def source_options_route():
     return jsonify({"episode_id": resolved_episode_id, "path": str(video_path), "options": options})
 
 
+_EPISODE_RE = re.compile(r"S(?P<season>\d{1,3})E(?P<episode>\d{1,3})", re.IGNORECASE)
+
+
+def _parse_season_episode(name: str) -> tuple[str | None, str | None]:
+    match = _EPISODE_RE.search(name)
+    if not match:
+        return None, None
+    return f"{int(match.group('season')):02d}", f"{int(match.group('episode')):02d}"
+
+
+def _auto_classify_anime(folder_name: str) -> dict:
+    """Auto-classify a folder as ANIME when any video has embedded ASS/SSA.
+
+    Registers the series (and its episodes) so Library features work without a
+    manual backfill. Respects an explicit NON_ANIME classification set by the
+    user. This is the heuristic the operator requested: any .mkv carrying an
+    embedded ASS/SSA subtitle track is treated as anime.
+    """
+    from web_audit_retranslation import detect_source_options
+
+    folder = _validate_folder(folder_name)
+    videos = [_resolve_relative(item["source"]) for item in _episode_records(folder)]
+    if not videos:
+        return {"classified": False, "reason": "no_videos"}
+
+    series_relative = folder_name.strip("/").split("/")[0]
+    series_title = series_relative
+
+    has_embedded_ass = False
+    for video in videos:
+        try:
+            options = detect_source_options(video)
+        except Exception:
+            continue
+        if any(str(opt.get("codec", "")).lower() in ("ass", "ssa") and opt.get("textual") for opt in options):
+            has_embedded_ass = True
+            break
+    if not has_embedded_ass:
+        return {"classified": False, "reason": "no_embedded_ass_ssa"}
+
+    existing = next(
+        (s for s in subtitle_library.list_series()
+         if (s.get("library_relative_path") or "").strip("/") == series_relative),
+        None,
+    )
+    if existing and existing.get("classification") == "NON_ANIME":
+        return {"classified": False, "reason": "explicit_non_anime", "series_id": existing.get("id")}
+
+    if existing and existing.get("classification") == "ANIME":
+        series_id = existing["id"]
+    elif existing:
+        result = subtitle_library.set_classification(existing["id"], "ANIME", source="AUTO_EMBEDDED_SUBTITLE")
+        series_id = result["id"]
+    else:
+        result = subtitle_library.register_series(
+            series_title, series_relative, classification="ANIME", source="AUTO_EMBEDDED_SUBTITLE"
+        )
+        series_id = result["id"]
+
+    registered = 0
+    for video in videos:
+        try:
+            season, episode = _parse_season_episode(video.name)
+            subtitle_library.register_episode_for_path(
+                series_id, video, season=season, episode=episode, episode_title=video.stem
+            )
+            registered += 1
+        except Exception:
+            continue
+
+    return {
+        "classified": True,
+        "series_id": series_id,
+        "title": series_title,
+        "classification": "ANIME",
+        "episodes_registered": registered,
+    }
+
+
+@app.route("/library/auto-classify", methods=["POST"])
+def library_auto_classify():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON inválido"}), 400
+    folder = data.get("folder", "")
+    try:
+        result = _auto_classify_anime(folder)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "pasta não encontrada"}), 404
+    except Exception as error:
+        return jsonify({"error": f"não foi possível classificar: {error}"}), 500
+    return jsonify(result)
+
+
 @app.route("/start", methods=["POST"])
 def start():
     data = request.get_json(silent=True)
@@ -2421,6 +2518,7 @@ async function start(){try{const sel=episodes.filter(ep=>selected().includes(ep.
 async function auditSelectedSeason(){try{const series=await seriesForFolder();if(!series)return alert('A pasta atual não está associada a uma série ANIME catalogada.');const m=selectedFolder.match(/(?:^|\/)Season\s*([0-9]+)/i);const body=m?{season:m[1]}:{};const d=await api('/audit/series/'+series.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});alert(`Auditoria concluída: ${d.counts['PROBLEMAS DETECTADOS']||0} com problemas, ${d.counts['REVISÃO RECOMENDADA']||0} para revisão, ${d.counts['AUDITORIA PARCIAL']||0} parciais.`);await loadEpisodes();await loadArchive()}catch(e){alert(e.message)}}
 async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return alert('Selecione episódios com fonte original arquivada.');if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode_ids:ids,bulk:true})});const c=preview.counts||{};if(c.blocked){return alert(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`)}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({episode_ids:ids,confirm:confirmBatch,bulk:confirmBatch})});await refresh()}catch(e){alert(e.message)}}
 async function seriesForFolder(){const d=await api('/library/series?classification=ANIME');return d.series.find(s=>selectedFolder===s.library_relative_path||selectedFolder.startsWith(s.library_relative_path+'/'))}
+async function autoClassifyFolder(folder){try{await api('/library/auto-classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});await loadArchive()}catch(e){console.warn('auto-classify',e)}}
 async function action(url){try{await api(url,{method:'POST'});await refresh()}catch(e){alert(e.message)}}
 function age(iso){if(!iso)return '—';const t=Date.parse(iso);if(!Number.isFinite(t))return esc(iso);const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return `há ${sec}s`;const min=Math.floor(sec/60);if(min<60)return `há ${min}min`;return `há ${Math.floor(min/60)}h ${min%60}min`}
 function duration(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(Number(sec)));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
@@ -2437,7 +2535,7 @@ async function openArchiveSeries(id){try{const x=await api('/library/series/'+id
 async function loadArchive(){try{const d=await api('/library');const c=d.counts||{};$('libraryStats').textContent=`${c.records||0} versões · ${c.objects||0} objetos · ${c.publications||0} publicados`;
 const s=await api('/library/series?classification=ANIME');$('archiveSeries').innerHTML=s.series.length?s.series.map(x=>`<div class="jobline"><span><b>${esc(x.title)}</b><br><small>${esc(x.library_relative_path||'')} · ${esc(x.classification)}</small></span><button class="button" data-library-series="${x.id}">Abrir</button></div>`).join(''):'Nenhuma série anime catalogada.';$('archiveSeries').querySelectorAll('[data-library-series]').forEach(b=>b.onclick=()=>openArchiveSeries(b.dataset.librarySeries));}catch(e){$('archiveSeries').textContent='Biblioteca indisponível';}}
 async function loadMemory(){try{const d=await api('/memory');const c=d.counts||{};$('memoryStats').textContent=`${c.active||0} ativas · ${c.items||0} históricas · ${c.conflicts||0} conflitos · ${c.usages||0} usos · somente SEGMENT_APPROVED`;$('memoryItems').innerHTML=(d.items||[]).map(x=>`<div class="jobline"><span><b>${esc(x.source)}</b> → ${esc(x.approved_text)}</span><span>${esc(x.anime_title||'Anime')} · ${esc(x.status)} · ${x.usage_count||0} usos <button class="button" data-memory-status="${x.id}" data-next-status="${x.status==='ACTIVE'?'INACTIVE':'ACTIVE'}">${x.status==='ACTIVE'?'Desativar':'Ativar'}</button></span></div>`).join('')||'Nenhuma memória materializada.';$('memoryItems').querySelectorAll('[data-memory-status]').forEach(b=>b.onclick=async()=>{try{await api('/memory/items/'+b.dataset.memoryStatus+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:b.dataset.nextStatus})});await loadMemory()}catch(e){alert(e.message)}})}catch(e){$('memoryStats').textContent='Memória indisponível';$('memoryItems').textContent='Não foi possível carregar a memória local.'}}
- $('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=()=>{if(selectionFolder!==path){selectedEpisodeKeys.clear();selectionFolder=path}selectedFolder=path;loadEpisodes()};$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return alert('Série não catalogada como ANIME.');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){alert(e.message)}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){alert(e.message)}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();setInterval(()=>{refresh();loadHistory()},2000);setInterval(loadHealth,5000);
+ $('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=()=>{if(selectionFolder!==path){selectedEpisodeKeys.clear();selectionFolder=path}selectedFolder=path;loadEpisodes();autoClassifyFolder(path)};$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return alert('Série não catalogada como ANIME.');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){alert(e.message)}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){alert(e.message)}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();setInterval(()=>{refresh();loadHistory()},2000);setInterval(loadHealth,5000);
 loadArchive();loadMemory();$('memorySync').onclick=async()=>{try{await api('/memory/sync',{method:'POST'});await loadMemory()}catch(e){alert(e.message)}};setInterval(()=>{loadArchive();loadMemory()},5000);
 
 let currentArchiveSeriesId=null;
