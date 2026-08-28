@@ -103,7 +103,8 @@ class ContractAndControlPlaneTests(unittest.TestCase):
 
     def test_invalid_pipeline_health_separation_and_start_rejection(self):
         import app
-        with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "invalid-for-test"}):
+        with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "invalid-for-test"}), \
+                patch.object(app, "_effective_pipeline", return_value="invalid-for-test"):
             info = app._pipeline_info()
             self.assertFalse(info["supported"])
             self.assertTrue(info["service_available"])
@@ -120,6 +121,15 @@ class ContractAndControlPlaneTests(unittest.TestCase):
                     start_worker.assert_not_called()
                 finally:
                     app.BASE_LIBRARY = old_base
+
+    def test_pipeline_info_reports_persisted_effective_pipeline(self):
+        import app
+        with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "v2_3_0"}), \
+                patch.object(app, "_effective_pipeline", return_value="v2_3_8"):
+            info = app._pipeline_info()
+        self.assertEqual(info["configured_pipeline"], "v2_3_8")
+        self.assertEqual(info["effective_pipeline_plan"], "v2_3_8")
+        self.assertEqual(info["pipeline"], "v2_3_8")
 
     def test_start_route_n3_adds_three_jobs_and_starts_once(self):
         import app

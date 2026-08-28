@@ -19,12 +19,43 @@ def _whitespace_edges(value: str) -> tuple[str, str]:
 
 
 def rc4_replace_source_payload(source_part: str, target_part: str) -> str:
-    """Replace lexical chunks while retaining source chunk whitespace."""
+    """Replace lexical chunks while retaining the source ASS envelope.
+
+    The base V2.2.6 materializer may return a translated payload that still
+    contains the source override tags.  Those tags are model/output data, not
+    part of the linguistic payload; accepting them here duplicates the
+    source-owned envelope.  Likewise, a model may move or omit ``\\N``.  Both
+    presentation controls are therefore removed from the target before the
+    source envelope is rebuilt.
+    """
+    target_plain = _TAG_OR_H.sub("", target_part or "")
+    source_parts = (source_part or "").split(r"\N")
+    if len(source_parts) > 1:
+        target_parts = target_plain.split(r"\N")
+        if len(target_parts) == len(source_parts):
+            return r"\N".join(
+                rc4_replace_source_payload(source_piece, target_piece)
+                for source_piece, target_piece in zip(source_parts, target_parts)
+            )
+        target_words = re.findall(r"\S+", target_plain.replace(r"\N", " "))
+        source_word_counts = [len(_WORD.findall(_TAG_OR_H.sub("", piece))) for piece in source_parts]
+        total = max(1, sum(source_word_counts))
+        rendered: list[str] = []
+        start = 0
+        for index, (source_piece, source_count) in enumerate(zip(source_parts, source_word_counts)):
+            if index == len(source_parts) - 1:
+                end = len(target_words)
+            else:
+                end = min(len(target_words), max(start, round(len(target_words) * source_count / total)))
+            rendered.append(rc4_replace_source_payload(source_piece, " ".join(target_words[start:end])))
+            start = end
+        return r"\N".join(rendered)
+
     tokens = _TAG_OR_H.split(source_part or "")
     lexical_indices = [i for i, token in enumerate(tokens) if token and not _TAG_OR_H.fullmatch(token)]
     if not lexical_indices:
         return source_part
-    target_words = re.findall(r"\S+", target_part or "")
+    target_words = re.findall(r"\S+", target_plain)
     wordful = [i for i in lexical_indices if _WORD.findall(tokens[i])]
     total = max(1, sum(len(_WORD.findall(tokens[i])) for i in wordful))
     replacements: dict[int, str] = {}

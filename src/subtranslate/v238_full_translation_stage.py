@@ -200,10 +200,54 @@ def _provider(context: Mapping[str, Any]) -> DurableResponseProvider:
     return value
 
 
+def _repair_ownership_whitespace(
+    target_text: str, rows: list[Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Reallocate whitespace only when the model preserved all visible atoms.
+
+    Ownership is still validated against the exact target afterwards.  This
+    helper only assigns target whitespace to the current run (boundary spaces
+    stay with the preceding run), so a model cannot invent, remove, or alter a
+    visible non-whitespace character.
+    """
+    if not rows or any(set(row) != {"text", "owner_segment_id"} for row in rows):
+        return None
+    texts = [row.get("text") for row in rows]
+    owners = [row.get("owner_segment_id") for row in rows]
+    if any(not isinstance(text, str) or not text or not isinstance(owner, str) for text, owner in zip(texts, owners)):
+        return None
+    visible_model = "".join(char for text in texts for char in text if not char.isspace())
+    visible_target = "".join(char for char in target_text if not char.isspace())
+    if visible_model != visible_target:
+        return None
+    counts = [sum(not char.isspace() for char in text) for text in texts]
+    if any(count <= 0 for count in counts):
+        return None
+    repaired = [[] for _ in rows]
+    run_index = 0
+    remaining = counts[0]
+    for char in target_text:
+        if not char.isspace():
+            while remaining == 0 and run_index + 1 < len(counts):
+                run_index += 1
+                remaining = counts[run_index]
+            if remaining == 0:
+                return None
+            remaining -= 1
+        repaired[run_index].append(char)
+    if remaining or run_index != len(counts) - 1:
+        return None
+    return [
+        {"text": "".join(text), "owner_segment_id": owner}
+        for text, owner in zip(repaired, owners)
+    ]
+
+
 def _ownership_mapping(program: Any, target_text: str, response: Mapping[str, Any]) -> dict[str, Any] | None:
     rows = response.get("ownership_runs")
     if isinstance(rows, list):
-        return {"ownership_runs": rows}
+        repaired = _repair_ownership_whitespace(target_text, rows)
+        return {"ownership_runs": repaired or rows}
     vector = response.get("owner_vector")
     if isinstance(vector, list):
         atoms = target_atoms(target_text)
@@ -250,10 +294,10 @@ def _render_event(
     group_probe = getattr(provider, "v238_group_key", None)
     if callable(group_probe) and group_probe(event_id) is None:
         # The canonical base materializer has already produced the V226
-        # linguistic payload for ordinary units. V238 only rewrites explicitly
-        # classified structural groups; never reconstruct ordinary lines from
-        # visible text a second time.
-        return target_text, {"event_id": event_id, "path": "BASE_V226_PAYLOAD_PRESERVED"}
+        # linguistic payload for ordinary units.  Rebuild its source-owned
+        # presentation envelope once so model-returned ASS tags and line
+        # breaks cannot leak into the candidate.
+        return base, {"event_id": event_id, "path": "BASE_V226_PAYLOAD_REENVELOPED"}
     if reviewed_envelope is not None:
         # Explicit OFFLINE_REPLAY data is a reviewed envelope, never a global
         # runtime fallback.  The generic detectors still run before it is
@@ -332,7 +376,10 @@ def _render_event(
                 "event_id": event_id,
                 "text": _plain(target_text),
                 "source_text": program.source_visible_text,
-                "source_segments": [segment.source_text for segment in program.source_semantic_segments],
+                "source_segments": [
+                    {"segment_id": segment.segment_id, "source_text": segment.source_text}
+                    for segment in program.source_semantic_segments
+                ],
                 "model": model,
             }
             group_key_fn = getattr(provider, "ownership_group_key", None)

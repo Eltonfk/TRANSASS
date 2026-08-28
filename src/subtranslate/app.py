@@ -986,7 +986,11 @@ def _run_episode_v238(job: dict) -> None:
         staged_source = extracted
 
     transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
-    capture_root = STATE_DIR / "v238-captures"
+    # Roots ÚNICOS por job: checkpoints/captures compartilhados entre jobs
+    # causam DURABLE_CAPTURE_DUPLICATE_CALL_ID (call_id derivado do request
+    # colide com captures de jobs anteriores).
+    job_root = STATE_DIR / "v238-runs" / str(job["id"])
+    capture_root = job_root / "captures"
     capture_root.mkdir(parents=True, exist_ok=True)
     provider = WebDurableResponseProvider(
         transport_cfg,
@@ -1029,8 +1033,8 @@ def _run_episode_v238(job: dict) -> None:
         authorized_primary_models=transport_cfg.get("authorized_primary_models") or ["qwen", "gemini"],
         glossary=glossary,
         glossary_hash=glossary_hash,
-        stage_completion_root=STATE_DIR / "v238-completions",
-        checkpoint_root=STATE_DIR / "v238-checkpoints",
+        stage_completion_root=job_root / "completions",
+        checkpoint_root=job_root / "checkpoints",
         job_id=job.get("id"),
         prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH") or "v238-rc7b1",
         configuration_hash=os.environ.get("CONFIGURATION_HASH") or "v238-web-1",
@@ -1379,10 +1383,11 @@ def _run_retranslation_episode(job: dict) -> None:
     staging_root = STATE_DIR / "staging" / f"retranslation-{job['id']}"
     staging_root.mkdir(parents=True, exist_ok=True)
     output = staging_root / f"{job.get('name', 'subtitle')}.pt-BR.ass"
+    effective_pipeline = _effective_pipeline()
     command = [
         "python3", "-u", str(RUNNER_PATH),
         "--source", str(source), "--output", str(output),
-        "--memory-root", str(LIBRARY_ROOT), "--pipeline", _effective_pipeline(),
+        "--memory-root", str(LIBRARY_ROOT), "--pipeline", effective_pipeline,
         "--job-id", str(job["id"]),
     ]
     if job.get("series_id") is not None:
@@ -1393,6 +1398,8 @@ def _run_retranslation_episode(job: dict) -> None:
         command.extend(["--series-title", str(job["series_title"])])
     if job.get("episode_title"):
         command.extend(["--episode-title", str(job["episode_title"])])
+    if job.get("ollama_only"):
+        command.append("--no-fallback")
     with state_lock:
         job["status"] = "STARTING"
         job["stage"] = "STARTING"
@@ -1465,10 +1472,29 @@ def _run_retranslation_episode(job: dict) -> None:
                 job["diagnostic"] = diagnostic
                 _persist_locked()
             raise RuntimeError(f"retradução reprovada pela auditoria: {audit.get('status')} {audit.get('flags', [])}")
+        if job.get("candidate_only"):
+            # Candidate-only mode intentionally records the job and keeps the
+            # staged artifact available for web confirmation, but it must not
+            # create a Library record or publish a sidecar.
+            with state_lock:
+                job["status"] = "COMPLETED"
+                job["stage"] = "CANDIDATE_READY"
+                job["reason"] = "candidate_only_no_library_no_publication"
+                job["published"] = False
+                job["library_record_created"] = False
+                job["candidate_output_name"] = output.name
+                job["candidate_output_sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()
+                job["finished_at"] = _now()
+                _append_log(
+                    f"Candidato pronto; não arquivado nem publicado: {job.get('name', '')}",
+                    level="summary", job_id=job["id"],
+                )
+                _persist_locked()
+            return
         _validate_retranslation_job_integrity(job)
         source_id = int(job["source_record_id"])
         old_id = job.get("old_record_id")
-        if _pipeline() == "v2_3_0":
+        if effective_pipeline == "v2_3_0":
             handle = summary.get("stage_artifact_handle") if isinstance(summary, dict) else None
             if not isinstance(handle, str) or not handle or Path(handle).name != handle:
                 raise LineageContractError("retranslation V2.3.0 summary missing safe stage handle")
@@ -1492,7 +1518,7 @@ def _run_retranslation_episode(job: dict) -> None:
             new_record = subtitle_library.ingest_file(
                 output, episode_id=int(job["episode_id"]), language="pt-BR", source_kind="TRANSLATED",
                 source_language="eng", original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
-                job_id=job["id"], pipeline_version=_pipeline(), model=_model(),
+                job_id=job["id"], pipeline_version=effective_pipeline, model=_model(),
                 validation_status="VALIDATED", events_total=summary.get("events") if isinstance(summary, dict) else audit.get("output_events"),
                 preferred=False, review_status="VALIDATED", created_by="web-retranslation",
                 notes="Retradução solicitada pela camada web; publicação separada.", require_authorized_path=False,
@@ -1712,7 +1738,10 @@ def browse(rel_path: str):
 
 
 def _pipeline_info() -> dict:
-    pipeline = _pipeline()
+    # Reporting must describe the same persisted selection used by the worker;
+    # the environment value is only the fallback when transport_config is
+    # unavailable.
+    pipeline = _effective_pipeline()
     try:
         info = pipeline_info(pipeline, model=_model(), service_available_for_mutation=True)
     except UnsupportedPipelineError as error:
@@ -2414,7 +2443,8 @@ def _retranslation_preflight(
 def _queue_retranslation(
     episode_ids: list[int], *, confirm: bool = False, force_current: bool = False,
     source_languages: dict[int, str] | None = None,
-    process_eligible_only: bool = False,
+    process_eligible_only: bool = False, candidate_only: bool = False,
+    ollama_only: bool = False,
 ) -> dict[str, Any]:
     bulk = bool(confirm)
     partial_selection = bool(process_eligible_only and not bulk)
@@ -2476,6 +2506,8 @@ def _queue_retranslation(
                 "summary": None, "progress": None, "flags": {}, "critical_flags": [],
                 "attempt": 0, "retry_count": 0, "dry_run": False, "published": False,
                 "bulk_fail_fast": bulk,
+                "candidate_only": bool(candidate_only),
+                "ollama_only": bool(ollama_only),
             }
             jobs.append(job); state["jobs"].append(job)
         for episode, old, source, job_source_language in prepared:
@@ -2493,6 +2525,8 @@ def _queue_retranslation(
                 "summary": None, "progress": None, "flags": {}, "critical_flags": [],
                 "attempt": 1, "retry_count": 0, "dry_run": False, "published": False,
                 "bulk_fail_fast": bulk,
+                "candidate_only": bool(candidate_only),
+                "ollama_only": bool(ollama_only),
             }
             jobs.append(job); state["jobs"].append(job)
         _append_log(
@@ -2539,6 +2573,8 @@ def retranslate_route():
             force_current=bool(data.get("force_current") or data.get("force_retranslation")),
             source_languages=source_languages,
             process_eligible_only=data.get("process_eligible_only") is True,
+            candidate_only=data.get("candidate_only") is True,
+            ollama_only=data.get("ollama_only") is True,
         ))
     except Exception as error:
         return _library_error(error)
@@ -3092,7 +3128,44 @@ async function loadMemory(){try{const d=await api('/memory');const c=d.counts||{
  $('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=()=>{if(selectionFolder!==path){selectedEpisodeKeys.clear();selectionFolder=path}selectedFolder=path;loadEpisodes();autoClassifyFolder(path)};$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return alert('Série não catalogada como ANIME.');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){alert(e.message)}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){alert(e.message)}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();setInterval(()=>{refresh();loadHistory()},2000);setInterval(loadHealth,5000);
 loadArchive();loadMemory();$('memorySync').onclick=async()=>{try{await api('/memory/sync',{method:'POST'});await loadMemory()}catch(e){alert(e.message)}};setInterval(()=>{loadArchive();loadMemory()},5000);
 
-let currentArchiveSeriesId=null;
+ // A primeira carga costumava enviar o idioma global (inglês) antes de
+ // descobrir que a temporada só possui tracks francesas. A declaração abaixo
+ // substitui a versão anterior por uma versão que autodetecta o idioma da
+ // primeira fonte; uma escolha manual posterior continua sendo respeitada.
+ async function loadEpisodes(){
+  if(!selectedFolder){$('episodes').innerHTML='<span class="muted">Escolha uma pasta.</span>';return}
+  if(selectionFolder!==selectedFolder){selectedEpisodeKeys.clear();selectionFolder=selectedFolder}
+  const lang=seasonLangValue||globalSourceLang;
+  const d=await api('/episodes?path='+encodeURIComponent(selectedFolder)+'&source_language='+encodeURIComponent(lang));
+  episodes=d.episodes;
+  const detectedFolder=globalThis.__subtranslateDetectedSourceFolder||'';
+  if(detectedFolder!==selectedFolder){
+   globalThis.__subtranslateDetectedSourceFolder=selectedFolder;
+   const first=episodes.find(ep=>ep.source);
+   if(first){
+    try{
+     const options=await api('/source-options?path='+encodeURIComponent(first.source));
+     const languages=Array.from(new Set((options.options||[]).map(o=>o.language).filter(Boolean)));
+     const detected=languages.includes(lang)?lang:languages[0];
+     if(detected&&detected!==lang){
+      seasonLangValue=detected;
+      const season=$('seasonLang');
+      if(season&&!Array.from(season.options).some(o=>o.value===detected)){
+       const option=document.createElement('option');option.value=detected;option.textContent=detected;season.append(option)
+      }
+      if(season)season.value=detected;
+      return loadEpisodes();
+     }
+    }catch(e){console.warn('source autodetect',e)}
+   }
+  }
+  const valid=new Set(episodes.map(episodeKey));
+  selectedEpisodeKeys=new Set([...selectedEpisodeKeys].filter(key=>valid.has(key)));
+  const fingerprint=JSON.stringify(episodes.map(ep=>[episodeKey(ep),ep.status,ep.audit_status,ep.ptbr,ep.source_status]));
+  if(fingerprint!==episodeRenderFingerprint){episodeRenderFingerprint=fingerprint;renderEpisodes()}
+ }
+
+ let currentArchiveSeriesId=null;
 function auditBadge(ep){const s=ep.audit_status||'NÃO AUDITADA';const cls=s==='SEM PROBLEMAS DETECTADOS'?'ok':s==='PROBLEMAS DETECTADOS'?'fail':['AUDITORIA PARCIAL','REVISÃO RECOMENDADA','VERSÕES SEPARADAS'].includes(s)?'wait':'neutral';const short=s==='SEM PROBLEMAS DETECTADOS'?'✓ sem problemas':s==='PROBLEMAS DETECTADOS'?'⚠ problemas':s==='AUDITORIA PARCIAL'?'◐ parcial':s==='REVISÃO RECOMENDADA'?'◐ revisão recomendada':s==='VERSÕES SEPARADAS'?'◐ estados por versão':'— não auditada';return `<span class="badge ${cls}" title="${esc(s)}">${short}</span>`}
 function recordValidated(record){return ['VALIDATED','OK','PUBLISHED'].includes(String(record.validation_status||'').toUpperCase())}
 function recordPublished(record){return record.published===true||record.publication_status==='PUBLISHED'||(record.publications||[]).some(item=>item.status==='PUBLISHED')}

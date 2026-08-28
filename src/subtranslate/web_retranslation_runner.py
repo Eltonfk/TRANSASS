@@ -29,6 +29,12 @@ def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str]) -> Any | 
         return None
     section = dict(engine)
     provider = str(section.get("provider", "")).lower()
+    # BaseTransport preenche base_url com 127.0.0.1 antes de retornar. A URL
+    # de rede do container precisa ser injetada antes dessa construção.
+    if provider == "ollama" and not str(section.get("base_url") or "").strip():
+        ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "").strip()
+        if ollama_url:
+            section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
     if not section.get("api_key") and provider in keys and keys[provider]:
         section["api_key"] = keys[provider]
     try:
@@ -112,7 +118,8 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
             from web_durable_provider import WebDurableResponseProvider
 
             transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
-            capture_root = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-captures"
+            job_root = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-runs" / str(args.job_id)
+            capture_root = job_root / "captures"
             capture_root.mkdir(parents=True, exist_ok=True)
             provider = WebDurableResponseProvider(
                 transport_config, mode="LIVE_CAPTURED", capture_root=capture_root,
@@ -130,8 +137,8 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 authorized_primary_models=transport_config.get("authorized_primary_models") or ["qwen", "gemini"],
                 glossary=glossary,
                 glossary_hash=glossary_hash,
-                stage_completion_root=Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-completions",
-                checkpoint_root=Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-checkpoints",
+                stage_completion_root=job_root / "completions",
+                checkpoint_root=job_root / "checkpoints",
                 job_id=args.job_id,
                 prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH") or "v238-rc7b1",
                 configuration_hash=os.environ.get("CONFIGURATION_HASH") or "v238-web-1",
@@ -181,6 +188,7 @@ def main() -> int:
     parser.add_argument("--pipeline", default=os.environ.get("TRANSLATOR_PIPELINE", "legacy"))
     parser.add_argument("--series-title", default="Anime")
     parser.add_argument("--episode-title", default="Episode")
+    parser.add_argument("--no-fallback", action="store_true")
     args = parser.parse_args()
     if args.source.suffix.lower() not in {".ass", ".ssa"}:
         raise SystemExit("FONTE ORIGINAL NÃO DISPONÍVEL: formato não suportado")
@@ -205,7 +213,7 @@ def main() -> int:
 
     result = _run_pipeline(args, pipeline, primary, source_language)
     used_fallback = False
-    if (not isinstance(result, dict) or not args.output.is_file()) and fallback is not None:
+    if not args.no_fallback and (not isinstance(result, dict) or not args.output.is_file()) and fallback is not None:
         # Primary failed to produce the output: retry once with the fallback.
         used_fallback = True
         result = _run_pipeline(args, pipeline, fallback, source_language)
