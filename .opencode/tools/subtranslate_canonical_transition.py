@@ -51,6 +51,9 @@ TRACK2_DECISION_NEXT = "TRACK2_LIVE_CAPTURED_GATE_DECISION_REQUIRED"
 TRACK2_DECISION_KEY = "auto03d_track2_live_captured_decision_r1"
 TRACK2_DECISION_AFTER_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_PREFLIGHT_READ_ONLY_REQUIRED"
 TRACK2_DECISION_AFTER_NEXT = "TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY_REQUIRED"
+TRACK2_EXEC_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_REQUIRED"
+TRACK2_EXEC_NEXT = "TRACK2_LIVE_CAPTURED_EXECUTION_REQUIRED"
+TRACK2_EXEC_KEY = "auto03d_track2_live_captured_execution_r1"
 
 
 class TransitionBlocked(RuntimeError):
@@ -229,6 +232,27 @@ def transition(mode: str, before: dict[str, Any], probe: dict[str, Any]) -> tupl
         after["next_action"] = TRACK2_DECISION_AFTER_NEXT
         title = "AUTO-03D-TRACK2-LIVE-CAPTURED-DECISION-R1"
         summary = "Decisao TRACK2_LIVE_CAPTURED aprovada; preflight read-only da captura live requerido; nenhum side effect autorizado."
+    elif mode == "record-track2-live-captured-execution-required":
+        if before.get("state") != TRACK2_DECISION_AFTER_STATE or before.get("next_action") != TRACK2_DECISION_AFTER_NEXT:
+            raise TransitionBlocked("TRACK2_EXEC_PRESTATE_MISMATCH")
+        key = TRACK2_EXEC_KEY
+        if key in before:
+            raise TransitionBlocked("TRACK2_EXEC_ALREADY_EXISTS")
+        after[key] = {
+            "mode": "LIVE_CAPTURED_EXECUTION_REQUIRED", "recorded_at": now,
+            "snapshot_fingerprint": fingerprint,
+            "decision": "APPROVED_PROCEED_WITH_LIVE_CAPTURED",
+            "side_effects_performed": False,
+            "pipeline_model_call": False, "external_transport": False,
+            "runtime_write": False, "production_write": False, "data_delete": False,
+            "b5_authorized": False, "b6_authorized": False, "b7_authorized": False,
+            "future_side_effects_authorized": False,
+        }
+        after["state"] = TRACK2_EXEC_STATE
+        after["latest_decision"] = "TRACK2_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_REQUIRED"
+        after["next_action"] = TRACK2_EXEC_NEXT
+        title = "AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-REQUIRED-R1"
+        summary = "Execucao da captura live TRACK2 requerida; executor materializado; execucao exige HUMAN_GATE com AUTORIZAR."
     else:
         raise TransitionBlocked("UNKNOWN_TRANSITION")
     return after, title, summary
@@ -295,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True,
                         choices=("record-preflight", "record-authorization", "record-post-execution", "record-failure",
-                                 "record-track2-live-captured-decision"))
+                                 "record-track2-live-captured-decision", "record-track2-live-captured-execution-required"))
     args = parser.parse_args(argv)
     try:
         print(json.dumps(apply(args.mode), sort_keys=True, ensure_ascii=False)); return 0

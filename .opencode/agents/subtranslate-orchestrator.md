@@ -670,6 +670,36 @@ binding de inspecao -> BLOCKED + blocker objetivo + `NEXT_GATE=STOP`. Em ambos:
 nenhuma model call, transporte, runtime write, reserva, attempt, backup, retry,
 B5, B6 ou B7. `SAFE_PLAN -> DONE` sem transicao de execucao.
 
+### AUTO03D_TRACK2_LIVE_CAPTURED_EXECUTION_RECOGNITION
+
+Avalie quando o canonical contiver `auto03d_track2_live_captured_decision_r1`
+(com `decision=APPROVED_PROCEED_WITH_LIVE_CAPTURED`) e
+`next_action=TRACK2_LIVE_CAPTURED_EXECUTION_REQUIRED`. Exija tambem:
+
+```text
+state=V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_REQUIRED
+latest_decision=TRACK2_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_REQUIRED
+next_action=TRACK2_LIVE_CAPTURED_EXECUTION_REQUIRED
+```
+
+Quando convergir, route uma unica vez para
+`AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-R1` (HUMAN_GATE de execucao). O
+executor `.opencode/tools/subtranslate_track2_live_captured_executor.py`
+(EXECUTOR_ID=TRACK2_LIVE_CAPTURED_EXECUTOR_V1) deve estar materializado e o
+`plan()` deve retornar READY. A execucao real exige bindings definidos:
+
+- `TARGET_SUBTITLE_OR_EPISODE` (fonte .ass/.ssa ou video do alvo)
+- `CAPTURE_OUTPUT_PATH` (onde gravar a saida retranslatada)
+
+No `AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-R1`, o token literal `AUTORIZAR`
+dispara exatamente uma captura (1 Client.call / max 1 POST / 0 retry) via o
+executor, grava em `CAPTURE_OUTPUT_PATH` e faz forced stop. Pos-execucao:
+auditoria e, se desejado, transicao documental separada para registrar o
+resultado (nao muta canonical/Library/producao por padrao).
+
+Proibido em qualquer caso: B5, B6, B7, retry, ingestao na Library, mutacao de
+canonical sem transicao a parte, restart/deploy de producao. `AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-R1 -> DONE` apos a captura (ou FAIL_STOP se o executor falhar).
+
 ### AUTO03C_R4_CLOSURE_CANONICALIZATION_RECOGNITION
 
 Avalie antes de qualquer regra AUTO-03C anterior. Reconheca
