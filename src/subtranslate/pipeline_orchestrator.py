@@ -57,7 +57,7 @@ def _call_full_adapter(plan_id: str, source: Path, output: Path, context: dict[s
         episode_id=context.get("episode_id"),
         job_id=context.get("job_id"),
     )
-    if plan_id == "v2_3_8":
+    if plan_id in {"v2_3_0", "v2_3_8"}:
         kwargs["execution_context"] = context
     return function(
         source, output, **kwargs,

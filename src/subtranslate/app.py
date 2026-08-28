@@ -73,6 +73,10 @@ glossary_store = GlossaryStore(GLOSSARY_PATH)
 MAX_LOGS = 3000
 MAX_HISTORY = 100
 
+
+class StatePersistenceError(RuntimeError):
+    """State could not be durably committed; callers must fail closed."""
+
 app = Flask(__name__)
 state_lock = threading.RLock()
 
@@ -87,6 +91,20 @@ def _now() -> str:
 
 def _pipeline() -> str:
     return os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
+
+
+def _effective_pipeline() -> str:
+    """C4: pipeline efetivo — transport_config.json primeiro, env como fallback."""
+    from transport_config_store import TransportConfigError, load_transport_config
+
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        pipeline = str(config.get("pipeline") or "").strip().lower()
+        if pipeline:
+            return pipeline
+    except TransportConfigError:
+        pass
+    return _pipeline()
 
 
 def _model() -> str:
@@ -565,6 +583,7 @@ def _job_telemetry(job: dict) -> dict:
             last_activity = finished or started
     else:
         last_activity = finished or started
+    v238_metrics = summary.get("v238_metrics") if isinstance(summary.get("v238_metrics"), dict) else None
     return {
         "stage": stage,
         "total_units": total,
@@ -578,6 +597,7 @@ def _job_telemetry(job: dict) -> dict:
         "elapsed_seconds": elapsed,
         "last_activity_at": last_activity,
         "ledger_available": bool(ledger_dir),
+        "v238_metrics": v238_metrics,
     }
 
 
@@ -663,7 +683,7 @@ def _preserve_retranslation_diagnostic(
 
 def _persist_locked() -> None:
     if not _state_dir_ready():
-        return
+        raise StatePersistenceError("diretório de estado não está disponível para escrita")
     payload = {
         "version": 1,
         "updated_at": _now(),
@@ -673,17 +693,28 @@ def _persist_locked() -> None:
         "queue_paused": state.get("queue_paused", False),
         "audits": state.get("audits", {}),
     }
+    temporary: Path | None = None
     try:
         fd, raw = tempfile.mkstemp(prefix=".jobs-", suffix=".json", dir=str(STATE_DIR))
-        os.close(fd)
         temporary = Path(raw)
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, STATE_FILE)
-    except OSError:
+        directory_fd = os.open(str(STATE_DIR), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
-            temporary.unlink(missing_ok=True)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        try:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         except Exception:
             pass
+        raise StatePersistenceError(f"falha ao persistir estado: {exc}") from exc
 
 
 def _load_state() -> dict:
@@ -697,8 +728,10 @@ def _load_state() -> dict:
         jobs = []
     if not isinstance(history, list):
         history = []
+    recovery_needed = False
     for job in jobs:
         if job.get("status") in {"STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING", "PAUSING"}:
+            recovery_needed = True
             job["status"] = "FAILED"
             job["stage"] = "FAILED"
             job["error"] = "serviço reiniciado durante o job; nenhuma retomada automática"
@@ -707,7 +740,10 @@ def _load_state() -> dict:
     audits = payload.get("audits", {}) if isinstance(payload, dict) else {}
     if not isinstance(audits, dict):
         audits = {}
-    return {"jobs": jobs[-500:], "history": history[-MAX_HISTORY:], "audits": audits}
+    return {
+        "jobs": jobs[-500:], "history": history[-MAX_HISTORY:], "audits": audits,
+        "recovery_needed": recovery_needed,
+    }
 
 
 loaded = _load_state()
@@ -735,6 +771,10 @@ state = {
     # not repeatedly invoke ffprobe.  Materialization invalidates the entry.
     "source_status": {},
 }
+
+if loaded.get("recovery_needed"):
+    with state_lock:
+        _persist_locked()
 
 
 def _send_process_group_signal(proc: subprocess.Popen, sig: int) -> None:
@@ -794,6 +834,377 @@ def _apply_canonical_pipeline_summary(job: dict, summary: dict) -> None:
     job["stage"] = summary.get("stage") or last_stage or "VALIDATING"
 
 
+def _is_transport_error(exc: Exception) -> bool:
+    """L1: detecta erros de transporte (rede/HTTP) que disparam fallback.
+
+    Erros de validação/schema (BaseTranslationMaterializerError,
+    LlamaPolicyError, RuntimeError de schema) NÃO são de transporte.
+    """
+    import requests
+
+    if isinstance(exc, requests.exceptions.RequestException):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in (
+        "connectionerror", "timeout", "max retries", "connection refused",
+        "name or service not known", "temporarily unavailable",
+    ))
+
+
+def _new_operation_id(job: dict) -> str:
+    """M9: uuid.uuid4().hex por tentativa no fallback (R7)."""
+    import uuid
+
+    return uuid.uuid4().hex
+
+
+def _v238_metrics_from_result(result: dict) -> dict:
+    """C7: métricas v238 a partir do resultado do orchestrator."""
+    budget = result.get("operation_budget") if isinstance(result.get("operation_budget"), dict) else {}
+    qwen_max = int(budget.get("qwen_physical_maximum") or 131)
+    qwen_reserved = int(budget.get("qwen_reserved") or 0)
+    calls = int(result.get("calls", 0) or 0)
+    return {
+        "calls": calls,
+        "physical_client_calls": calls,
+        "model_generation_calls": calls,
+        "provider_requests": calls,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "elapsed_seconds": result.get("pipeline_wall_seconds"),
+        "budget_used": int(budget.get("total_reserved", 0) or 0),
+        "budget_remaining": max(0, qwen_max - qwen_reserved),
+        "provider_mode": "LIVE_CAPTURED",
+        "fallback_used": False,
+    }
+
+
+def _project_v238_summary(result: dict) -> dict:
+    """M8: projeta o resultado do orchestrator v2_3_8 para o formato
+    exigido por _apply_canonical_pipeline_summary (R6).
+
+    O resultado v2_3_8 NÃO tem status/stage/resolved/events/flags no topo
+    (pipeline_orchestrator.py:170-194); sem esta projeção o job ficaria preso
+    em VALIDATING com progresso 0/0.
+    """
+    stages = result.get("stages") if isinstance(result.get("stages"), list) else []
+    karaoke = result.get("karaoke") if isinstance(result.get("karaoke"), dict) else {}
+    primary_ledger = result.get("primary_ledger") if isinstance(result.get("primary_ledger"), list) else []
+    failures = karaoke.get("failures") if isinstance(karaoke.get("failures"), list) else []
+    structural = karaoke.get("structural_failures") if isinstance(karaoke.get("structural_failures"), list) else []
+    unresolved = [row for row in primary_ledger
+                  if isinstance(row, dict) and str(row.get("status", "")).upper() in {"BLOCKED", "SUSPECT"}]
+    events = len(primary_ledger) if primary_ledger else int(karaoke.get("song_units") or 0)
+    resolved = max(0, events - len(unresolved)) if events else 0
+    # M7/SKIPPED_ALLOWED: com llama_provider=None e
+    # v238_allow_primary_ledger_failures=True, unidades BLOCKED/SUSPECT são
+    # permitidas (não publicáveis) — o episódio COMPLETA em vez de falhar.
+    llama_phase = result.get("llama_phase") if isinstance(result.get("llama_phase"), dict) else {}
+    skipped_allowed = str(llama_phase.get("state", "")).upper() == "SKIPPED_ALLOWED"
+    ok = not failures and not structural and (not unresolved or skipped_allowed)
+    status = "COMPLETED" if ok else "FAILED"
+    last_stage = stages[-1].get("id") if stages and isinstance(stages[-1], dict) else "FULL_TRANSLATION_V238"
+    flags: dict = {}
+    critical_flags: list[str] = []
+    if unresolved and not skipped_allowed:
+        flags["v238_unresolved_units"] = len(unresolved)
+        critical_flags.append("v238_unresolved_units")
+    elif unresolved and skipped_allowed:
+        flags["v238_skipped_allowed_units"] = len(unresolved)
+    return {
+        "status": status,
+        "stage": last_stage,
+        "events": events,
+        "resolved": resolved,
+        "unresolved": len(unresolved),
+        "flags": flags,
+        "critical_flags": critical_flags,
+        "stages": stages,
+        "v238_metrics": _v238_metrics_from_result(result),
+        "calls": int(result.get("calls", 0) or 0),
+        "retry_calls": int(result.get("retry_calls", 0) or 0),
+    }
+
+
+def _project_primary_ledger_to_units(primary_ledger: list) -> list:
+    """M6: projeta o primary_ledger v2_3_8 para o formato units.json."""
+    units = []
+    for row in primary_ledger:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status", "")).lower()
+        units.append({
+            "event_id": row.get("event_id"),
+            "canonical_unit_id": row.get("canonical_unit_id"),
+            "status": "resolved" if status == "resolved"
+            else ("failed" if status in {"blocked", "suspect"} else status),
+            "reason_code": row.get("objective_reason_code") or row.get("reason_code"),
+            "flags": row.get("flags") or [],
+            "failure_reason": row.get("failure_reason"),
+            "primary_model_tag": row.get("primary_model_tag"),
+            "primary_attempts": row.get("primary_attempts"),
+        })
+    return units
+
+
+def _run_episode_v238(job: dict) -> None:
+    """C5: caminho in-process V2.3.8 para _run_episode.
+
+    Preserva staging de temporada (glossário por série, app.py:865-873),
+    output_exists_race (app.py:933-936) e cancelamento cooperativo (M4).
+    """
+    from pipeline_orchestrator import execute_pipeline_plan
+    from web_execution_context import build_v238_execution_context
+    from web_durable_provider import WebDurableResponseProvider
+    from transport_config_store import load_transport_config
+
+    source = Path(job["source_abs"])
+    destination = source.with_suffix(f".{TARGET_SUFFIX}.ass")
+    temporary_root = Path(tempfile.mkdtemp(prefix=".subtranslate-v238-", dir=str(source.parent)))
+    temporary_dir = temporary_root / source.parent.name
+    temporary_dir.mkdir()
+    linked_video = temporary_dir / source.name
+    linked_video.symlink_to(source)
+    staged_source = linked_video
+    staged_output = temporary_dir / (source.stem + f".{TARGET_SUFFIX}.ass")
+
+    # Extrair legenda do vídeo se necessário: os adapters V2.2.x só aceitam
+    # ASS/SSA (production_v2_2_5_adapter.py:401). O caminho legacy extrai via
+    # ffmpeg (anime_subtitle_translator.py:587,1117); o V2.3.8 precisa do
+    # mesmo passo antes de materializar.
+    if source.suffix.lower() in VIDEO_EXTENSIONS:
+        from anime_subtitle_translator import extract_subtitle, find_subtitle_stream
+
+        stream = find_subtitle_stream(source)
+        if stream is None:
+            raise RuntimeError("V238_NO_SUBTITLE_STREAM_FOUND")
+        stream_index, _lang, ext = stream
+        extracted = temporary_dir / (source.stem + ext)
+        extract_subtitle(source, stream_index, extracted)
+        staged_source = extracted
+
+    transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
+    capture_root = STATE_DIR / "v238-captures"
+    capture_root.mkdir(parents=True, exist_ok=True)
+    provider = WebDurableResponseProvider(
+        transport_cfg,
+        mode="LIVE_CAPTURED",
+        capture_root=capture_root,
+    )
+    # Campos de identidade LIVE_CAPTURED (v238_base_materializer.py:217):
+    # prompt_schema_hash, configuration_hash, candidate_commit,
+    # candidate_image_id vêm de build metadata (env); glossary_hash é
+    # calculado do glossário efetivo.
+    import hashlib as _hashlib
+
+    glossary = job.get("glossary") or {}
+    glossary_hash = _hashlib.sha256(
+        json.dumps(glossary, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest() if glossary else _hashlib.sha256(b"no-glossary").hexdigest()
+    # M2: resolver episode_id/anime_series_id via Library quando ausentes
+    # do job dict (queue_helpers.build_job_batch não os inclui).  L2: se o
+    # episódio não estiver registrado na Library, deriva IDs determinísticos
+    # do path (nunca deixa vazio -> evita V238_LIVE_CHECKPOINT_IDENTITY_MISSING).
+    if not job.get("episode_id") or not job.get("anime_series_id"):
+        library_episode = _library_episode_for_video(source)
+        if library_episode:
+            job["episode_id"] = job.get("episode_id") or library_episode.get("id")
+            job["anime_series_id"] = job.get("anime_series_id") or library_episode.get("series_id")
+        else:
+            series_name = source.parent.parent.name if source.parent.parent else source.parent.name
+            episode_name = source.stem
+            job["anime_series_id"] = job.get("anime_series_id") or (
+                int(_hashlib.sha256(series_name.encode("utf-8")).hexdigest()[:8], 16) % 100000)
+            job["episode_id"] = job.get("episode_id") or (
+                int(_hashlib.sha256(episode_name.encode("utf-8")).hexdigest()[:8], 16) % 100000)
+    ctx = build_v238_execution_context(
+        job=job,
+        transport_config=transport_cfg,
+        source_language=job.get("source_language") or "inglês",
+        operation_id=_new_operation_id(job),
+        execution_mode="TEST_FAKE" if job.get("dry_run") else "LIVE_CAPTURED",
+        capture_root=capture_root,
+        authorized_primary_models=transport_cfg.get("authorized_primary_models") or ["qwen", "gemini"],
+        glossary=glossary,
+        glossary_hash=glossary_hash,
+        stage_completion_root=STATE_DIR / "v238-completions",
+        checkpoint_root=STATE_DIR / "v238-checkpoints",
+        job_id=job.get("id"),
+        prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH") or "v238-rc7b1",
+        configuration_hash=os.environ.get("CONFIGURATION_HASH") or "v238-web-1",
+        candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
+        candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
+    )
+    ctx["response_provider"] = provider
+    ctx["operation"] = "TRANSLATE"
+    ctx["defer_intermediate_cleanup"] = False
+    # Transport do provider primário para o V226 (config.transport):
+    # o Client.call (pipeline_v2_1_3.py:1440-1463) usa config.transport se
+    # presente; sem ele, cai no default Ollama (qwen3.5:9b do env).
+    from transport_providers import transport_from_config
+
+    primary_section = transport_cfg.get("primary") or {}
+    if primary_section.get("provider"):
+        section = dict(primary_section)
+        provider_name = str(section.get("provider", "")).lower()
+        keys = transport_cfg.get("keys") or {}
+        if not section.get("api_key") and provider_name in keys and keys[provider_name]:
+            section["api_key"] = keys[provider_name]
+        # Ollama: base_url default do transport é 127.0.0.1 (inacessível no
+        # container). Usa TRANSLATOR_OLLAMA_URL do env quando base_url é null.
+        if provider_name == "ollama" and not section.get("base_url"):
+            ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "")
+            if ollama_url:
+                section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
+        ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
+
+    with state_lock:
+        job["status"] = "STARTING"
+        job["stage"] = "STARTING"
+        job["started_at"] = _now()
+        job["progress"] = {"scope": "episode", "current": 0, "total": 1, "label": job["name"]}
+        _append_log(f"Iniciando episódio (V2.3.8): {job['name']}", level="summary", job_id=job["id"])
+        _persist_locked()
+    try:
+        with state_lock:
+            job["status"] = "TRANSLATING"
+            job["stage"] = "TRANSLATING"
+            _persist_locked()
+        # L1: fallback de transporte (D5) — se o primary falhar com erro de
+        # transporte, re-executa com o fallback + novo operation_id
+        # (web_retranslation_runner.py:102-107).  Erros de validação/schema
+        # NÃO disparam fallback (fail-closed).
+        result = None
+        transport_error: Exception | None = None
+        fallback_used = False
+        for attempt_name, section in (("primary", transport_cfg.get("primary")),
+                                      ("fallback", transport_cfg.get("fallback"))):
+            if not section:
+                continue
+            if attempt_name == "fallback":
+                fallback_used = True
+                ctx["operation_id"] = _new_operation_id(job)
+                section = dict(section)
+                provider_name = str(section.get("provider", "")).lower()
+                keys = transport_cfg.get("keys") or {}
+                if not section.get("api_key") and provider_name in keys and keys[provider_name]:
+                    section["api_key"] = keys[provider_name]
+                if provider_name == "ollama" and not section.get("base_url"):
+                    ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "")
+                    if ollama_url:
+                        section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
+                ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
+                if staged_output.exists():
+                    staged_output.unlink()
+            try:
+                result = execute_pipeline_plan("v2_3_8", staged_source, staged_output, ctx)
+                break
+            except Exception as exc:
+                if _is_transport_error(exc):
+                    transport_error = exc
+                    continue
+                raise
+        if result is None:
+            raise transport_error or RuntimeError("V238_NO_TRANSPORT_ATTEMPT_SUCCEEDED")
+        projected = _project_v238_summary(result)
+        if fallback_used:
+            projected["v238_metrics"]["fallback_used"] = True
+        # L3: log estruturado das métricas v238 (C7 §8.3)
+        _append_log(
+            "V238_METRICS " + json.dumps(projected.get("v238_metrics", {}), ensure_ascii=False),
+            level="technical", job_id=job["id"],
+        )
+        # M6: projeção primary_ledger -> units.json para a UI não mostrar
+        # progresso vazio (o telemetry lê units.json do failure ledger).
+        primary_ledger = result.get("primary_ledger") if isinstance(result.get("primary_ledger"), list) else []
+        if primary_ledger:
+            ledger_dir = _job_ledger_dir(job)
+            if ledger_dir is None:
+                root = Path(os.environ.get("TRANSLATOR_FAILURE_LEDGER_ROOT", str(STATE_DIR / "failure-ledger")))
+                ledger_dir = root / "jobs" / str(job.get("id", ""))
+            ledger_dir.mkdir(parents=True, exist_ok=True)
+            units_path = ledger_dir / "units.json"
+            units_path.write_text(
+                json.dumps(_project_primary_ledger_to_units(primary_ledger), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        with state_lock:
+            if state.get("cancel_requested"):
+                job["status"] = "CANCELLED"
+                job["stage"] = "STOPPED"
+                job["reason"] = "stopped_by_user"
+                job["error"] = "Job interrompido pelo usuário"
+            elif job.get("dry_run"):
+                job["status"] = "COMPLETED"
+                job["stage"] = "COMPLETED"
+                job["reason"] = "dry_run"
+            elif destination.exists():
+                job["status"] = "FAILED"
+                job["reason"] = "output_exists_race"
+                job["error"] = "A legenda final apareceu durante o job; nada foi sobrescrito"
+            elif not staged_output.is_file():
+                job["status"] = "FAILED"
+                job["reason"] = "no_output_produced"
+                job["error"] = "O tradutor terminou sem produzir uma legenda final"
+            elif projected.get("resolved", 0) <= 0:
+                # Nenhuma unidade traduzida: o staged_output é o base
+                # source-preserving (texto-fonte).  Publicá-lo seria publicar
+                # uma "tradução" que é o original (ex: francês não traduzido).
+                job["status"] = "FAILED"
+                job["reason"] = "no_units_resolved"
+                job["error"] = "Nenhuma unidade foi traduzida (resolved=0); o base source-preserving não foi publicado"
+            else:
+                job["status"] = "PUBLISHING"
+                job["stage"] = "ARCHIVING"
+                _append_log(f"Publicando: {job['name']}", level="summary", job_id=job["id"])
+                _persist_locked()
+                os.replace(staged_output, destination)
+                # Ingestão na Library: o caminho V2.3.8 publica o arquivo E
+                # cria o registro (new_record_id) para a biblioteca refletir.
+                try:
+                    new_record = subtitle_library.ingest_file(
+                        destination, episode_id=int(job["episode_id"]), language="pt-BR",
+                        source_kind="TRANSLATED", source_language="eng",
+                        original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
+                        job_id=job["id"], pipeline_version="v2_3_8", model=_model(),
+                        validation_status="VALIDATED", events_total=projected.get("events"),
+                        preferred=True, review_status="VALIDATED", created_by="web-v238",
+                        notes="Tradução V2.3.8 via web; publicação atômica.",
+                        require_authorized_path=False,
+                    )
+                    job["new_record_id"] = int(new_record["id"])
+                except Exception as ingest_error:
+                    job["new_record_id"] = None
+                    job["ingest_error"] = str(ingest_error)
+                job["status"] = "COMPLETED"
+                job["stage"] = "COMPLETED"
+                job["reason"] = "atomic_publish"
+            _apply_canonical_pipeline_summary(job, projected)
+            job["finished_at"] = _now()
+            if job["status"] == "COMPLETED":
+                _append_log(f"Concluído: {job['name']}", level="summary", job_id=job["id"])
+            elif job["status"] == "CANCELLED":
+                _append_log(f"Cancelado: {job['name']}", level="summary", job_id=job["id"])
+            else:
+                _append_log(f"Falhou: {job['name']} — {job.get('error') or 'summary marcou FAILED (unidades não resolvidas sem SKIPPED_ALLOWED)'}", level="error", job_id=job["id"])
+            _persist_locked()
+    except Exception as error:
+        with state_lock:
+            job["status"] = "FAILED"
+            job["stage"] = "FAILED"
+            job["reason"] = "translator_exception"
+            job["error"] = str(error) if error is not None else "exceção sem mensagem"
+            job["finished_at"] = _now()
+            _append_log(f"Falhou: {job['name']} — {job['error']}", level="error", job_id=job["id"])
+            _persist_locked()
+    finally:
+        import shutil
+
+        shutil.rmtree(temporary_root, ignore_errors=True)
+
+
 def _parse_progress(job: dict, line: str) -> None:
     if line.startswith("@@PROGRESS@@"):
         try:
@@ -836,6 +1247,11 @@ def _consume_worker_output_line(job: dict, line: str) -> None:
 
 
 def _run_episode(job: dict) -> None:
+    # C5: roteia para o caminho in-process V2.3.8 quando o pipeline efetivo
+    # for v2_3_8 (seleção persistida no transport_config, C4).
+    if _effective_pipeline() == "v2_3_8":
+        _run_episode_v238(job)
+        return
     source = Path(job["source_abs"])
     # Keep the original season directory name in the staged path.  The
     # approved adapter derives series/episode metadata from subtitle_path and
@@ -914,6 +1330,10 @@ def _run_episode(job: dict) -> None:
                     job["status"] = "PUBLISHING"
                     job["stage"] = "ARCHIVING"
                     _append_log(f"Publicando: {job['name']}", level="summary", job_id=job["id"])
+                    # Persist the intent before the filesystem publication.
+                    # After a crash, recovery will fail the in-flight job
+                    # without retrying or overwriting the destination.
+                    _persist_locked()
                     os.replace(candidate, destination)
                     job["status"] = "COMPLETED"
                     job["stage"] = "COMPLETED"
@@ -962,7 +1382,7 @@ def _run_retranslation_episode(job: dict) -> None:
     command = [
         "python3", "-u", str(RUNNER_PATH),
         "--source", str(source), "--output", str(output),
-        "--memory-root", str(LIBRARY_ROOT), "--pipeline", _pipeline(),
+        "--memory-root", str(LIBRARY_ROOT), "--pipeline", _effective_pipeline(),
         "--job-id", str(job["id"]),
     ]
     if job.get("series_id") is not None:
@@ -1096,6 +1516,28 @@ def _run_retranslation_episode(job: dict) -> None:
             job["finished_at"] = _now()
             _append_log(f"Retradução concluída; nova versão arquivada: {job.get('name', '')}", level="summary", job_id=job["id"])
             _persist_locked()
+        # G2: publicar o arquivo no diretório do vídeo (publicação separada
+        # do registro na Library).  O destino é o .pt-BR.ass ao lado do vídeo.
+        try:
+            destination = Path(job["source_abs"]).with_suffix(f".{TARGET_SUFFIX}.ass")
+            if not destination.exists():
+                os.replace(output, destination)
+                with state_lock:
+                    job["published"] = True
+                    job["reason"] = "library_record_created_and_published"
+                    _append_log(f"Publicado: {destination.name}", level="summary", job_id=job["id"])
+                    _persist_locked()
+            else:
+                with state_lock:
+                    job["published"] = False
+                    job["reason"] = "library_record_created_no_publication"
+                    job["error"] = "Destino já existe; nada sobrescrito"
+                    _persist_locked()
+        except Exception as publish_error:
+            with state_lock:
+                job["published"] = False
+                job["error"] = f"Falha ao publicar: {publish_error}"
+                _persist_locked()
     except Exception as error:
         failure_payload = {}
         try:
@@ -1404,6 +1846,53 @@ def pipeline_route():
     return jsonify(_pipeline_info())
 
 
+@app.route("/pipeline-config", methods=["GET"])
+def pipeline_config_get():
+    """C4: retorna a seleção de pipeline persistida no transport_config."""
+    from transport_config_store import TransportConfigError, load_transport_config
+
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+    except TransportConfigError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({
+        "pipeline": config.get("pipeline") or "legacy",
+        "authorized_primary_models": config.get("authorized_primary_models") or ["qwen"],
+        "model_digest": config.get("model_digest"),
+    })
+
+
+@app.route("/pipeline-config", methods=["POST"])
+def pipeline_config_post():
+    """C4: persiste a seleção de pipeline no transport_config (M5)."""
+    from transport_config_store import (
+        ALLOWED_PIPELINES,
+        TransportConfigError,
+        load_transport_config,
+        save_transport_config,
+    )
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        current = load_transport_config(TRANSPORT_CONFIG_PATH)
+        pipeline = str(payload.get("pipeline") or current.get("pipeline") or "legacy").strip().lower()
+        if pipeline not in ALLOWED_PIPELINES:
+            return jsonify({"error": f"pipeline inválido: {pipeline}"}), 400
+        current["pipeline"] = pipeline
+        if "authorized_primary_models" in payload:
+            current["authorized_primary_models"] = payload["authorized_primary_models"]
+        if "model_digest" in payload:
+            current["model_digest"] = payload.get("model_digest")
+        saved = save_transport_config(TRANSPORT_CONFIG_PATH, current)
+    except TransportConfigError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({
+        "pipeline": saved.get("pipeline"),
+        "authorized_primary_models": saved.get("authorized_primary_models"),
+        "model_digest": saved.get("model_digest"),
+    })
+
+
 @app.route("/health")
 def health():
     from _version import __version__
@@ -1649,6 +2138,7 @@ def resume():
         state["paused"] = False
         state["queue_paused"] = False
         state["stop_requested"] = False
+        state["cancel_requested"] = False  # M4
         state["running"] = True
         _append_log("Fila retomada", level="summary")
         _persist_locked()
@@ -1664,6 +2154,7 @@ def stop():
         if not active and not waiting and not state["running"]:
             return jsonify({"error": "nenhuma fila ativa"}), 409
         state["stop_requested"] = True
+        state["cancel_requested"] = True  # M4: flag cooperativa para jobs in-process
         state["pause_requested"] = False
         state["stopped_by_user"] = True
         for job in waiting:
@@ -1923,17 +2414,25 @@ def _retranslation_preflight(
 def _queue_retranslation(
     episode_ids: list[int], *, confirm: bool = False, force_current: bool = False,
     source_languages: dict[int, str] | None = None,
+    process_eligible_only: bool = False,
 ) -> dict[str, Any]:
     bulk = bool(confirm)
+    partial_selection = bool(process_eligible_only and not bulk)
     selected_languages = source_languages or {}
     with state_lock:
         if state["running"] or any(job.get("status") == "WAITING" for job in state["jobs"] if job.get("session_id") == state.get("session_id")):
             raise LibraryError("já existe uma fila em execução ou aguardando")
         preflight = _retranslation_preflight(episode_ids, bulk=bulk, force_current=force_current, source_languages=selected_languages)
-        if preflight["blocked"]:
+        if preflight["blocked"] and not partial_selection:
             raise LibraryError(json.dumps({
                 "code": "retranslation_preflight_blocked",
                 "message": "pré-flight bloqueou a operação; nenhum episódio foi iniciado",
+                "preflight": {key: value for key, value in preflight.items() if key != "eligible"},
+            }, ensure_ascii=False))
+        if not preflight["eligible"]:
+            raise LibraryError(json.dumps({
+                "code": "retranslation_preflight_blocked",
+                "message": "pré-flight não encontrou episódio elegível; nenhum episódio foi iniciado",
                 "preflight": {key: value for key, value in preflight.items() if key != "eligible"},
             }, ensure_ascii=False))
         source_job_id = f"source-resolve-{uuid.uuid4().hex}"
@@ -1948,7 +2447,7 @@ def _queue_retranslation(
             if not source.get("available"):
                 raise LibraryError(f"{episode.get('media_filename')}: fonte deixou de estar disponível após o pré-flight")
             state.setdefault("source_status", {})[str(int(episode["id"]))] = _public_source_status(source)
-            prepared.append((episode, old, source))
+            prepared.append((episode, old, source, job_source_language))
         session_id = uuid.uuid4().hex
         state["session_id"] = session_id
         state["session_created_at"] = _now()
@@ -1979,7 +2478,7 @@ def _queue_retranslation(
                 "bulk_fail_fast": bulk,
             }
             jobs.append(job); state["jobs"].append(job)
-        for episode, old, source in prepared:
+        for episode, old, source, job_source_language in prepared:
             job = {
                 "id": uuid.uuid4().hex, "session_id": session_id, "operation": "RETRANSLATE",
                 "folder": state["folder"], "source": source.get("record_id"), "source_abs": source["path"],
@@ -1998,7 +2497,8 @@ def _queue_retranslation(
             jobs.append(job); state["jobs"].append(job)
         _append_log(
             f"Fila de retradução criada: {len(prepared)} episódio(s) elegível(is); "
-            f"{len(preflight['skipped'])} ignorado(s) por versão atual validada",
+            f"{len(preflight['skipped'])} ignorado(s) por versão atual validada; "
+            f"{len(preflight['blocked'])} não elegível(is) não enfileirado(s)",
             level="summary",
         )
         _persist_locked()
@@ -2009,6 +2509,7 @@ def _queue_retranslation(
         return {
             "ok": True, "session_id": session_id, "queued": len(prepared),
             "skipped_current_validated": len(preflight["skipped"]),
+            "not_eligible": len(preflight["blocked"]),
             "published": False, "source": "original_library", "preflight": {
                 key: value for key, value in preflight.items() if key != "eligible"
             },
@@ -2037,6 +2538,7 @@ def retranslate_route():
             confirm=bool(data.get("confirm") or data.get("bulk")),
             force_current=bool(data.get("force_current") or data.get("force_retranslation")),
             source_languages=source_languages,
+            process_eligible_only=data.get("process_eligible_only") is True,
         ))
     except Exception as error:
         return _library_error(error)
@@ -2568,7 +3070,7 @@ function applySeasonLang(lang){seasonLangValue=lang;episodes.forEach(ep=>{const 
 async function detectSeasonLang(){const ep=episodes.find(e=>e.source)||episodes[0];if(!ep||!ep.source)return alert('Nenhum vídeo selecionado para detectar.');try{const d=await api('/source-options?path='+encodeURIComponent(ep.source));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return alert('Nenhum idioma de legenda detectado na temporada.');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('');applySeasonLang(cur||opts[0])}catch(e){alert('Não foi possível detectar os idiomas: '+e.message)}}
 async function start(){try{const sel=episodes.filter(ep=>selected().includes(ep.source)&&ep.status!=='ALREADY_TRANSLATED');if(!sel.length)return alert('Selecione pelo menos um episódio sem PT-BR.');const source_languages={};sel.forEach(ep=>{const key=episodeKey(ep);const el=langSelects[key];source_languages[ep.source]=el?el.value:globalSourceLang});await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:selectedFolder,episodes:sel.map(ep=>ep.source),source_languages,dry_run:$('dryrun').checked})});await refresh()}catch(e){alert(e.message)}}
 async function auditSelectedSeason(){try{const series=await seriesForFolder();if(!series)return alert('A pasta atual não está associada a uma série ANIME catalogada.');const m=selectedFolder.match(/(?:^|\/)Season\s*([0-9]+)/i);const body=m?{season:m[1]}:{};const d=await api('/audit/series/'+series.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});alert(`Auditoria concluída: ${d.counts['PROBLEMAS DETECTADOS']||0} com problemas, ${d.counts['REVISÃO RECOMENDADA']||0} para revisão, ${d.counts['AUDITORIA PARCIAL']||0} parciais.`);await loadEpisodes();await loadArchive()}catch(e){alert(e.message)}}
-async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return alert('Selecione episódios com fonte original arquivada.');const langs={};episodes.forEach(ep=>{const id=Number(ep.library_episode_id);if(ids.includes(id)){const key=episodeKey(ep);langs[id]=episodeSourceLang[key]||seasonLangValue||globalSourceLang}});const langBody=JSON.stringify({episode_ids:ids,source_languages:langs});if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const c=preview.counts||{};if(c.blocked){return alert(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`)}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});await refresh()}catch(e){alert(e.message)}}
+async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return alert('Selecione episódios com fonte original arquivada.');const langs={};episodes.forEach(ep=>{const id=Number(ep.library_episode_id);if(ids.includes(id)){const key=episodeKey(ep);langs[id]=episodeSourceLang[key]||seasonLangValue||globalSourceLang}});const langBody=JSON.stringify({episode_ids:ids,source_languages:langs,process_eligible_only:!confirmBatch});if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const c=preview.counts||{};if(c.blocked){return alert(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`)}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}const queued=await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const skipped=queued.not_eligible||queued.preflight?.counts?.blocked||0;if(skipped&&queued.queued){alert(`${queued.queued} episódio(s) elegível(is) enfileirado(s); ${skipped} seleção(ões) sem fonte/versão para retraduzir foram ignoradas.`)}await refresh()}catch(e){alert(e.message)}}
 async function seriesForFolder(){const d=await api('/library/series?classification=ANIME');return d.series.find(s=>selectedFolder===s.library_relative_path||selectedFolder.startsWith(s.library_relative_path+'/'))}
 async function autoClassifyFolder(folder){try{await api('/library/auto-classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});await loadArchive()}catch(e){console.warn('auto-classify',e)}}
 async function action(url){try{await api(url,{method:'POST'});await refresh()}catch(e){alert(e.message)}}

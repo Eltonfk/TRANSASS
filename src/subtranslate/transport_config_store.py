@@ -17,11 +17,16 @@ from pathlib import Path
 from typing import Any
 
 ALLOWED_PROVIDERS = {"ollama", "openai_compat", "gemini"}
+ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8"}
+DEFAULT_PIPELINE = "legacy"
 DEFAULT_CONFIG = {
     "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
     "fallback": None,
     "keys": {},
     "source_language": "inglês",
+    "pipeline": DEFAULT_PIPELINE,
+    "authorized_primary_models": ["qwen", "gemini"],
+    "model_digest": None,
     "updated_at": None,
 }
 
@@ -62,6 +67,9 @@ def public_transport_config(path: Path) -> dict[str, Any]:
         "fallback": config.get("fallback"),
         "keys_configured": keys_configured,
         "source_language": config.get("source_language") or "inglês",
+        "pipeline": config.get("pipeline") or DEFAULT_PIPELINE,
+        "authorized_primary_models": config.get("authorized_primary_models") or ["qwen"],
+        "model_digest": config.get("model_digest"),
         "updated_at": config.get("updated_at"),
     }
 
@@ -84,8 +92,9 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             raise TransportConfigError(f"{label}: modelo obrigatório")
         if provider == "openai_compat" and not str(engine.get("base_url", "")).strip():
             raise TransportConfigError(f"{label}: openai_compat exige base_url")
-        return {"provider": provider, "model": model,
-                "base_url": str(engine.get("base_url", "")).strip() or None}
+        raw_base_url = engine.get("base_url")
+        base_url = str(raw_base_url).strip() if raw_base_url else None
+        return {"provider": provider, "model": model, "base_url": base_url}
 
     primary_clean = _validate_engine(primary, "primary")
     if primary_clean is None:
@@ -107,11 +116,24 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         if text:
             keys_clean[provider] = text
 
+    pipeline = str(payload.get("pipeline") or DEFAULT_PIPELINE).strip().lower()
+    if pipeline not in ALLOWED_PIPELINES:
+        raise TransportConfigError(f"pipeline inválido: {pipeline}")
+    authorized = payload.get("authorized_primary_models")
+    if authorized is None:
+        authorized = ["qwen", "gemini"]
+    if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
+        raise TransportConfigError("authorized_primary_models inválido")
+    model_digest = str(payload.get("model_digest") or "").strip() or None
+
     config = {
         "primary": primary_clean,
         "fallback": fallback_clean,
         "keys": keys_clean,
         "source_language": str(payload.get("source_language") or "inglês").strip() or "inglês",
+        "pipeline": pipeline,
+        "authorized_primary_models": list(authorized),
+        "model_digest": model_digest,
         "updated_at": datetime.now(UTC).isoformat(),
     }
 

@@ -420,7 +420,9 @@ def translate_subtitle_file_v2_2_5(
     memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
-    original, events, profile = load_events(subtitle_path, merged_glossary)
+    original, events, profile = load_events(
+        subtitle_path, merged_glossary, source_language=config.source_language,
+    )
     effective_job = job_id or f"v225-{output_path.name}-{int(time.time() * 1000)}"
     ledger = FailureLedger(effective_job, {
         "episode_id": episode_id,

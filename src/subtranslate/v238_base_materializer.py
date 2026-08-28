@@ -376,8 +376,13 @@ class CanonicalV226LiveMaterializer:
             primary_model = str(context.get("model") or context.get("model_override") or summary.get("model") or "")
             if any(str(call.get("model", "")).casefold().startswith("llama") for call in primary_calls if isinstance(call, Mapping)):
                 raise BaseTranslationMaterializerError("V238_LEGACY_LLAMA_REACHABLE_DURING_PRIMARY_QWEN")
-            if str(context.get("execution_mode") or "").upper() == "LIVE_CAPTURED" and primary_model and not primary_model.casefold().startswith("qwen"):
-                raise BaseTranslationMaterializerError("V238_PRIMARY_MODEL_AUTHORITY_NOT_QWEN")
+            if str(context.get("execution_mode") or "").upper() == "LIVE_CAPTURED" and primary_model:
+                # M1 (gate canonico): autoridade de modelo generalizada.
+                # Default preservado: somente qwen. Com authorized_primary_models
+                # (ex: ["qwen", "gemini"]), aceita qualquer prefixo autorizado.
+                authorized = [str(p).casefold() for p in (context.get("authorized_primary_models") or ["qwen"])]
+                if not any(primary_model.casefold().startswith(p) for p in authorized):
+                    raise BaseTranslationMaterializerError("V238_PRIMARY_MODEL_AUTHORITY_MISMATCH")
             if not temporary.is_file():
                 raise BaseTranslationMaterializerError("V238_V226_DID_NOT_CREATE_BASE")
             _fsync_file(temporary)

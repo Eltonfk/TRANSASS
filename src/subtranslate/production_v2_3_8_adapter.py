@@ -65,28 +65,39 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     if eligible:
         llama_provider = execution_context.get("llama_provider")
         if llama_provider is None:
-            raise BaseTranslationMaterializerError("V238_CANONICAL_LLAMA_PROVIDER_REQUIRED")
-        llama_tag = str(execution_context.get("llama_model_tag") or LLAMA_MODEL_TAG)
-        llama_digest = str(execution_context.get("llama_model_digest") or LLAMA_MODEL_DIGEST)
-        boundary = CanonicalLlamaProvider(
-            llama_provider,
-            model_tag=llama_tag,
-            model_digest=llama_digest,
-            budget=budget,
-            load=execution_context.get("llama_load"),
-            unload=execution_context.get("llama_unload"),
-        )
-        llama_phase = run_single_fallback_phase(
-            primary_ledger,
-            boundary,
-            model_tag=llama_tag,
-            model_digest=llama_digest,
-            max_calls=1,
-            capture_root=execution_context.get("llama_capture_root") or execution_context.get("capture_root"),
-            load=boundary.load,
-            unload=boundary.unload,
-            budget=budget,
-        )
+            # M7 (gate canonico): com v238_allow_primary_ledger_failures=True
+            # (default no adapter, linha 39), pula a fase llama com
+            # SKIPPED_ALLOWED em vez de falhar o episódio inteiro.  As
+            # unidades BLOCKED/SUSPECT ficam não publicáveis, mas o episódio
+            # prossegue (D2=a: sem Llama phase na web).
+            if execution_context.get("v238_allow_primary_ledger_failures"):
+                llama_phase = {"state": "SKIPPED_ALLOWED", "eligible_count": len(eligible), "calls": 0,
+                               "load_requested": False, "unload_requested": False, "publishable": False,
+                               "results": [], "lineage": []}
+            else:
+                raise BaseTranslationMaterializerError("V238_CANONICAL_LLAMA_PROVIDER_REQUIRED")
+        else:
+            llama_tag = str(execution_context.get("llama_model_tag") or LLAMA_MODEL_TAG)
+            llama_digest = str(execution_context.get("llama_model_digest") or LLAMA_MODEL_DIGEST)
+            boundary = CanonicalLlamaProvider(
+                llama_provider,
+                model_tag=llama_tag,
+                model_digest=llama_digest,
+                budget=budget,
+                load=execution_context.get("llama_load"),
+                unload=execution_context.get("llama_unload"),
+            )
+            llama_phase = run_single_fallback_phase(
+                primary_ledger,
+                boundary,
+                model_tag=llama_tag,
+                model_digest=llama_digest,
+                max_calls=1,
+                capture_root=execution_context.get("llama_capture_root") or execution_context.get("capture_root"),
+                load=boundary.load,
+                unload=boundary.unload,
+                budget=budget,
+            )
     result["llama_phase"] = llama_phase
     result["primary_ledger"] = primary_ledger
     result["operation_budget"] = budget.snapshot() if budget is not None and hasattr(budget, "snapshot") else None

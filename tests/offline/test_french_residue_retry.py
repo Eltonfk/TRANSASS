@@ -70,6 +70,18 @@ def test_evidence_disabled_for_english_and_unknown():
     assert engine.source_residue_evidence(text, "alemão")["count"] == 0
 
 
+def test_french_dialogue_is_not_classified_as_romaji():
+    line = SimpleNamespace(text="Je ne trouve pas.", style="Default", name="", effect="")
+    classification, reason, _confidence = engine.classify_event(
+        line,
+        "Je ne trouve pas.",
+        {"style_hypotheses": {}},
+        set(),
+        source_language="francês",
+    )
+    assert classification == "MAIN_DIALOGUE", reason
+
+
 # ---------------------------------------------------------------------------
 # Short-fragment classifier feeds the retry path
 # ---------------------------------------------------------------------------
@@ -100,6 +112,25 @@ def test_classify_legit_portuguese_translation_not_flagged():
         _event(source), output, {}, None, source_language="francês")
     assert assessment["status"] in {NOT_SHORT_ENGLISH, SHORT_ENGLISH_POSSIBLE}
     assert assessment["retry_eligible"] is False
+
+
+def test_classify_pt_br_sports_loan_phrase_not_high_confidence_residue():
+    assessment = classify_short_english_fragment(
+        _event("- Un home run !"),
+        "- Um home run !",
+        {}, None, source_language="francês",
+    )
+    assert assessment["status"] != SHORT_ENGLISH_HIGH_CONFIDENCE
+    assert assessment["retry_eligible"] is False
+    assert "accepted_pt_br_loan:home run" in assessment["evidence"]
+
+
+def test_classify_standalone_run_remains_detectable():
+    assessment = classify_short_english_fragment(
+        _event("Run!"), "Run!", {}, None, source_language="inglês",
+    )
+    assert assessment["status"] == SHORT_ENGLISH_HIGH_CONFIDENCE
+    assert assessment["retry_eligible"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -315,7 +315,11 @@ def extract_romanization_gloss(text: str, english_dictionary: set[str] | None = 
     return base, gloss
 
 
-def probable_romaji(text: str, english_dictionary: set[str] | None = None) -> tuple[bool, float, str]:
+def probable_romaji(
+    text: str,
+    english_dictionary: set[str] | None = None,
+    source_language: str = "inglês",
+) -> tuple[bool, float, str]:
     """Return a high-confidence *possible* romaji/song signal.
 
     The detector deliberately errs toward preservation.  It combines unknown
@@ -323,6 +327,8 @@ def probable_romaji(text: str, english_dictionary: set[str] | None = None) -> tu
     patterns; a single unknown word is never enough.  No anime/title-specific
     rule is used here.
     """
+    if canonical_source_language(source_language) != "english":
+        return False, 0.0, "non-English source language"
     plain = TAG_RE.sub("", text).replace(r"\N", " ").strip()
     words = [word.lower() for word in WORD_RE.findall(plain)]
     if len(words) < 3 or not plain or not all(word.isascii() for word in words):
@@ -345,13 +351,21 @@ def probable_romaji(text: str, english_dictionary: set[str] | None = None) -> tu
     return True, round(confidence, 4), f"unknown_ratio={unknown_ratio:.2f}; markers={marker_hits}; syllable_pattern={syllable_hit}"
 
 
-def classify_event(line: Any, clean_text: str, profile: dict[str, Any], english_dictionary: set[str] | None = None) -> tuple[str, str, float]:
+def classify_event(
+    line: Any,
+    clean_text: str,
+    profile: dict[str, Any],
+    english_dictionary: set[str] | None = None,
+    source_language: str = "inglês",
+) -> tuple[str, str, float]:
     if not clean_text.strip():
         return "TECHNICAL_OR_EMPTY", "sem texto linguístico", 1.0
     romanization_gloss = extract_romanization_gloss(clean_text, english_dictionary)
     if romanization_gloss:
         return "ROMANIZATION_GLOSS", "base romanizada preservável + gloss delimitado", 0.96
-    romaji, confidence, reason = probable_romaji(clean_text, english_dictionary)
+    romaji, confidence, reason = probable_romaji(
+        clean_text, english_dictionary, source_language=source_language,
+    )
     if romaji:
         return "ROMAJI_PRESERVED", "possível romaji/letra japonesa; preservação conservadora: " + reason, confidence
     tokens = _style_tokens(line)
@@ -590,7 +604,12 @@ def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
     }
 
 
-def load_events(path: Path, glossary: dict[str, str], profile: dict[str, Any] | None = None) -> tuple[pysubs2.SSAFile, list[Event], dict[str, Any]]:
+def load_events(
+    path: Path,
+    glossary: dict[str, str],
+    profile: dict[str, Any] | None = None,
+    source_language: str = "inglês",
+) -> tuple[pysubs2.SSAFile, list[Event], dict[str, Any]]:
     subs = pysubs2.load(str(path))
     english_dictionary = load_english_dictionary("/usr/share/dict/american-english")
     preliminary: list[Event] = []
@@ -616,7 +635,10 @@ def load_events(path: Path, glossary: dict[str, str], profile: dict[str, Any] | 
     # Classify with the actual source fields while keeping pysubs2 objects out
     # of the serializable Event representation.
     for event, line in zip(preliminary, subs):
-        event.classification, event.classification_reason, event.screen_confidence = classify_event(line, event.clean_text, profile, english_dictionary)
+        event.classification, event.classification_reason, event.screen_confidence = classify_event(
+            line, event.clean_text, profile, english_dictionary,
+            source_language=source_language,
+        )
     propagate_romaji_blocks(preliminary, english_dictionary)
     song_info = classify_song_blocks(preliminary)
     profile["song_blocks"] = song_info["blocks"]
@@ -1482,10 +1504,10 @@ class Client:
         if phase.startswith("retry"):
             retry_instruction = (
                 " Esta é uma tentativa de correção. Reavalie somente o TARGET; "
-                "não copie contexto. A resposta anterior permaneceu total ou parcialmente em inglês; "
+                "não copie contexto. A resposta anterior permaneceu total ou parcialmente no idioma de origem; "
                 "traduza a fala para português brasileiro natural agora. Preserve somente nomes próprios, "
                 "siglas, códigos, romanizações e termos protegidos quando forem realmente não traduzíveis. "
-                "Não devolva a frase inglesa integral. Preserve romanizações/onomatopeias quando não houver tradução confiável."
+                "Não devolva a frase do idioma de origem integral. Preserve romanizações/onomatopeias quando não houver tradução confiável."
             )
         if phase == "retry_simplified":
             # A compact second retry avoids the model copying a difficult
@@ -1493,8 +1515,9 @@ class Client:
             # the same strict schema and event ID, but removes all optional
             # prose/context so the request is unambiguously a translation.
             prompt = (
-                f"Você é um tradutor de legendas. Traduza o TARGET de {self.config.source_language} para português brasileiro natural. "
-                f"A resposta anterior permaneceu em {self.config.source_language}; não repita o texto-fonte. "
+                "Você é um tradutor de legendas. Traduza o TARGET para português brasileiro natural "
+                "(idioma de origem detectado automaticamente). "
+                "A resposta anterior permaneceu no idioma de origem; não repita o texto-fonte. "
                 "Preserve somente nomes próprios, siglas, códigos e termos explicitamente protegidos. "
                 "Responda somente JSON válido, exatamente com o id solicitado.\n\n"
                 f"TARGET: {json.dumps(targets, ensure_ascii=False)}\n"
@@ -1503,7 +1526,8 @@ class Client:
             )
         else:
             prompt = (
-            f"Traduza somente os itens TARGET de {self.config.source_language} para português do Brasil. "
+            "Traduza somente os itens TARGET para português do Brasil "
+            "(idioma de origem detectado automaticamente — inglês, francês, japonês etc.). "
             "Cada evento completo é uma unidade semântica. CONTEXT existe apenas para "
             "entender sujeito, tom, referência e continuidade; nunca copie ou traduza "
             "conteúdo do contexto para outro id. Não produza explicações. Não produza "
@@ -1512,7 +1536,7 @@ class Client:
             "Nomes, romanizações, onomatopeias e termos do glossário devem ser preservados quando não houver tradução confiável. "
             "Quando o TARGET for um gloss de romanização entre colchetes, traduza somente o gloss e preserve a base romanizada fora dele; não inclua os colchetes na resposta. "
             "Nesse caso, o gloss curto também deve ser traduzido (por exemplo, Attack para Ataque e Warm para Quente), enquanto a base permanece idêntica. "
-            f"Nunca devolva o {self.config.source_language} integral quando houver tradução possível. "
+            "Nunca devolva o texto-fonte integral quando houver tradução possível. "
             "Use o contexto para traduzir o sentido idiomático em português brasileiro natural, inclusive em telefonia, comida, jogos e sorteios; evite tradução palavra por palavra quando a situação exigir uma expressão natural. "
             "Expressões coloquiais, intensificadores e idioms devem transmitir função pragmática e sentido, não uma tradução lexical palavra por palavra. "
             "Quando have had enough expressar limite ou saturação, use uma formulação idiomática de limite em PT-BR (já chega de.../não aguento mais...), e não uma quantidade consumida ou uma construção literal como 'cheguei do limite'. "
@@ -1980,6 +2004,28 @@ class Runner:
         except Exception as exc:
             if getattr(exc, "durability_stop", False):
                 raise
+            # B: rate limit (429) — NÃO retentar.  O Gemini/Ollama com quota
+            # excedida retorna 429; retries agressivos só pioram o rate limit.
+            # Retorna RATE_LIMIT_429 que o _process_units trata como parada.
+            if "429" in str(exc) or "Too Many Requests" in str(exc):
+                if self.calls:
+                    observation = self.calls[-1]
+                    observation.update({
+                        "parent_call_id": effective_parent_call_id,
+                        "retry_depth": retry_depth,
+                        "episode": self.config.episode_title,
+                        "batch_id": f"batch-{self._call_sequence}",
+                        "call_type": "PRIMARY_TRANSLATION" if phase == "initial" else ("LOCALIZED_RETRY" if phase.startswith("retry") else "VALIDATION_RETRY"),
+                        "attempt": self.retry_budget.consumed if retry_call else 0,
+                        "retry_reason": reason,
+                        "reason": reason,
+                        "validator_trigger": True,
+                        "success": False,
+                        "rate_limited": True,
+                    })
+                    self._last_call_id = observation.get("call_id")
+                    self._call_sequence += 1
+                return set(), ["RATE_LIMIT_429"]
             if self.calls:
                 observation = self.calls[-1]
                 observation.update({
@@ -2014,7 +2060,7 @@ class Runner:
             attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
         )
         current_call_id = self._last_call_id
-        if any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT")):
+        if any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")):
             failure = "; ".join(issues)
             for unit in units:
                 for event in unit.events:

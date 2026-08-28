@@ -78,6 +78,13 @@ SHORT_ENGLISH_LEXICON = set(ENGLISH_COMMON) | {
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten", "eleven", "twelve", "hundred", "thousand",
 }
+# Established Portuguese-Brazilian sports loanword.  It must not make the
+# generic detector reject an otherwise translated line merely because the
+# phrase contains the command word ``run``.  Keep this list phrase-based:
+# standalone ``run`` remains eligible for detection.
+SHORT_ENGLISH_PT_BR_LOAN_PHRASES = {
+    ("home", "run"): "home run",
+}
 SHORT_COMMAND_WORDS = {
     "abort", "come", "fire", "go", "help", "hold", "leave", "look", "move",
     "run", "stay", "stop", "take", "turn", "wait",
@@ -142,7 +149,18 @@ def _code_only(analysis: dict[str, Any]) -> bool:
 def _lexical_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
     hits: list[str] = []
     prefix_hits: list[str] = []
-    for word in analysis["words"]:
+    words = analysis["words"]
+    ignored_indexes: set[int] = set()
+    accepted_loan_phrases: list[str] = []
+    for phrase, display in SHORT_ENGLISH_PT_BR_LOAN_PHRASES.items():
+        width = len(phrase)
+        for index in range(len(words) - width + 1):
+            if tuple(words[index:index + width]) == phrase:
+                ignored_indexes.update(range(index, index + width))
+                accepted_loan_phrases.append(display)
+    for index, word in enumerate(words):
+        if index in ignored_indexes:
+            continue
         if word in SHORT_ENGLISH_LEXICON:
             hits.append(word)
             continue
@@ -157,6 +175,7 @@ def _lexical_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
         "command_hits": [word for word in hits if word in SHORT_COMMAND_WORDS],
         "operational_hits": [word for word in hits if word in SHORT_OPERATIONAL_WORDS],
         "number_word_hits": [word for word in hits if word in SHORT_NUMBER_WORDS],
+        "accepted_loan_phrases": sorted(set(accepted_loan_phrases)),
     }
 
 
@@ -237,6 +256,11 @@ def classify_short_english_fragment(
         result["status"] = SHORT_ENGLISH_POSSIBLE
         result["evidence"].append("single_titlecase_name_or_term_candidate")
         return result
+    if evidence["accepted_loan_phrases"]:
+        result["evidence"].extend(
+            f"accepted_pt_br_loan:{phrase}"
+            for phrase in evidence["accepted_loan_phrases"]
+        )
     high = False
     if same_lexical or overlap >= 0.60:
         high = any((
