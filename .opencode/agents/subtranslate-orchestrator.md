@@ -641,6 +641,35 @@ um HUMAN_GATE de implementação. `subtranslate-doc-sync` só será delegado dep
 de uma transição documental B5 explicitamente projetada e autorizada. B4 nunca
 deve ser reexecutado, e B5-B7 continuam não autorizados nesta rota.
 
+### AUTO03D_TRACK2_LIVE_CAPTURED_PREFLIGHT_RECOGNITION
+
+Avalie quando o canonical contiver `auto03d_track2_live_captured_decision_r1`
+com `decision=APPROVED_PROCEED_WITH_LIVE_CAPTURED` e
+`next_action=TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY_REQUIRED`. Exija tambem:
+
+```text
+state=V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_PREFLIGHT_READ_ONLY_REQUIRED
+latest_decision=TRACK2_LIVE_CAPTURED_DECISION_APPROVED_PREFLIGHT_READ_ONLY_REQUIRED
+next_action=TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY_REQUIRED
+```
+
+Quando convergir, route uma unica vez para
+`SAFE_PLAN_TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY` (read-only; nenhuma
+execucao). O preflight inspeciona sem UNKNOWN: caminho web V2.3.8 conectado
+(state contem WEB_PATH_CONNECTED), correcao ASS/reporting commitada (0c1ccdf),
+candidata git limpa, sem B5-B7 evidence, accounting estavel
+(model_calls=4, retry=0). Descricao do que a captura live realizaria (alvo
+subtitulo/episodio definido em execucao futura separada): capturar a saida da
+retranslacao web ao vivo para o alvo. Nenhuma model call, transporte, runtime
+write, reserva, attempt, backup, retry, B5, B6 ou B7 neste preflight.
+
+`READY` somente com tudo provado ->
+`NEXT_GATE=AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-R1` (execucao futura; exige
+HUMAN_GATE separado com toolchain de execucao definido). Se faltar qualquer
+binding de inspecao -> BLOCKED + blocker objetivo + `NEXT_GATE=STOP`. Em ambos:
+nenhuma model call, transporte, runtime write, reserva, attempt, backup, retry,
+B5, B6 ou B7. `SAFE_PLAN -> DONE` sem transicao de execucao.
+
 ### AUTO03C_R4_CLOSURE_CANONICALIZATION_RECOGNITION
 
 Avalie antes de qualquer regra AUTO-03C anterior. Reconheca
