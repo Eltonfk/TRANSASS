@@ -74,6 +74,36 @@ class CanonicalTransitionTests(unittest.TestCase):
         self.assertFalse(failure["model_call_executed"])
         self.assertEqual(after["next_action"], module.FAILURE_NEXT)
 
+    def test_record_track2_live_captured_decision_is_additive_and_disables_side_effects(self):
+        before = {"state": module.TRACK2_DECISION_STATE, "latest_decision": "old",
+                  "next_action": module.TRACK2_DECISION_NEXT, "history": {"keep": True}}
+        after, title, _ = module.transition("record-track2-live-captured-decision", before, probe())
+        self.assertEqual(after["history"], before["history"])
+        self.assertEqual(after["state"], module.TRACK2_DECISION_AFTER_STATE)
+        self.assertEqual(after["next_action"], module.TRACK2_DECISION_AFTER_NEXT)
+        decision = after[module.TRACK2_DECISION_KEY]
+        self.assertEqual(decision["decision"], "APPROVED_PROCEED_WITH_LIVE_CAPTURED")
+        self.assertFalse(decision["side_effects_performed"])
+        self.assertFalse(decision["pipeline_model_call"])
+        self.assertFalse(decision["external_transport"])
+        self.assertFalse(decision["runtime_write"])
+        self.assertFalse(decision["b5_authorized"])
+        self.assertFalse(decision["b6_authorized"])
+        self.assertFalse(decision["b7_authorized"])
+        self.assertFalse(decision["future_side_effects_authorized"])
+        self.assertIn("TRACK2-LIVE-CAPTURED-DECISION", title)
+
+    def test_record_track2_live_captured_decision_wrong_prestate_is_fail_closed(self):
+        with self.assertRaisesRegex(module.TransitionBlocked, "PRESTATE_MISMATCH"):
+            module.transition("record-track2-live-captured-decision",
+                              {"state": "wrong", "next_action": "wrong"}, probe())
+
+    def test_record_track2_live_captured_decision_duplicate_is_fail_closed(self):
+        before = {"state": module.TRACK2_DECISION_STATE, "next_action": module.TRACK2_DECISION_NEXT,
+                  module.TRACK2_DECISION_KEY: {"existing": True}}
+        with self.assertRaisesRegex(module.TransitionBlocked, "ALREADY_EXISTS"):
+            module.transition("record-track2-live-captured-decision", before, probe())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

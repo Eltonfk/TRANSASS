@@ -23,6 +23,7 @@ permission:
     "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-authorization": allow
     "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-post-execution": allow
     "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-failure": allow
+    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-track2-live-captured-decision": allow
     "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan": allow
     "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --apply": allow
   task: deny

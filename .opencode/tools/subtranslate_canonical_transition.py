@@ -46,6 +46,11 @@ OBSERVATION_KEY = "auto03d_b4_recovery_call_execution_observed_r2"
 FAILURE_KEY = "auto03d_b4_recovery_call_pretransport_failure_r2"
 FAILURE_STATE = "SUBTRANSLATE_V238_E07_R6C_B4_RECOVERY_CALL_PRETRANSPORT_FAIL_STOP_TOOLCHAIN_CORRECTION_REQUIRED"
 FAILURE_NEXT = "B4_RECOVERY_CALL_TOOLCHAIN_CONTRACT_CORRECTION_REQUIRED"
+TRACK2_DECISION_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_CANARY_PREFLIGHT_BLOCKED_STALE_RESOLVED"
+TRACK2_DECISION_NEXT = "TRACK2_LIVE_CAPTURED_GATE_DECISION_REQUIRED"
+TRACK2_DECISION_KEY = "auto03d_track2_live_captured_decision_r1"
+TRACK2_DECISION_AFTER_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_PREFLIGHT_READ_ONLY_REQUIRED"
+TRACK2_DECISION_AFTER_NEXT = "TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY_REQUIRED"
 
 
 class TransitionBlocked(RuntimeError):
@@ -203,6 +208,27 @@ def transition(mode: str, before: dict[str, Any], probe: dict[str, Any]) -> tupl
         after["next_action"] = FAILURE_NEXT
         title = "AUTO-03D-B4-RECOVERY-CALL-PRETRANSPORT-FAILURE-R2"
         summary = "FAIL_STOP pre-transporte registrado; autorizacao consumida; toolchain correction obrigatoria."
+    elif mode == "record-track2-live-captured-decision":
+        if before.get("state") != TRACK2_DECISION_STATE or before.get("next_action") != TRACK2_DECISION_NEXT:
+            raise TransitionBlocked("TRACK2_DECISION_PRESTATE_MISMATCH")
+        key = TRACK2_DECISION_KEY
+        if key in before:
+            raise TransitionBlocked("TRACK2_DECISION_ALREADY_EXISTS")
+        after[key] = {
+            "mode": "LIVE_CAPTURED_DECISION", "recorded_at": now,
+            "snapshot_fingerprint": fingerprint,
+            "decision": "APPROVED_PROCEED_WITH_LIVE_CAPTURED",
+            "side_effects_performed": False,
+            "pipeline_model_call": False, "external_transport": False,
+            "runtime_write": False, "production_write": False, "data_delete": False,
+            "b5_authorized": False, "b6_authorized": False, "b7_authorized": False,
+            "future_side_effects_authorized": False,
+        }
+        after["state"] = TRACK2_DECISION_AFTER_STATE
+        after["latest_decision"] = "TRACK2_LIVE_CAPTURED_DECISION_APPROVED_PREFLIGHT_READ_ONLY_REQUIRED"
+        after["next_action"] = TRACK2_DECISION_AFTER_NEXT
+        title = "AUTO-03D-TRACK2-LIVE-CAPTURED-DECISION-R1"
+        summary = "Decisao TRACK2_LIVE_CAPTURED aprovada; preflight read-only da captura live requerido; nenhum side effect autorizado."
     else:
         raise TransitionBlocked("UNKNOWN_TRANSITION")
     return after, title, summary
@@ -268,7 +294,8 @@ def apply(mode: str) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True,
-                        choices=("record-preflight", "record-authorization", "record-post-execution", "record-failure"))
+                        choices=("record-preflight", "record-authorization", "record-post-execution", "record-failure",
+                                 "record-track2-live-captured-decision"))
     args = parser.parse_args(argv)
     try:
         print(json.dumps(apply(args.mode), sort_keys=True, ensure_ascii=False)); return 0
