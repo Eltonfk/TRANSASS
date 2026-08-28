@@ -54,6 +54,9 @@ TRACK2_DECISION_AFTER_NEXT = "TRACK2_LIVE_CAPTURED_PREFLIGHT_READ_ONLY_REQUIRED"
 TRACK2_EXEC_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_REQUIRED"
 TRACK2_EXEC_NEXT = "TRACK2_LIVE_CAPTURED_EXECUTION_REQUIRED"
 TRACK2_EXEC_KEY = "auto03d_track2_live_captured_execution_r1"
+TRACK2_EXEC_COMPLETED_STATE = "V249_TRACK2_FASE12_IMPLEMENTED_V238_WEB_PATH_CONNECTED_LIVE_CAPTURED_DECISION_APPROVED_EXECUTION_COMPLETED"
+TRACK2_EXEC_COMPLETED_NEXT = "TRACK2_LIVE_CAPTURED_EXECUTION_COMPLETED"
+TRACK2_EXEC_COMPLETED_KEY = "auto03d_track2_live_captured_execution_completed_r1"
 
 
 class TransitionBlocked(RuntimeError):
@@ -253,6 +256,29 @@ def transition(mode: str, before: dict[str, Any], probe: dict[str, Any]) -> tupl
         after["next_action"] = TRACK2_EXEC_NEXT
         title = "AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-REQUIRED-R1"
         summary = "Execucao da captura live TRACK2 requerida; executor materializado; execucao exige HUMAN_GATE com AUTORIZAR."
+    elif mode == "record-track2-live-captured-execution-completed":
+        if before.get("state") != TRACK2_EXEC_STATE or before.get("next_action") != TRACK2_EXEC_NEXT:
+            raise TransitionBlocked("TRACK2_EXEC_COMPLETED_PRESTATE_MISMATCH")
+        key = TRACK2_EXEC_COMPLETED_KEY
+        if key in before:
+            raise TransitionBlocked("TRACK2_EXEC_COMPLETED_ALREADY_EXISTS")
+        after[key] = {
+            "mode": "LIVE_CAPTURED_EXECUTION_COMPLETED", "recorded_at": now,
+            "snapshot_fingerprint": fingerprint,
+            "decision": "APPROVED_PROCEED_WITH_LIVE_CAPTURED",
+            "side_effects_performed": True,
+            "pipeline_model_call": True, "external_transport": True,
+            "runtime_write": True, "production_write": False, "data_delete": False,
+            "b5_authorized": False, "b6_authorized": False, "b7_authorized": False,
+            "future_side_effects_authorized": False,
+            "captured_response_reference": "1bf67506-4590-43ab-a690-1c7a734bd9cb",
+            "output_path": "/shows/Paranoia Agent/Season 1/Paranoia Agent - S01E08 - Happy Family Planning WEBDL-1080p.pt-BR.ass",
+        }
+        after["state"] = TRACK2_EXEC_COMPLETED_STATE
+        after["latest_decision"] = "TRACK2_LIVE_CAPTURED_EXECUTION_COMPLETED"
+        after["next_action"] = TRACK2_EXEC_COMPLETED_NEXT
+        title = "AUTO-03D-TRACK2-LIVE-CAPTURED-EXECUTION-COMPLETED-R1"
+        summary = "Captura live TRACK2 V2.3.8 executada (1 call, 0 retry); resposta capturada; saida em /shows."
     else:
         raise TransitionBlocked("UNKNOWN_TRANSITION")
     return after, title, summary
@@ -319,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True,
                         choices=("record-preflight", "record-authorization", "record-post-execution", "record-failure",
-                                 "record-track2-live-captured-decision", "record-track2-live-captured-execution-required"))
+                                 "record-track2-live-captured-decision", "record-track2-live-captured-execution-required",
+                                 "record-track2-live-captured-execution-completed"))
     args = parser.parse_args(argv)
     try:
         print(json.dumps(apply(args.mode), sort_keys=True, ensure_ascii=False)); return 0
