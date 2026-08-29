@@ -1,6 +1,6 @@
 services:
   transass:
-    image: ${SUBTRANSLATE_IMAGE:-subtranslate:v2.4.0}
+    image: ${SUBTRANSLATE_IMAGE:-subtranslate:v2.3.8}
     container_name: transass
     restart: unless-stopped
     init: true
