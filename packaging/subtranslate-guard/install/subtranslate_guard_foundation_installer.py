@@ -186,7 +186,7 @@ FOUNDATION_RELEASE_CONTRACT: dict[str, dict[str, str]] = {
     "packaging/subtranslate-guard/systemd/home-palhacinho-codex\\x2dprojects-anime\\x2dsubtitle\\x2dtranslator\\x2dreview-runtime\\x2devidence-V238_E07_R6C_B4_RECOVERY.mount": {"git_blob_oid": "cbceb95963299c844eebbea8fdc363a1fa67896d", "sha256": "fc477c093d8bdf052e35132b50fd0a2b22c628374ca06d1f38b4bff54ed97a88", "role": "mediation_mount"},
     "packaging/subtranslate-guard/sudoers/subtranslate-guard-arm": {"git_blob_oid": "386e75710d66342515c0f11f9ca1a6b761a8a9fb", "sha256": "7685fc71d5ce5384ec9bf0abbb3ef0112f6f78f4e37ec4874a8a5a6934c0548d", "role": "sudoers_policy"},
     "packaging/subtranslate-guard/opencode/subtranslate_recovery_apply_once.ts": {"git_blob_oid": "92776a0e10b61d33021ee910a114651175a9cf21", "sha256": "ddfdb24b1047522bf750174d9e70364ab8d34494608d4f10c791a6c7dbc89d7c", "role": "structured_tool"},
-    "packaging/subtranslate-guard/manifests/system-external-dependencies.json": {"git_blob_oid": "094cb740a54d05eb8a9e8cabe708681b14814265", "sha256": "3393b7fbde1e0132cc48bf7e740d645121919b86ad84321bd59f2e2ed611b8c8", "role": "system_external_dependency_set"},
+    "packaging/subtranslate-guard/manifests/system-external-dependencies.json": {"git_blob_oid": "8a0cd37a8d1c05383839e51360460fc3b3a4b6a3", "sha256": "a081858971e9e9ab17e8d057bd15d7020ed2299b200003f00c30042d00ee9508", "role": "system_external_dependency_set"},
     "packaging/subtranslate-guard/manifests/interpreter.identity": {"git_blob_oid": "a01d81c2222ba729918be5bf8261ac5d1d885aae", "sha256": "251ccfcd2e674f7179aece078f9d69c47f168905552bf747c2310c2a41b75fad", "role": "interpreter"},
 }
 
