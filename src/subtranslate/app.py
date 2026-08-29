@@ -94,16 +94,24 @@ def _pipeline() -> str:
 
 
 def _effective_pipeline() -> str:
-    """C4: pipeline efetivo — transport_config.json primeiro, env como fallback."""
+    """C4: pipeline efetivo — transport_config.json primeiro, env como fallback.
+
+    Quando o arquivo de configuração não existe, o valor da variável de
+    ambiente ``TRANSLATOR_PIPELINE`` é usado diretamente.  O DEFAULT_CONFIG
+    do módulo ``transport_config_store`` define ``legacy`` como padrão e
+    sobrescreveria a variável de ambiente se o arquivo não fosse verificado
+    antes.
+    """
     from transport_config_store import TransportConfigError, load_transport_config
 
-    try:
-        config = load_transport_config(TRANSPORT_CONFIG_PATH)
-        pipeline = str(config.get("pipeline") or "").strip().lower()
-        if pipeline:
-            return pipeline
-    except TransportConfigError:
-        pass
+    if TRANSPORT_CONFIG_PATH.is_file():
+        try:
+            config = load_transport_config(TRANSPORT_CONFIG_PATH)
+            pipeline = str(config.get("pipeline") or "").strip().lower()
+            if pipeline:
+                return pipeline
+        except TransportConfigError:
+            pass
     return _pipeline()
 
 
