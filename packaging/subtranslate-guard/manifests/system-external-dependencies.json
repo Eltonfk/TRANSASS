@@ -20,14 +20,14 @@
     {
       "package_manager": "dpkg",
       "package_name": "libssl3t64",
-      "package_version": "3.0.13-0ubuntu3.15",
+      "package_version": "3.0.13-0ubuntu3.12",
       "critical_resolved_paths": [
         "/usr/lib/x86_64-linux-gnu/libssl.so.3",
         "/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
       ],
       "critical_sha256": {
-        "/usr/lib/x86_64-linux-gnu/libssl.so.3": "8e49cebd373d90b55f3626da71dd97fe8e95c68dc4c064d8962b27907690736e",
-        "/usr/lib/x86_64-linux-gnu/libcrypto.so.3": "6a66c3ba6b3749aacc9497973fff00f6ba61c703ba7015d0d7ab3fd9510974b6"
+        "/usr/lib/x86_64-linux-gnu/libssl.so.3": "55869549f4c7d7221e311121696f135390a7172755459ad04aef831f855eb214",
+        "/usr/lib/x86_64-linux-gnu/libcrypto.so.3": "1451aceec262c3338052fa77542eb971d4ba311c6bf12d9aa70d0b56aca942f9"
       },
       "expected_root_control": true,
       "expected_non_writability": true,
