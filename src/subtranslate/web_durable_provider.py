@@ -61,6 +61,9 @@ class WebDurableResponseProvider(DurableResponseProvider):
     ):
         provider = str((transport_config.get("primary") or {}).get("provider", "ollama")).lower()
         transport_semantics = "OLLAMA_MODEL" if provider == "ollama" else "NETWORK_NON_MODEL"
+        # Atribuir _transport_config ANTES de _build_client(), que depende dele.
+        self._transport_config = transport_config
+        self._api_key = api_key
         # O client DEVE ser injetado no super().__init__: o respond() em
         # LIVE_CAPTURED usa self.client (v238_response_provider.py:183-184);
         # sem ele, V238_LIVE_CLIENT_NOT_INJECTED.
@@ -68,8 +71,6 @@ class WebDurableResponseProvider(DurableResponseProvider):
             mode, capture_root=capture_root, transport_semantics=transport_semantics,
             client=self._build_client(),
         )
-        self._transport_config = transport_config
-        self._api_key = api_key
 
     def _build_client(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
         # Gemini profile: delay entre chamadas para respeitar 15 RPM
