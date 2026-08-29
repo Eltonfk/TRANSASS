@@ -322,9 +322,10 @@ def _render_event(
         counters["temporal_transform"] += 1
         temporal, trace = preserve_temporal_transform_envelope(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
         if temporal is None:
-            if callable(group_probe):
-                return base, {"event_id": event_id, "path": "REVIEWED_TEMPORAL_BASE_PRESERVATION", "trace": trace}
-            raise ResponseProviderError("V238_TEMPORAL_TRANSFORM_UNPROVEN")
+            # Providers sem v238_group_key (ex: Ollama) não têm como preservar
+            # transformações temporais complexas — fallback seguro para base V226
+            # em vez de falhar com V238_TEMPORAL_TRANSFORM_UNPROVEN.
+            return base, {"event_id": event_id, "path": "UNPROVEN_TEMPORAL_BASE_FALLBACK", "trace": trace}
         details.update({"path": "TEMPORAL_TRANSFORM", "trace": trace})
         return temporal, details
 
