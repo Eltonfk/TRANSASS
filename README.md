@@ -65,6 +65,8 @@ docker compose -f deploy/compose.yaml up -d
 # UI em http://localhost:5050
 ```
 
+> **Nota:** o clone baixa ~74M (`.opencode` 64M + `docs/` + `tests/` + `packaging/` para CI), mas o `docker build` só copia 8 itens (`src/`, `deploy/`, `resources/glossaries`, `requirements.lock`, `.env.example`). A imagem final tem 324M.
+
 ### Sem Docker (desenvolvimento)
 
 ```sh
