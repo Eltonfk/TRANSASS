@@ -166,6 +166,34 @@ def restore_omitted_leading_style_tags(original: str, translated: str) -> str:
     return expected + translated
 
 
+def fix_batata_to_bastao(translated: str) -> str:
+    """Corrige tradução incorreta de 'bat' (bastão) como 'batata'.
+
+    O Qwen 9B confunde 'bat' (taco/bastão) com 'batata' em contexto de anime.
+    Esta função detecta padrões como 'garoto com a batata' e corrige para
+    'garoto com o bastão'.
+    """
+    # Padrões que indicam contexto do personagem Shonen Bat
+    # Nota: troca artigo "a" para "o" pois "bastão" é masculino
+    patterns_with_article = [
+        (r"(garoto\s+com\s+)a\s+batata", r"\1o bastão"),
+        (r"(o\s+garoto\s+com\s+)a\s+batata", r"\1o bastão"),
+        (r"(menino\s+com\s+)a\s+batata", r"\1o bastão"),
+        (r"(agora\s+famoso\s+garoto\s+com\s+)a\s+batata", r"\1o bastão"),
+    ]
+    
+    # Padrões para outros contextos de 'bat' traduzido como 'batata'
+    patterns_general = [
+        (r"\bbatata\b(?=.*(?:shonen|bat|garoto|menino))", "bastão"),
+    ]
+    
+    result = translated
+    for pattern, replacement in patterns_with_article + patterns_general:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    
+    return result
+
+
 def visible_text(text: str) -> str:
     """Remove marcadores técnicos para comparar somente o conteúdo traduzível."""
     return PLACEHOLDER_PATTERN.sub("", text)
@@ -876,8 +904,8 @@ def translate_batch(
         "expressões idiomáticas, gírias e frases feitas devem virar o equivalente natural "
         "em português, não uma tradução ao pé da letra. Tom coloquial e natural. Não "
         "traduza nomes próprios. Traduza TODAS as falas, inclusive interjeições curtas, "
-        "provérbios e frases entre aspas — nada deve ficar em inglês ou japonês no "
-        "resultado final, a menos que seja nome próprio.\n"
+        "provérbios e frases entre aspas — nada deve ficar no idioma de origem (inglês, "
+        "japonês, francês, etc.) no resultado final, a menos que seja nome próprio.\n"
         f"{context_line}"
         f"{input_instruction}"
         "Os tokens no formato §T0§, §T1§, §N§ etc. são marcadores técnicos — devem "
@@ -905,9 +933,13 @@ def translate_batch(
     repaired = []
     for index, (orig, trans) in enumerate(zip(lines, translated), start=1):
         restored = restore_omitted_leading_style_tags(orig, trans)
-        if restored != trans:
+        # Corrige tradução incorreta de 'bat' (bastão) como 'batata'
+        fixed = fix_batata_to_bastao(restored)
+        if fixed != restored:
+            print(f"   [correção] 'batata' → 'bastão' na linha {index}")
+        if fixed != trans:
             print(f"   [aviso] tag de estilo inicial restaurada deterministicamente na linha {index}")
-        repaired.append(restored)
+        repaired.append(fixed)
 
     for orig, trans in zip(lines, repaired):
         if not placeholders_intact(orig, trans):

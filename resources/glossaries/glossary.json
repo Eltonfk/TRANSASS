@@ -6,10 +6,20 @@
       "-san": "-san",
       "-chan": "-chan",
       "-kun": "-kun",
-      "-sama": "-sama"
+      "-sama": "-sama",
+      "bâton": "bastão"
     }
   },
   "series": {
+    "Paranoia Agent": {
+      "terms": {
+        "Shonen Bat": "Garoto do Bastão",
+        "bat": "bastão",
+        "bâton": "bastão",
+        "golden bat": "bastão dourado",
+        "garçon au bâton": "garoto com o bastão"
+      }
+    },
     "Nome exato da série": {
       "terms": {
         "Termo original": "Termo preferido em PT-BR"
