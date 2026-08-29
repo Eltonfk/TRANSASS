@@ -9,6 +9,7 @@ Writes are atomic with a timestamped backup of the previous file.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -125,6 +126,11 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
     if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
         raise TransportConfigError("authorized_primary_models inválido")
     model_digest = str(payload.get("model_digest") or "").strip() or None
+    # Auto-gera model_digest a partir de provider+model quando não fornecido.
+    # Evita V238_LIVE_CHECKPOINT_IDENTITY_MISSING:model_digest no pipeline V238.
+    if not model_digest:
+        fingerprint = f"{primary_clean['provider']}|{primary_clean['model']}"
+        model_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
 
     config = {
         "primary": primary_clean,
