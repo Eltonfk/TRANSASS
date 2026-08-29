@@ -550,6 +550,38 @@ def _block_has_french_text(events: list[Event]) -> bool:
     return (french_words / total_words) >= 0.30
 
 
+# Indicadores de inglês comuns (artigos, preposições, conectivos)
+ENGLISH_INDICATORS = {
+    "the", "a", "an",  # artigos
+    "of", "in", "on", "at", "to", "for", "with", "by",  # preposições
+    "and", "or", "but", "if", "when", "while",  # conectivos
+    "is", "are", "was", "were", "be", "been",  # verbos
+    "he", "she", "it", "they", "we", "you", "i",  # pronomes
+    "his", "her", "its", "their", "our", "your", "my",  # possessivos
+    "that", "this", "these", "those",  # demonstrativos
+    "shall", "will", "would", "could", "should", "might",  # modais
+}
+
+
+def _block_has_english_source_text(events: list[Event]) -> bool:
+    """Detecta se um bloco contém texto em inglês (idioma de origem).
+
+    Verifica se pelo menos 30% das palavras visíveis são indicadores ingleses
+    comuns. Isso impede que traduções inglesas de OP/ED (ex: "OP English")
+    sejam preservadas em vez de traduzidas para pt-BR.
+    """
+    total_words = 0
+    english_words = 0
+    for event in events:
+        text = event.clean_text.strip()
+        words = [word.lower() for word in WORD_RE.findall(text)]
+        total_words += len(words)
+        english_words += sum(1 for word in words if word in ENGLISH_INDICATORS)
+    if total_words == 0:
+        return False
+    return (english_words / total_words) >= 0.30
+
+
 def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
     """Classify only coherent lyric blocks, never a line by position alone.
 
@@ -607,9 +639,13 @@ def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
         # Bloco com texto em francês (noticiário, narração) NÃO deve ser
         # classificado como música apenas por itálico + temporal_hint.
         has_french = _block_has_french_text(block)
+        # Bloco com texto em inglês (idioma de origem) NÃO deve ser preservado
+        # como letra de música — deve ser traduzido para pt-BR.
+        # Ex: "OP English" com tradução inglesa da OP que precisa ser traduzida.
+        has_english_source = _block_has_english_source_text(block)
         high = bool(
             explicit >= max(1, len(block) // 2)
-            or (coherent and not has_french and (temporal_hint or romanized_rate >= 0.40))
+            or (coherent and not has_french and not has_english_source and (temporal_hint or romanized_rate >= 0.40))
         )
         if high and len(block) >= 3:
             fingerprint = _song_block_fingerprint(block)
