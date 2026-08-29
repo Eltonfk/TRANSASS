@@ -51,6 +51,36 @@ PORTUGUESE_IDENTICAL = {
 }
 SONG_WORDS = {"op", "ed", "opening", "ending", "song", "theme", "lyric", "lyrics", "karaoke", "romaji", "kanji", "insert"}
 VISUAL_STOPWORDS = {"a", "o", "as", "os", "um", "uma", "de", "do", "da", "dos", "das", "e", "em", "por", "para", "com", "no", "na", "nos", "nas", "que"}
+
+# Palavras francesas comuns para detectar texto em francês e não classificá-lo como música.
+# Lista deliberadamente conservadora: inclui apenas artigos, preposições e conectivos
+#高频 que aparecem em noticiários e narração.
+FRENCH_INDICATORS = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "au", "aux",
+    "et", "ou", "mais", "donc", "car", "ni", "or", "puis",
+    "est", "sont", "a", "ont", "été", "être", "avoir",
+    "dans", "sur", "sous", "avec", "pour", "par", "sans", "chez",
+    "que", "qui", "quoi", "dont", "où", "comment", "pourquoi",
+    "je", "tu", "il", "elle", "nous", "vous", "ils", "elles",
+    "me", "te", "se", "lui", "leur", "y", "en",
+    "mon", "ton", "son", "ma", "ta", "sa", "mes", "tes", "ses",
+    "ce", "cette", "ces", "cet", "celui", "celle",
+    "tout", "tous", "toute", "toutes", "autre", "autres",
+    "bien", "mal", "très", "plus", "moins", "aussi",
+    "encore", "déjà", "toujours", "jamais", "souvent",
+    "fait", "faire", "dit", "dire", "va", "aller",
+    "voir", "vu", "prendre", "pris", "donner", "donné",
+    "premier", "première", "deuxième", "dernier", "dernière",
+    "nouveau", "nouvelle", "petit", "petite", "grand", "grande",
+    "bon", "bonne", "mauvais", "mauvaise",
+    "temps", "jour", "jours", "fois", "année", "années",
+    "homme", "femme", "enfant", "monde", "pays", "ville",
+    "eau", "feu", "vent", "pluie", "orage", "typhon",
+    "île", "ville", "montagne", "mer", "océan",
+    "agence", "météorologique", "alerte", "déclenché",
+    "rafales", "km", "heure", "heures", "zone", "zones",
+    "est", "sud", "nord", "ouest",
+}
 CRITICAL_FLAGS = {
     "LINE_BREAK_INSIDE_WORD", "LINE_BREAK_COUNT_MISMATCH", "CONTENT_LOSS",
     "ASS_TAG_MISMATCH", "SEGMENT_ID_MISMATCH", "STRUCTURAL_CONTENT_IN_MODEL_OUTPUT",
@@ -501,6 +531,25 @@ def _song_block_fingerprint(events: list[Event]) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def _block_has_french_text(events: list[Event]) -> bool:
+    """Detecta se um bloco de eventos contém texto em francês.
+
+    Verifica se pelo menos 30% das palavras visíveis são indicadores franceses
+    comuns (artigos, preposições, conectivos). Isso impede que texto em francês
+    (noticiários, narração) seja classificado como letra de música.
+    """
+    total_words = 0
+    french_words = 0
+    for event in events:
+        text = event.clean_text.strip()
+        words = [word.lower() for word in WORD_RE.findall(text)]
+        total_words += len(words)
+        french_words += sum(1 for word in words if word in FRENCH_INDICATORS)
+    if total_words == 0:
+        return False
+    return (french_words / total_words) >= 0.30
+
+
 def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
     """Classify only coherent lyric blocks, never a line by position alone.
 
@@ -555,9 +604,12 @@ def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
         # endings in real releases.  Requiring eight coherent lines for the
         # non-explicit path avoids treating those teasers as songs.
         coherent = len(block) >= 8 and italic_rate >= 0.80 and all(not signal["positioned"] for signal in signals)
+        # Bloco com texto em francês (noticiário, narração) NÃO deve ser
+        # classificado como música apenas por itálico + temporal_hint.
+        has_french = _block_has_french_text(block)
         high = bool(
             explicit >= max(1, len(block) // 2)
-            or (coherent and (temporal_hint or romanized_rate >= 0.40))
+            or (coherent and not has_french and (temporal_hint or romanized_rate >= 0.40))
         )
         if high and len(block) >= 3:
             fingerprint = _song_block_fingerprint(block)

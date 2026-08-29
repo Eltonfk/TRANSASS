@@ -158,3 +158,57 @@ def test_long_detector_english_source_unchanged():
     output = "Switching to search mode right now."
     assert engine.high_confidence_untranslated_dialogue(
         _event(source), source, output, None, None, source_language="inglês") is True
+
+
+# ---------------------------------------------------------------------------
+# _block_has_french_text — detecção de francês para classificação de blocos
+# ---------------------------------------------------------------------------
+
+def _block_event(clean_text: str, idx: int = 0) -> SimpleNamespace:
+    """Cria evento com atributos necessários para _block_has_french_text."""
+    return SimpleNamespace(
+        id=idx, clean_text=clean_text, original_text=clean_text,
+        classification="MAIN_DIALOGUE",
+    )
+
+
+def test_french_block_detected():
+    """Bloco com texto em francês (noticiário) deve ser detectado."""
+    events = [
+        _block_event("La tempête a déjà rejoint l'île d'Izu"),
+        _block_event("Des rafales de 130 km par heure sont signalées"),
+        _block_event("L'agence météorologique a déclenché l'alerte"),
+        _block_event("Les zones côtières sont en alerte maximale"),
+    ]
+    assert engine._block_has_french_text(events) is True
+
+
+def test_english_block_not_detected():
+    """Bloco com texto em inglês NÃO deve ser detectado como francês."""
+    events = [
+        _block_event("The storm has already reached Izu island"),
+        _block_event("Gusts of 130 km per hour are reported"),
+        _block_event("The weather agency has triggered the alert"),
+        _block_event("Coastal zones are on maximum alert"),
+    ]
+    assert engine._block_has_french_text(events) is False
+
+
+def test_portuguese_block_not_detected():
+    """Bloco com texto em português NÃO deve ser detectado como francês."""
+    events = [
+        _block_event("A tempestade já atingiu a ilha de Izu"),
+        _block_event("Rajadas de 130 km por hora são relatadas"),
+        _block_event("A agência meteorológica acionou o alerta"),
+        _block_event("As zonas costeiras estão em alerta máximo"),
+    ]
+    assert engine._block_has_french_text(events) is False
+
+
+def test_french_threshold_not_met():
+    """Bloco com poucos indicadores franceses não deve ser detectado."""
+    events = [
+        _block_event("Bem, eu acho que sim"),
+        _block_event("Talvez seja melhor assim"),
+    ]
+    assert engine._block_has_french_text(events) is False
