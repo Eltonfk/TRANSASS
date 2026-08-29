@@ -16,11 +16,15 @@ from v238_response_provider import DurableResponseProvider
 from transport_providers import transport_from_config
 
 
-def _http_post(url: str, headers: dict[str, str], request: dict[str, Any]) -> bytes:
+def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay: float = 0.0) -> bytes:
     """EXACTLY ONE HTTP POST.  Imported lazily so offline tests never load
-    the requests dependency graph unless a live call is actually made."""
+    the requests dependency graph unless a live call is actually made.
+    delay: seconds to wait before the request (rate limiting for Gemini)."""
+    import time
     import requests
 
+    if delay > 0:
+        time.sleep(delay)
     response = requests.post(url, headers=headers, json=request, timeout=300)
     response.raise_for_status()
     return response.content
@@ -68,6 +72,10 @@ class WebDurableResponseProvider(DurableResponseProvider):
         self._api_key = api_key
 
     def _build_client(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        # Gemini profile: delay entre chamadas para respeitar 15 RPM
+        gemini_profile = self._transport_config.get("gemini_profile") or {}
+        gemini_delay = float(gemini_profile.get("delay_between_calls", 0.5)) if gemini_profile.get("enabled", True) else 0.0
+
         def client(payload: dict) -> dict:
             section = self._select_section(payload)
             section = self._inject_api_key(section)
@@ -79,7 +87,9 @@ class WebDurableResponseProvider(DurableResponseProvider):
             transport = transport_from_config(section, payload)
             chat_payload = self._project_request(payload)
             request = transport.build_request(chat_payload)
-            body = _http_post(transport.endpoint(), transport.headers(), request)
+            # Aplica delay apenas para Gemini (rate limiting)
+            delay = gemini_delay if provider_name == "gemini" else 0.0
+            body = _http_post(transport.endpoint(), transport.headers(), request, delay=delay)
             content = transport.extract_content(body)
             parsed = _decode_model_content(content)
             if isinstance(parsed, dict) and ("ownership_runs" in parsed or "owner_vector" in parsed):

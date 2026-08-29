@@ -28,6 +28,14 @@ DEFAULT_CONFIG = {
     "pipeline": DEFAULT_PIPELINE,
     "authorized_primary_models": ["qwen", "gemini"],
     "model_digest": None,
+    # Gemini profile: otimizações automáticas quando provider=gemini
+    "gemini_profile": {
+        "enabled": True,           # Aplica otimizações automaticamente
+        "batch_size": 16,          # Mais unidades por chamada = menos chamadas
+        "retry_budget": 8,         # Menos retries = economiza quota
+        "delay_between_calls": 0.5, # Delay em segundos entre chamadas (respecta 15 RPM)
+        "model": "gemini-1.5-flash", # Modelo mais barato e rápido
+    },
     "updated_at": None,
 }
 
@@ -71,6 +79,7 @@ def public_transport_config(path: Path) -> dict[str, Any]:
         "pipeline": config.get("pipeline") or DEFAULT_PIPELINE,
         "authorized_primary_models": config.get("authorized_primary_models") or ["qwen"],
         "model_digest": config.get("model_digest"),
+        "gemini_profile": config.get("gemini_profile") or DEFAULT_CONFIG.get("gemini_profile"),
         "updated_at": config.get("updated_at"),
     }
 
@@ -132,6 +141,17 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         fingerprint = f"{primary_clean['provider']}|{primary_clean['model']}"
         model_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
 
+    # Gemini profile: merge com defaults quando provider=gemini
+    gemini_profile = payload.get("gemini_profile") or {}
+    default_gemini = DEFAULT_CONFIG.get("gemini_profile", {})
+    gemini_profile_clean = {
+        "enabled": bool(gemini_profile.get("enabled", default_gemini.get("enabled", True))),
+        "batch_size": max(1, int(gemini_profile.get("batch_size", default_gemini.get("batch_size", 16)))),
+        "retry_budget": max(0, int(gemini_profile.get("retry_budget", default_gemini.get("retry_budget", 8)))),
+        "delay_between_calls": max(0.0, float(gemini_profile.get("delay_between_calls", default_gemini.get("delay_between_calls", 0.5)))),
+        "model": str(gemini_profile.get("model", default_gemini.get("model", "gemini-1.5-flash"))).strip(),
+    }
+
     config = {
         "primary": primary_clean,
         "fallback": fallback_clean,
@@ -140,6 +160,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         "pipeline": pipeline,
         "authorized_primary_models": list(authorized),
         "model_digest": model_digest,
+        "gemini_profile": gemini_profile_clean,
         "updated_at": datetime.now(UTC).isoformat(),
     }
 

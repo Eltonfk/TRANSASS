@@ -957,6 +957,42 @@ def _project_primary_ledger_to_units(primary_ledger: list) -> list:
     return units
 
 
+def _apply_gemini_profile(transport_cfg: dict) -> None:
+    """Aplica otimizações do Gemini profile quando provider=gemini.
+
+    Ajusta automaticamente:
+    - BATCH_SIZE: mais unidades por chamada (menos chamadas totais)
+    - retry_budget: menos retries (economiza quota)
+    - delay entre chamadas: respeita 15 RPM do free tier
+    - model: usa gemini-1.5-flash (mais barato e rápido)
+    """
+    import anime_subtitle_translator as translator
+    primary = transport_cfg.get("primary") or {}
+    provider = str(primary.get("provider", "")).lower()
+    profile = transport_cfg.get("gemini_profile") or {}
+
+    if provider != "gemini" or not profile.get("enabled", True):
+        return
+
+    # Aplica BATCH_SIZE otimizado
+    new_batch = max(1, int(profile.get("batch_size", 16)))
+    translator.BATCH_SIZE = new_batch
+
+    # Aplica model se configurado (permite override via profile)
+    gemini_model = profile.get("model", "").strip()
+    if gemini_model:
+        primary["model"] = gemini_model
+
+    # Log das otimizações aplicadas
+    delay = float(profile.get("delay_between_calls", 0.5))
+    retry_budget = int(profile.get("retry_budget", 8))
+    _append_log(
+        f"Gemini Profile ativo: batch={new_batch}, retry_budget={retry_budget}, "
+        f"delay={delay}s, model={gemini_model or primary.get('model', 'default')}",
+        level="info",
+    )
+
+
 def _run_episode_v238(job: dict) -> None:
     """C5: caminho in-process V2.3.8 para _run_episode.
 
@@ -994,6 +1030,8 @@ def _run_episode_v238(job: dict) -> None:
         staged_source = extracted
 
     transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
+    # Aplica Gemini profile quando provider=gemini (batch_size, retry, delay)
+    _apply_gemini_profile(transport_cfg)
     # Roots ÚNICOS por job: checkpoints/captures compartilhados entre jobs
     # causam DURABLE_CAPTURE_DUPLICATE_CALL_ID (call_id derivado do request
     # colide com captures de jobs anteriores).
