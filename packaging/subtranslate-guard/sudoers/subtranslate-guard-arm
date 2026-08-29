@@ -1,6 +1,0 @@
-# Source policy for the future human-triggered issuer.  Installation must
-# validate this file with visudo and create the administrator group separately.
-Cmnd_Alias SUBTRANSLATE_GUARD_ARM = /usr/bin/python3.12 -I -B /usr/local/lib/subtranslate-guard/current/src/subtranslate/recovery_guard/production/issuer_launcher.py
-Defaults!SUBTRANSLATE_GUARD_ARM timestamp_timeout=0
-Defaults!SUBTRANSLATE_GUARD_ARM !setenv
-%subtranslate-guard-admin ALL=(root) PASSWD: NOSETENV: SUBTRANSLATE_GUARD_ARM
