@@ -58,11 +58,11 @@ Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
 
 ```sh
 git clone https://github.com/Eltonfk/TRANSASS.git
-cd transass
-cp .env.example .env          # ajuste MEDIA_ROOT (pasta dos vídeos) e STATE_DIR
-docker build --pull=false -f deploy/Dockerfile -t transass:latest .
+cd TRANSASS
+cp .env.example .env          # ajuste MEDIA_ROOT, STATE_DIR e GEMINI_API_KEY se usar Gemini
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.3.8 .
 docker compose -f deploy/compose.yaml up -d
-# UI em http://localhost:5050
+# UI em http://localhost:5050 (ou http://<IP>:5050 na rede local)
 ```
 
 > **Nota:** o clone baixa ~11M — `.opencode/node_modules` (63M) fica só local e é ignorado via `.opencode/.gitignore` — e o `docker build` só copia 8 itens (`src/`, `deploy/`, `resources/glossaries`, `requirements.lock`, `.env.example`). A imagem final tem 324M.
@@ -109,12 +109,16 @@ Equivalente em arquivo (`transport_config.json` no state dir):
 src/subtranslate/        # núcleo do pipeline (imports planos, PYTHONPATH)
   app.py                 # interface web (Flask)
   pipeline_v2_1_3.py     # pipeline canônico + Client durável
+  pipeline_registry.py   # registro de pipelines (legacy, v2_3_8)
   transport_providers.py # motores plugáveis (ollama/openai_compat/gemini)
   transport_config_store.py # persistência segura da config de motor
-  v238_*.py              # módulos do pipeline V238
+  v238_*.py              # módulos do pipeline V238 (materializador, stages)
+  anime_subtitle_library.py # biblioteca com lineage e dedupe SHA-256
 tests/offline/           # suítes offline determinísticas (216 testes)
-deploy/                  # Dockerfile + compose
-docs/                    # arquitetura, operações, segurança, roadmap
+deploy/                  # Dockerfile + compose.yaml + ffmpeg estático
+resources/glossaries/    # glossários PT-BR por série
+docs/                    # instalação, arquitetura, pipelines, testes
+docs/archive/            # histórico de planejamento (roadmaps, gaps)
 ```
 
 ## 📚 Documentação
