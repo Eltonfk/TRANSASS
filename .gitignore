@@ -28,10 +28,6 @@ secrets/
 credentials/
 # Local agent configuration with machine-specific paths
 opencode.json
-# Agent automation (64M) — not needed for `docker build`; clone fica 6x menor
-.opencode/*
-!.opencode/skills/
-!.opencode/skills/**
 # API keys and secrets (never commit)
 *api_key*
 *.key
