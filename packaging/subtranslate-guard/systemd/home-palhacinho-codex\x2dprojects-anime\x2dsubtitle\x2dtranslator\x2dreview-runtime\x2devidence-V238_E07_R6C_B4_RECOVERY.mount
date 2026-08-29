@@ -1,0 +1,12 @@
+[Unit]
+Description=Protected read-only host view of the B4 recovery target
+Before=subtranslate-guard.service
+
+[Mount]
+What=/var/lib/subtranslate-guard/recovery-targets/V238_E07_R6C_B4_RECOVERY
+Where=/home/palhacinho/codex-projects/anime-subtitle-translator-review/runtime-evidence/V238_E07_R6C_B4_RECOVERY
+Type=none
+Options=bind,ro,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

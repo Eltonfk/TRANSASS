@@ -1,0 +1,12 @@
+[Unit]
+Description=Subtranslate one-shot recovery guard socket
+Before=subtranslate-guard.service
+
+[Socket]
+ListenStream=/run/subtranslate-guard/guard.sock
+SocketUser=subtranslate-guard
+SocketGroup=subtranslate-guard-client
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target
