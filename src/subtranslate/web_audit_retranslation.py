@@ -500,6 +500,12 @@ def _sidecar_candidates(video_path: Path, source_language: str = "inglês") -> l
             candidates.append(item)
         elif pattern and re.search(pattern, tail):
             candidates.append(item)
+    # Filtra variantes hearing-impaired (.hi.*) quando há sidecar primário.
+    # Ex: se existem ".pt-BR.ass" e ".pt-BR.hi.srt", retorna só o primário.
+    if len(candidates) > 1:
+        primary = [c for c in candidates if ".hi." not in c.stem.casefold()]
+        if primary:
+            return sorted(primary)
     return sorted(candidates)
 
 
