@@ -219,3 +219,38 @@ def preserve_temporal_transform_envelope(source_ass: str, target_text: str, *, b
     if final_plain != target_text:
         return None, {"valid": False, "reason": "TEMPORAL_TARGET_TEXT_CHANGED", "expected": target_text, "actual": final_plain, "source": source_trace, "final": final_trace}
     return candidate, {"valid": True, "classification": TEMPORAL_EVENT_GLOBAL, "source_program": source_trace["program"], "final_program": final_trace["program"], "ast_equal": True, "target_text_identity": True}
+
+
+def inject_source_temporal_transforms(source_ass: str, target_text: str, *, base_rebuilder: Callable[[str, str], str]) -> str | None:
+    """Injeta blocos \t( do source no target quando o modelo não preservou.
+
+    Quando preserve_temporal_transform_envelope retorna None (modelo removeu ou
+    alterou os \t( ), esta função copia os blocos de transformação temporal do
+    source para o target, preservando a animação original. Retorna None se o
+    source não tiver \t( ou se a injeção não for possível.
+    """
+    if "\\t(" not in source_ass:
+        return None
+    # Extrai blocos {...\t(...)...} do source
+    source_blocks: list[str] = []
+    for block_match in re.finditer(r"\{[^{}]*\\t\([^)]*\)[^{}]*\}", source_ass):
+        source_blocks.append(block_match.group(0))
+    if not source_blocks:
+        return None
+    # Se o target já tem \t(, não injeta (já preservado pelo modelo)
+    if "\\t(" in target_text:
+        return None
+    # Injeta blocos de transformação temporal do source antes do texto do target
+    # Preserva a estrutura ASS: blocos de override ficam antes do texto visível
+    injection = "".join(source_blocks)
+    # Se o target já começa com blocos {}, injeta após o primeiro bloco vazio
+    # ou antes do primeiro bloco de override
+    first_brace = target_text.find("{")
+    if first_brace == 0:
+        # Encontra o fim do primeiro bloco {}
+        end_brace = target_text.find("}", first_brace)
+        if end_brace != -1:
+            # Injeta após o primeiro bloco {}
+            return target_text[:end_brace + 1] + injection + target_text[end_brace + 1:]
+    # Caso contrário, injeta no início
+    return injection + target_text

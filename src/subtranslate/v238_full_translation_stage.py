@@ -322,9 +322,14 @@ def _render_event(
         counters["temporal_transform"] += 1
         temporal, trace = preserve_temporal_transform_envelope(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
         if temporal is None:
-            # Providers sem v238_group_key (ex: Ollama) não têm como preservar
-            # transformações temporais complexas — fallback seguro para base V226
-            # em vez de falhar com V238_TEMPORAL_TRANSFORM_UNPROVEN.
+            # Modelo não preservou \t( — injeta blocos temporais do source no target
+            from v237_temporal_transform import inject_source_temporal_transforms
+            injected = inject_source_temporal_transforms(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
+            if injected is not None:
+                temporal = rc4_replace_source_payload(source_text, injected)
+                if temporal is not None:
+                    return temporal, {"event_id": event_id, "path": "TEMPORAL_INJECTED_FROM_SOURCE", "trace": trace}
+            # Se injeção não foi possível, fallback para base V226
             return base, {"event_id": event_id, "path": "UNPROVEN_TEMPORAL_BASE_FALLBACK", "trace": trace}
         details.update({"path": "TEMPORAL_TRANSFORM", "trace": trace})
         return temporal, details
