@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transass"
-version = "2.4.0"
+version = "2.4.9"
 description = "Serviço de tradução de legendas de anime com pipeline canônico, durabilidade forense e motor de tradução escolhível."
 readme = "README.md"
 requires-python = ">=3.11"
