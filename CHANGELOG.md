@@ -4,6 +4,18 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.10] - 2026-08-30
+
+### Corrigido
+- Fluxo web V2.3.8 com identidade canônica de transporte e modelo preservada.
+- Retry seletivo por `event_id`, evitando repetir episódios inteiros após falhas
+  linguísticas ou de validação.
+- Saída interna volumosa do runner deixa de bloquear o processo em pipes web;
+  o consumidor recebe somente o resumo público compacto.
+- Fallback de transporte permanece restrito a falhas de transporte; falhas de
+  conteúdo exigem retry seletivo explícito.
+- Prompt V226 reforça a tradução de textos OP/ED em inglês para pt-BR.
+
 ## [2.4.9] - 2026-08-26
 
 ### Adicionado
