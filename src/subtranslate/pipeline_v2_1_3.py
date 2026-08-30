@@ -644,7 +644,7 @@ def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
         # Ex: "OP English" com tradução inglesa da OP que precisa ser traduzida.
         has_english_source = _block_has_english_source_text(block)
         high = bool(
-            explicit >= max(1, len(block) // 2)
+            (explicit >= max(1, len(block) // 2) and not has_english_source)
             or (coherent and not has_french and not has_english_source and (temporal_hint or romanized_rate >= 0.40))
         )
         if high and len(block) >= 3:
