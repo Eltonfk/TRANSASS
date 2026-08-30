@@ -144,8 +144,23 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 "think": False,
                 "keep_alive": "30m",
             }
+        # Prompt de tradução explícito para pt-BR, incluindo contexto de anime
+        # e instrução para NÃO preservar letras de música em inglês (OP/ED English).
         return {
-            "messages": [{"role": "user", "content": text}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Você é um tradutor profissional de legendas de anime para português do Brasil (pt-BR). "
+                        "Traduza o texto fornecido mantendo o sentido natural e adequado para legendas. "
+                        "NÃO preserve trechos em inglês que sejam traduções de abertura/encerramento (OP/ED English) — "
+                        "esses devem ser traduzidos para pt-BR. "
+                        "Mantenha tags ASS ({\\...}) e quebras de linha (\\N) intactas no texto traduzido. "
+                        "Retorne APENAS o texto traduzido, sem explicações, sem formatação JSON, sem comentários."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
             "options": {"temperature": 0.0, "num_predict": 1024},
             "format": "json",
         }
