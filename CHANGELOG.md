@@ -4,6 +4,13 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.11] - 2026-08-30
+
+### Corrigido
+- Letras curtas em inglês de OP/ED agora entram no fluxo de tradução mesmo
+  quando possuem estilo ou tags de karaoke; palavras de conteúdo lírico não
+  são mais confundidas com romaji preservável.
+
 ## [2.4.10] - 2026-08-30
 
 ### Corrigido

@@ -562,6 +562,15 @@ ENGLISH_INDICATORS = {
     "shall", "will", "would", "could", "should", "might",  # modais
 }
 
+# Common content words found in English OP/ED verses.  The block detector
+# cannot rely only on function words: short lyric lines such as "How serene"
+# contain little or no overlap with the compact dialogue indicator set above.
+# These words are deliberately scoped to the block-level source-language
+# check; they do not classify ordinary dialogue by themselves.
+ENGLISH_LYRIC_INDICATORS = {
+    "oh", "how", "sacred", "serene", "benign", "fair", "pure", "lily",
+}
+
 
 def _block_has_english_source_text(events: list[Event]) -> bool:
     """Detecta se um bloco contém texto em inglês (idioma de origem).
@@ -576,7 +585,8 @@ def _block_has_english_source_text(events: list[Event]) -> bool:
         text = event.clean_text.strip()
         words = [word.lower() for word in WORD_RE.findall(text)]
         total_words += len(words)
-        english_words += sum(1 for word in words if word in ENGLISH_INDICATORS)
+        english_words += sum(1 for word in words
+                             if word in ENGLISH_INDICATORS or word in ENGLISH_LYRIC_INDICATORS)
     if total_words == 0:
         return False
     return (english_words / total_words) >= 0.30
@@ -2216,7 +2226,13 @@ class Runner:
                 if "SONG_LYRICS_PRESERVED" not in result.flags:
                     result.flags.append("SONG_LYRICS_PRESERVED")
                 continue
-            if event.classification in {"TECHNICAL_OR_EMPTY", "MUSIC_OR_KARAOKE"} or (event.classification == "ROMAJI_PRESERVED" and not uncertain_romaji_is_english):
+            english_music = (
+                event.classification == "MUSIC_OR_KARAOKE"
+                and _block_has_english_source_text([event])
+            )
+            if event.classification == "TECHNICAL_OR_EMPTY" or (
+                event.classification == "MUSIC_OR_KARAOKE" and not english_music
+            ) or (event.classification == "ROMAJI_PRESERVED" and not uncertain_romaji_is_english):
                 result.status = "resolved"
                 result.final_text = event.original_text
                 result.final_model = "romaji-preserve" if event.classification == "ROMAJI_PRESERVED" else "deterministic-preserve"
