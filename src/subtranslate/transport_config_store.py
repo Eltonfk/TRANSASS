@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "gemini_profile": {
         "enabled": True,           # Aplica otimizações automaticamente
         "batch_size": 16,          # Mais unidades por chamada = menos chamadas
-        "retry_budget": 8,         # Menos retries = economiza quota
+        "retry_budget": 32,        # Budget suficiente para temporadas completas (evita PRIMARY_RETRIES_EXHAUSTED)
         "delay_between_calls": 0.5, # Delay em segundos entre chamadas (respecta 15 RPM)
         "model": "gemini-1.5-flash", # Modelo mais barato e rápido
     },

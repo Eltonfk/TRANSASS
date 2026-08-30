@@ -988,9 +988,17 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
     if gemini_model:
         primary["model"] = gemini_model
 
+    # Valida API key para gemini
+    keys = transport_cfg.get("keys") or {}
+    if not keys.get("gemini"):
+        _append_log("AVISO: Gemini selecionado mas sem API key (keys.gemini vazio) — chamadas falharão com 404", level="warning")
+    # Garante budget mínimo para temporadas (perfis antigos tinham 8)
+    retry_budget = int(profile.get("retry_budget", 32))
+    if retry_budget < 16:
+        retry_budget = 32
+        profile["retry_budget"] = 32
     # Log das otimizações aplicadas
     delay = float(profile.get("delay_between_calls", 0.5))
-    retry_budget = int(profile.get("retry_budget", 8))
     _append_log(
         f"Gemini Profile ativo: batch={new_batch}, retry_budget={retry_budget}, "
         f"delay={delay}s, model={gemini_model or primary.get('model', 'default')}",
