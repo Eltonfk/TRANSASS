@@ -19,6 +19,7 @@ URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar
 ALLOWED_SHA256 = {
     "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67",
     "b41c555bf42de6bc35b634d4e1ba1dabcc3aa11c91953788f7ef9d88d9de2fb3",
+    "f95263f28dd53035407a89d499331e600e3b8895eae9538658d79d638771f1f1",
 }
 EXPECTED_SHA256 = "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67"
 WANTED = {"ffmpeg", "ffprobe"}
