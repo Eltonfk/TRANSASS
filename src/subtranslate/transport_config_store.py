@@ -19,7 +19,7 @@ from typing import Any
 
 ALLOWED_PROVIDERS = {"ollama", "openai_compat", "gemini"}
 ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8"}
-DEFAULT_PIPELINE = "legacy"
+DEFAULT_PIPELINE = "v2_3_8"
 DEFAULT_CONFIG = {
     "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
     "fallback": None,
