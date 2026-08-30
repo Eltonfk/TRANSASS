@@ -128,6 +128,13 @@ def _plain(value: str) -> str:
     return re.sub(r"\{[^}]*\}", "", value or "").replace(r"\N", " ").strip()
 
 
+def _canonical_language_code(source_language: str) -> str:
+    """Return the persisted code for a configured display language."""
+    normalized = str(source_language or "").strip().casefold()
+    codes = LANGUAGE_NAME_TO_CODES.get(normalized)
+    return (codes[0] if codes else normalized) or "eng"
+
+
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -201,7 +208,7 @@ def _line_payload(line: Any) -> dict[str, Any]:
     }
 
 
-def audit_record(source_path: str | Path | None, output_path: str | Path) -> dict[str, Any]:
+def audit_record(source_path: str | Path | None, output_path: str | Path, *, source_language: str = "inglês") -> dict[str, Any]:
     """Audit an existing subtitle without translation or publication.
 
     With a source, the approved engine parser and structural validator are
@@ -277,8 +284,8 @@ def audit_record(source_path: str | Path | None, output_path: str | Path) -> dic
                 event_flags.append("UNBALANCED_DELIMITERS")
             if not preserved_exactly:
                 context = {"previous": [], "next": []}
-                event_flags.extend(content_flags(event, output_text, context, dictionary))
-                if high_confidence_untranslated_dialogue(event, _plain(source_text), _plain(output_text), dictionary):
+                event_flags.extend(content_flags(event, output_text, context, dictionary, source_language=source_language))
+                if high_confidence_untranslated_dialogue(event, _plain(source_text), _plain(output_text), dictionary, source_language=source_language):
                     event_flags.append("TRUE_UNTRANSLATED_DIALOGUE")
                 if event.classification in MUST_PRESERVE_CLASSES:
                     event_flags.append("PRESERVED_EVENT_CHANGED")
@@ -556,24 +563,25 @@ def _existing_source_by_hash(library: Any, episode_id: int, digest: str) -> dict
     return None
 
 
-def _ingest_source(library: Any, episode_id: int, source_path: Path, *, source_kind: str, track: dict[str, Any] | None = None, job_id: str | None = None) -> dict[str, Any]:
+def _ingest_source(library: Any, episode_id: int, source_path: Path, *, source_kind: str, source_language: str = "inglês", track: dict[str, Any] | None = None, job_id: str | None = None) -> dict[str, Any]:
     digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
     existing = _existing_source_by_hash(library, episode_id, digest)
     if existing:
         return existing
+    language_code = _canonical_language_code(source_language)
     record = library.ingest_file(
-        source_path, episode_id=int(episode_id), language="eng", source_kind=source_kind,
-        source_language="eng", original_filename=source_path.name,
+        source_path, episode_id=int(episode_id), language=language_code, source_kind=source_kind,
+        source_language=language_code, original_filename=source_path.name,
         track_index=str(track.get("index")) if track else None,
         track_title=str(track.get("title") or "") if track else None,
         job_id=job_id, validation_status="EXTRACTED" if source_kind == "EXTRACTED" else "IMPORTED",
-        created_by="web-source-resolver", notes="Fonte ENG resolvida pela camada web; não é tradução.",
+        created_by="web-source-resolver", notes=f"Fonte {language_code} resolvida pela camada web; não é tradução.",
         require_authorized_path=(source_kind != "EXTRACTED"),
     )
     return {"record_id": int(record["id"]), "path": str(library.object_path_for_record(int(record["id"]))), "record": record}
 
 
-def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[str, Any], *, job_id: str | None = None) -> dict[str, Any]:
+def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[str, Any], *, source_language: str = "inglês", job_id: str | None = None) -> dict[str, Any]:
     extension = TEXTUAL_SUBTITLE_CODECS.get(str(track.get("codec") or "").casefold(), ".ass")
     staging = Path(getattr(library, "staging_root", video_path.parent / ".subtranslate-staging"))
     staging.mkdir(parents=True, exist_ok=True)
@@ -585,7 +593,7 @@ def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[
         completed = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
         if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
             raise RuntimeError((completed.stderr or "falha ao extrair track ENG")[-500:])
-        return _ingest_source(library, episode_id, target, source_kind="EXTRACTED", track=track, job_id=job_id)
+        return _ingest_source(library, episode_id, target, source_kind="EXTRACTED", source_language=source_language, track=track, job_id=job_id)
     finally:
         target.unlink(missing_ok=True)
 
@@ -621,20 +629,20 @@ def resolve_episode_source(library: Any, episode_id: int, record_id: int | None 
     if len(sidecars) == 1:
         source_path = sidecars[0]
         if materialize:
-            ingested = _ingest_source(library, episode_id, source_path, source_kind="EXTERNAL", job_id=job_id)
+            ingested = _ingest_source(library, episode_id, source_path, source_kind="EXTERNAL", source_language=source_language, job_id=job_id)
             if materialize:
                 ingested.update(_materialize_library_record(library, int(ingested["record_id"])))
-            return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": f"{lang_label} ASS/SRT — Sidecar", **ingested}
-        return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_ENG", "display": f"{source_path.suffix[1:].upper()} — Sidecar {lang_label}", "path": str(source_path), "candidates": [source_path.name]}
+            return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_TEXT", "display": f"{lang_label} ASS/SRT — Sidecar", **ingested}
+        return {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "kind": "SIDECAR_TEXT", "display": f"{source_path.suffix[1:].upper()} — Sidecar {lang_label}", "path": str(source_path), "candidates": [source_path.name]}
     if len(sidecars) > 1:
-        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "SIDECAR_ENG", "display": f"Múltiplos sidecars {lang_label}", "reason": "escolha explícita necessária", "candidates": [item.name for item in sidecars]}
+        return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "SIDECAR_TEXT", "display": f"Múltiplos sidecars {lang_label}", "reason": "escolha explícita necessária", "candidates": [item.name for item in sidecars]}
 
     tracks = _probe_subtitle_tracks(video_path)
     selected, selection_reason, bitmaps = _select_track_for_language(tracks, source_language)
     if selected:
         result = {"available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT", "kind": "EMBEDDED_TEXT", "display": f"{str(selected.get('codec') or '').upper()} — track {lang_label} interna {selected.get('index')}", "track": selected}
         if materialize:
-            result.update(_extract_track(library, episode_id, video_path, selected, job_id=job_id))
+            result.update(_extract_track(library, episode_id, video_path, selected, source_language=source_language, job_id=job_id))
             if result.get("record_id") is not None:
                 result.update(_materialize_library_record(library, int(result["record_id"])))
         else:

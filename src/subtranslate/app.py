@@ -878,12 +878,14 @@ def _v238_metrics_from_result(result: dict) -> dict:
     budget = result.get("operation_budget") if isinstance(result.get("operation_budget"), dict) else {}
     qwen_max = int(budget.get("qwen_physical_maximum") or 131)
     qwen_reserved = int(budget.get("qwen_reserved") or 0)
+    provider_metrics = result.get("provider_metrics") if isinstance(result.get("provider_metrics"), dict) else result.get("metrics")
+    provider_metrics = provider_metrics if isinstance(provider_metrics, dict) else {}
     calls = int(result.get("calls", 0) or 0)
     return {
         "calls": calls,
-        "physical_client_calls": calls,
-        "model_generation_calls": calls,
-        "provider_requests": calls,
+        "physical_client_calls": int(provider_metrics.get("physical_client_calls", calls) or 0),
+        "model_generation_calls": int(provider_metrics.get("model_generation_calls", calls) or 0),
+        "provider_requests": int(provider_metrics.get("provider_requests", calls) or 0),
         "prompt_tokens": None,
         "completion_tokens": None,
         "elapsed_seconds": result.get("pipeline_wall_seconds"),
@@ -1100,10 +1102,10 @@ def _run_episode_v238(job: dict) -> None:
         stage_completion_root=job_root / "completions",
         checkpoint_root=job_root / "checkpoints",
         job_id=job.get("id"),
-        prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH") or "v238-rc7b1",
-        configuration_hash=os.environ.get("CONFIGURATION_HASH") or "v238-web-1",
-        candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
-        candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
+        prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH"),
+        configuration_hash=os.environ.get("CONFIGURATION_HASH"),
+        candidate_commit=os.environ.get("CANDIDATE_COMMIT"),
+        candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID"),
     )
     # Gemini profile: aplica retry_budget como OperationCallBudget
     # (131 é default qwen; para gemini free tier limita a 8 para respeitar 15 RPM)
@@ -1176,6 +1178,21 @@ def _run_episode_v238(job: dict) -> None:
                     if ollama_url:
                         section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
                 ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
+                # Rebuild the semantic provider for each transport attempt;
+                # otherwise it keeps selecting the persisted primary engine.
+                fallback_config = dict(transport_cfg)
+                fallback_config["primary"] = dict(section)
+                ctx["response_provider"] = WebDurableResponseProvider(
+                    fallback_config, mode="LIVE_CAPTURED", capture_root=capture_root,
+                )
+                ctx["model"] = str(section.get("model") or "")
+                # A digest pertence ao modelo, não à tentativa. Nunca herdar
+                # a digest do primary para o fallback; sem digest próprio,
+                # LIVE_CAPTURED deve falhar fechado.
+                ctx["model_digest"] = (
+                    section.get("model_digest")
+                    or transport_cfg.get("fallback_model_digest")
+                )
                 if staged_output.exists():
                     staged_output.unlink()
             try:
@@ -1530,7 +1547,7 @@ def _run_retranslation_episode(job: dict) -> None:
             job["stage"] = "VALIDATING"
             _append_log(f"Validando retradução: {job.get('name', '')}", level="summary", job_id=job["id"])
             _persist_locked()
-        audit = audit_record(source, output)
+        audit = audit_record(source, output, source_language=job.get("source_language") or "inglês")
         with state_lock:
             job["stage"] = "AUDITING"
             job["audit"] = {
@@ -2000,9 +2017,7 @@ def pipeline_config_post():
 
 @app.route("/health")
 def health():
-    from _version import __version__
-
-    return jsonify({"status": "ok", "version": __version__})
+    return jsonify({"status": "ok"})
 
 
 @app.route("/version")
@@ -2353,7 +2368,13 @@ def _audit_record_id(record_id: int) -> dict[str, Any]:
         raise FileNotFoundError(str(record_id))
     output_path = subtitle_library.object_path_for_record(int(record_id))
     source = resolve_episode_source(subtitle_library, int(record["episode_id"]), int(record_id), materialize=False)
-    audit = audit_record(source.get("path") if source.get("available") else None, output_path)
+    audit = audit_record(
+        source.get("path") if source.get("available") else None,
+        output_path,
+        source_language=(source.get("record") or {}).get("source_language")
+        or record.get("source_language")
+        or "inglês",
+    )
     audit["record_id"] = int(record_id)
     audit["source_record_id"] = source.get("record_id")
     audit["source_reason"] = source.get("reason")
@@ -3177,9 +3198,9 @@ function auditBadge(ep){const s=ep.audit_status||'NÃO AUDITADA';const cls=s==='
 function sourceBadge(ep){const s=ep.source_status||{};const status=s.status||'SOURCE_NOT_FOUND';const cls=s.available?'ok':status==='SOURCE_AMBIGUOUS'||status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'||status==='SOURCE_STATUS_ERROR'?'wait':'neutral';const text=s.display||(status==='SOURCE_AVAILABLE_LIBRARY'?'✓ Biblioteca':status==='SOURCE_AVAILABLE_SIDECAR'?'✓ Sidecar':status==='SOURCE_AVAILABLE_INTERNAL_TEXT'?'✓ Track interna':status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'?'⚠ PGS — OCR não suportado':status==='SOURCE_AMBIGUOUS'?'⚠ Fonte ambígua':status==='SOURCE_STATUS_ERROR'?'⚠ Metadata da fonte':'✕ Fonte não encontrada');return `<span class="badge ${cls}" title="${esc(s.reason||s.display||text)}">${text}</span>`}
 async function refreshSourceStatus(key, episodeId, lang){if(!episodeId)return;try{const d=await api('/source-status?episode_id='+encodeURIComponent(episodeId)+'&source_language='+encodeURIComponent(lang));const el=document.querySelector('[data-source-badge="'+key+'"]');if(el)el.innerHTML=sourceBadge(d)}catch(e){}}
 function renderEpisodes(){const box=$('episodes');if(!episodes.length){box.innerHTML='<span class="muted">Nenhum vídeo encontrado nesta pasta.</span>';return}box.replaceChildren(...episodes.map(ep=>{const row=document.createElement('label');row.className='episode';const key=episodeKey(ep),disabled=['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING'].includes(ep.status);const lang=episodeSourceLang[key]||seasonLangValue||globalSourceLang;const sel=`<select class="srclang" data-key="${esc(key)}" data-epid="${esc(ep.library_episode_id||'')}" data-path="${esc(ep.source||'')}" title="Idioma de origem da legenda" style="min-height:30px;max-width:150px;padding:4px 6px"><option value="${esc(lang)}">${esc(lang)}</option></select>`;row.innerHTML=`<input type="checkbox" data-selection-key="${esc(key)}" data-source="${esc(ep.source)}" data-episode-id="${esc(ep.library_episode_id||'')}" ${selectedEpisodeKeys.has(key)?'checked':''} ${disabled?'disabled':''}><b>${esc(ep.episode||'—')}</b><span class="epname" title="${esc(ep.name)}">${esc(ep.name)}</span>${badge(ep.status)}${auditBadge(ep)}<span data-source-badge="${esc(key)}">${sourceBadge(ep)}</span>${sel}`;return row}));bindSelection()}
-async function populateLangSelect(sel){const epid=sel.dataset.epid;const rel=sel.dataset.path;if((!epid&&!rel)||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const q=epid?('episode_id='+encodeURIComponent(epid)):('path='+encodeURIComponent(rel));const d=await api('/source-options?'+q);const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('')}catch(e){console.error('source-options',e)}}
+async function populateLangSelect(sel){const epid=sel.dataset.epid;const rel=sel.dataset.path;if((!epid&&!rel)||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const q=epid?('episode_id='+encodeURIComponent(epid)):('path='+encodeURIComponent(rel));const d=await api('/source-options?'+q);const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.replaceChildren(...opts.map(l=>{const option=document.createElement('option');option.value=l;option.textContent=l;option.selected=l===cur;return option}))}catch(e){console.error('source-options',e)}}
 function applySeasonLang(lang){seasonLangValue=lang;episodes.forEach(ep=>{const key=episodeKey(ep);episodeSourceLang[key]=lang;const el=langSelects[key];if(el)el.value=lang});loadEpisodes()}
-async function detectSeasonLang(){const ep=episodes.find(e=>e.source)||episodes[0];if(!ep||!ep.source)return alert('Nenhum vídeo selecionado para detectar.');try{const d=await api('/source-options?path='+encodeURIComponent(ep.source));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return alert('Nenhum idioma de legenda detectado na temporada.');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.innerHTML=opts.map(l=>`<option value="${esc(l)}"${l===cur?' selected':''}>${esc(l)}</option>`).join('');applySeasonLang(cur||opts[0])}catch(e){alert('Não foi possível detectar os idiomas: '+e.message)}}
+async function detectSeasonLang(){const ep=episodes.find(e=>e.source)||episodes[0];if(!ep||!ep.source)return alert('Nenhum vídeo selecionado para detectar.');try{const d=await api('/source-options?path='+encodeURIComponent(ep.source));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return alert('Nenhum idioma de legenda detectado na temporada.');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.replaceChildren(...opts.map(l=>{const option=document.createElement('option');option.value=l;option.textContent=l;option.selected=l===cur;return option}));applySeasonLang(cur||opts[0])}catch(e){alert('Não foi possível detectar os idiomas: '+e.message)}}
 async function start(){try{const sel=episodes.filter(ep=>selected().includes(ep.source)&&ep.status!=='ALREADY_TRANSLATED');if(!sel.length)return alert('Selecione pelo menos um episódio sem PT-BR.');const source_languages={};sel.forEach(ep=>{const key=episodeKey(ep);const el=langSelects[key];source_languages[ep.source]=el?el.value:globalSourceLang});await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:selectedFolder,episodes:sel.map(ep=>ep.source),source_languages,dry_run:$('dryrun').checked})});await refresh()}catch(e){alert(e.message)}}
 async function auditSelectedSeason(){try{const series=await seriesForFolder();if(!series)return alert('A pasta atual não está associada a uma série ANIME catalogada.');const m=selectedFolder.match(/(?:^|\/)Season\s*([0-9]+)/i);const body=m?{season:m[1]}:{};const d=await api('/audit/series/'+series.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});alert(`Auditoria concluída: ${d.counts['PROBLEMAS DETECTADOS']||0} com problemas, ${d.counts['REVISÃO RECOMENDADA']||0} para revisão, ${d.counts['AUDITORIA PARCIAL']||0} parciais.`);await loadEpisodes();await loadArchive()}catch(e){alert(e.message)}}
 async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return alert('Selecione episódios com fonte original arquivada.');const langs={};episodes.forEach(ep=>{const id=Number(ep.library_episode_id);if(ids.includes(id)){const key=episodeKey(ep);langs[id]=episodeSourceLang[key]||seasonLangValue||globalSourceLang}});const langBody=JSON.stringify({episode_ids:ids,source_languages:langs,process_eligible_only:!confirmBatch});if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const c=preview.counts||{};if(c.blocked){return alert(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`)}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}const queued=await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const skipped=queued.not_eligible||queued.preflight?.counts?.blocked||0;if(skipped&&queued.queued){alert(`${queued.queued} episódio(s) elegível(is) enfileirado(s); ${skipped} seleção(ões) sem fonte/versão para retraduzir foram ignoradas.`)}await refresh()}catch(e){alert(e.message)}}

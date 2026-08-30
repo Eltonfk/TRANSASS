@@ -8,11 +8,13 @@ adapter dispatcher and keeps all linguistic semantics in the selected core.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import shutil
 import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 from pipeline_orchestrator import execute_pipeline_plan
@@ -72,6 +74,8 @@ def _project_v238_summary(result: dict) -> dict:
         critical_flags.append("v238_unresolved_units")
     elif unresolved and skipped_allowed:
         flags["v238_skipped_allowed_units"] = len(unresolved)
+    provider_metrics = result.get("provider_metrics") if isinstance(result.get("provider_metrics"), dict) else result.get("metrics")
+    provider_metrics = provider_metrics if isinstance(provider_metrics, dict) else {}
     return {
         "status": status,
         "stage": last_stage,
@@ -83,9 +87,9 @@ def _project_v238_summary(result: dict) -> dict:
         "stages": stages,
         "v238_metrics": {
             "calls": calls,
-            "physical_client_calls": calls,
-            "model_generation_calls": calls,
-            "provider_requests": calls,
+            "physical_client_calls": int(provider_metrics.get("physical_client_calls", calls) or 0),
+            "model_generation_calls": int(provider_metrics.get("model_generation_calls", calls) or 0),
+            "provider_requests": int(provider_metrics.get("provider_requests", calls) or 0),
             "prompt_tokens": None,
             "completion_tokens": None,
             "elapsed_seconds": result.get("pipeline_wall_seconds"),
@@ -118,6 +122,32 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
             from web_durable_provider import WebDurableResponseProvider
 
             transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
+            if transport is not None:
+                transport_provider = getattr(transport, "name", "ollama")
+                transport_model = getattr(transport, "model", None)
+                primary = transport_config.get("primary") or {}
+                fallback = transport_config.get("fallback") or {}
+                if (str(fallback.get("provider", "")).lower() == str(transport_provider).lower()
+                        and str(fallback.get("model", "")) == str(transport_model or "")):
+                    active_digest = (fallback.get("model_digest")
+                                     or transport_config.get("fallback_model_digest"))
+                else:
+                    active_digest = (getattr(transport, "model_digest", None)
+                                     or primary.get("model_digest")
+                                     or transport_config.get("primary_model_digest")
+                                     or transport_config.get("model_digest"))
+                active = {"provider": getattr(transport, "name", "ollama"),
+                          "model": getattr(transport, "model", None),
+                          "base_url": getattr(transport, "base_url", None),
+                          # The web transport object does not necessarily
+                          # carry the canonical digest.  Preserve the
+                          # persisted model identity when the provider omits
+                          # it instead of silently turning LIVE_CAPTURED
+                          # into an identity-missing failure.
+                          "model_digest": active_digest}
+                transport_config = dict(transport_config)
+                transport_config["primary"] = active
+                transport_config["model_digest"] = active["model_digest"]
             job_root = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-runs" / str(args.job_id)
             capture_root = job_root / "captures"
             capture_root.mkdir(parents=True, exist_ok=True)
@@ -140,10 +170,10 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 stage_completion_root=job_root / "completions",
                 checkpoint_root=job_root / "checkpoints",
                 job_id=args.job_id,
-                prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH") or "v238-rc7b1",
-                configuration_hash=os.environ.get("CONFIGURATION_HASH") or "v238-web-1",
-                candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
-                candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
+                prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH"),
+                configuration_hash=os.environ.get("CONFIGURATION_HASH"),
+                candidate_commit=os.environ.get("CANDIDATE_COMMIT"),
+                candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID"),
             )
             # Gemini profile: aplica modelo válido e budget, fallback se sem key
             primary_provider = str((transport_config.get("primary") or {}).get("provider", "")).lower()
@@ -187,25 +217,100 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                     if ollama_url:
                         transport.base_url = ollama_url.rsplit("/api/chat", 1)[0]
                 ctx["transport"] = transport
-            result = execute_pipeline_plan(pipeline, semantic_source, args.output, ctx)
+            # Adapters emit full ledgers for CLI diagnostics.  The web runner
+            # must not stream those multi-megabyte JSON blobs to its caller:
+            # a bounded pipe can block the translation process before it
+            # reaches the durable completion marker.  The runner emits its
+            # compact public summary below instead.
+            with open(os.devnull, "w", encoding="utf-8") as quiet_output:
+                with contextlib.redirect_stdout(quiet_output):
+                    result = execute_pipeline_plan(pipeline, semantic_source, args.output, ctx)
         else:
-            result = execute_pipeline_plan(
-                pipeline, semantic_source, args.output,
-                {
-                    "operation": "RETRANSLATE",
-                    "memory_root": args.memory_root,
-                    "anime_series_id": args.anime_series_id,
-                    "episode_id": args.episode_id,
-                    "job_id": args.job_id,
-                    "model_override": os.environ.get("TRANSLATOR_OLLAMA_MODEL"),
-                    "ollama_url": os.environ.get("TRANSLATOR_OLLAMA_URL"),
-                    "defer_intermediate_cleanup": pipeline == "v2_3_0",
-                    "transport": transport,
-                    "source_language": source_language,
-                },
-            )
+            with open(os.devnull, "w", encoding="utf-8") as quiet_output:
+                with contextlib.redirect_stdout(quiet_output):
+                    result = execute_pipeline_plan(
+                        pipeline, semantic_source, args.output,
+                        {
+                            "operation": "RETRANSLATE",
+                            "memory_root": args.memory_root,
+                            "anime_series_id": args.anime_series_id,
+                            "episode_id": args.episode_id,
+                            "job_id": args.job_id,
+                            "model_override": os.environ.get("TRANSLATOR_OLLAMA_MODEL"),
+                            "ollama_url": os.environ.get("TRANSLATOR_OLLAMA_URL"),
+                            "defer_intermediate_cleanup": pipeline == "v2_3_0",
+                            "transport": transport,
+                            "source_language": source_language,
+                        },
+                    )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+    return result
+
+
+def _selective_event_ids(raw: str) -> list[int]:
+    values = []
+    for token in str(raw or "").split(","):
+        token = token.strip()
+        if token:
+            values.append(int(token))
+    return sorted(set(values))
+
+
+def _run_selective_retranslation(args, pipeline: str, transport: Any | None,
+                                 source_language: str) -> dict[str, Any]:
+    """Retry only explicitly failed event IDs and merge atomically.
+
+    The primary artifact remains the source of truth for every event that is
+    not listed.  This path is intentionally explicit; normal web fallback is
+    reserved for transport failure and must not repeat a whole episode after
+    a linguistic validation failure.
+    """
+    import pysubs2
+
+    event_ids = _selective_event_ids(args.failed_event_ids)
+    if not event_ids:
+        raise SystemExit("nenhum event_id seletivo informado")
+    if args.selective_base_output is None or not args.selective_base_output.is_file():
+        raise SystemExit("artefato primário seletivo não encontrado")
+    if args.output.exists():
+        raise SystemExit("saída de retradução já existe")
+    original = pysubs2.load(str(args.source), format="ass")
+    base = pysubs2.load(str(args.selective_base_output), format="ass")
+    missing = [event_id for event_id in event_ids if event_id < 0 or event_id >= len(original.events)]
+    if missing or len(original.events) != len(base.events):
+        raise SystemExit("cardinalidade incompatível para reprocessamento seletivo")
+    subset = pysubs2.SSAFile()
+    subset.info = dict(original.info)
+    subset.styles = dict(original.styles)
+    for event_id in event_ids:
+        subset.events.append(original.events[event_id])
+    with tempfile.TemporaryDirectory(prefix=".web-selective-", dir="/tmp") as work:
+        subset_source = Path(work) / "failed-events.ass"
+        subset_output = Path(work) / "failed-events.out.ass"
+        subset.save(str(subset_source), format="ass")
+        subset_args = SimpleNamespace(**vars(args))
+        subset_args.source = subset_source
+        subset_args.output = subset_output
+        subset_args.no_fallback = True
+        result = _run_pipeline(subset_args, pipeline, transport, source_language)
+        if not subset_output.is_file():
+            raise SystemExit("reprocessamento seletivo não produziu saída")
+        ledger = result.get("primary_ledger") if isinstance(result, dict) else None
+        unresolved = [row for row in (ledger or [])
+                      if isinstance(row, dict) and str(row.get("status", "")).upper() in {"BLOCKED", "SUSPECT"}]
+        if unresolved:
+            raise SystemExit(f"reprocessamento seletivo ainda possui {len(unresolved)} evento(s) não resolvido(s)")
+        retry = pysubs2.load(str(subset_output), format="ass")
+        if len(retry.events) != len(event_ids):
+            raise SystemExit("saída seletiva com cardinalidade incompatível")
+        merged = pysubs2.load(str(args.selective_base_output), format="ass")
+        for event_id, retry_event in zip(event_ids, retry.events):
+            merged.events[event_id].text = retry_event.text
+        merged.save(str(args.output), format="ass")
+    result["selective_retranslation"] = True
+    result["selective_event_ids"] = event_ids
+    result["transport_used"] = "primary-selective"
     return result
 
 
@@ -221,6 +326,9 @@ def main() -> int:
     parser.add_argument("--series-title", default="Anime")
     parser.add_argument("--episode-title", default="Episode")
     parser.add_argument("--no-fallback", action="store_true")
+    parser.add_argument("--failed-event-ids", help="event IDs explícitos para retry seletivo")
+    parser.add_argument("--selective-base-output", type=Path,
+                        help="artefato primário a preservar durante retry seletivo")
     args = parser.parse_args()
     if args.source.suffix.lower() not in {".ass", ".ssa"}:
         raise SystemExit("FONTE ORIGINAL NÃO DISPONÍVEL: formato não suportado")
@@ -243,11 +351,32 @@ def main() -> int:
         or "inglês"
     )
 
-    result = _run_pipeline(args, pipeline, primary, source_language)
+    if args.failed_event_ids:
+        result = _run_selective_retranslation(args, pipeline, primary, source_language)
+    else:
+        try:
+            result = _run_pipeline(args, pipeline, primary, source_language)
+        except Exception as primary_error:
+            message = str(primary_error).lower()
+            transport_failure = any(token in message for token in (
+                "connectionerror", "timeout", "connection refused", "max retries",
+                "temporarily unavailable", "name or service not known",
+            ))
+            if args.no_fallback or fallback is None or not transport_failure:
+                raise
+            result = None
     used_fallback = False
-    if not args.no_fallback and (not isinstance(result, dict) or not args.output.is_file()) and fallback is not None:
-        # Primary failed to produce the output: retry once with the fallback.
+    if not args.no_fallback and (
+        not isinstance(result, dict) or not args.output.is_file()
+    ) and fallback is not None:
+        # Only a transport failure or missing artifact may use a transport
+        # fallback. Linguistic validation failures require explicit selective
+        # retry so an entire episode is never silently repeated.
         used_fallback = True
+        if args.output.is_file():
+            primary_output = args.output.with_name(f".{args.output.name}.primary.ass")
+            shutil.copy2(args.output, primary_output)
+            args.output.unlink()
         result = _run_pipeline(args, pipeline, fallback, source_language)
 
     internal = (result or {}).get("_internal") if isinstance(result, dict) else None
@@ -260,7 +389,7 @@ def main() -> int:
         result = public_summary(result, stage_handle=stage_handle, stage_sha256=stage_sha256)
     result["pipeline"] = pipeline
     result["output"] = args.output.name
-    result["transport_used"] = "fallback" if used_fallback else "primary"
+    result.setdefault("transport_used", "fallback" if used_fallback else "primary")
     print("WEB_RETRANSLATION_SUMMARY " + json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

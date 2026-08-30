@@ -9,7 +9,6 @@ Writes are atomic with a timestamped backup of the previous file.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
@@ -28,6 +27,8 @@ DEFAULT_CONFIG = {
     "pipeline": DEFAULT_PIPELINE,
     "authorized_primary_models": ["qwen", "gemini"],
     "model_digest": None,
+    "primary_model_digest": None,
+    "fallback_model_digest": None,
     # Gemini profile: otimizações automáticas quando provider=gemini
     "gemini_profile": {
         "enabled": True,           # Aplica otimizações automaticamente
@@ -79,6 +80,8 @@ def public_transport_config(path: Path) -> dict[str, Any]:
         "pipeline": config.get("pipeline") or DEFAULT_PIPELINE,
         "authorized_primary_models": config.get("authorized_primary_models") or ["qwen"],
         "model_digest": config.get("model_digest"),
+        "primary_model_digest": config.get("primary_model_digest") or config.get("model_digest"),
+        "fallback_model_digest": config.get("fallback_model_digest"),
         "gemini_profile": config.get("gemini_profile") or DEFAULT_CONFIG.get("gemini_profile"),
         "updated_at": config.get("updated_at"),
     }
@@ -135,12 +138,8 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
     if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
         raise TransportConfigError("authorized_primary_models inválido")
     model_digest = str(payload.get("model_digest") or "").strip() or None
-    # Auto-gera model_digest a partir de provider+model quando não fornecido.
-    # Evita V238_LIVE_CHECKPOINT_IDENTITY_MISSING:model_digest no pipeline V238.
-    if not model_digest:
-        fingerprint = f"{primary_clean['provider']}|{primary_clean['model']}"
-        model_digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
-
+    primary_model_digest = str(payload.get("primary_model_digest") or model_digest or "").strip() or None
+    fallback_model_digest = str(payload.get("fallback_model_digest") or "").strip() or None
     # Gemini profile: merge com defaults quando provider=gemini
     gemini_profile = payload.get("gemini_profile") or {}
     default_gemini = DEFAULT_CONFIG.get("gemini_profile", {})
@@ -160,6 +159,8 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         "pipeline": pipeline,
         "authorized_primary_models": list(authorized),
         "model_digest": model_digest,
+        "primary_model_digest": primary_model_digest,
+        "fallback_model_digest": fallback_model_digest,
         "gemini_profile": gemini_profile_clean,
         "updated_at": datetime.now(UTC).isoformat(),
     }

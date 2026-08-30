@@ -1616,6 +1616,8 @@ class Client:
             prompt = (
             "Traduza somente os itens TARGET para português do Brasil "
             "(idioma de origem detectado automaticamente — inglês, francês, japonês etc.). "
+            "Traduza também integralmente letras e falas em inglês de abertura/encerramento (OP/ED); "
+            "não preserve OP/ED English como se fosse música não traduzível. "
             "Cada evento completo é uma unidade semântica. CONTEXT existe apenas para "
             "entender sujeito, tom, referência e continuidade; nunca copie ou traduza "
             "conteúdo do contexto para outro id. Não produza explicações. Não produza "
