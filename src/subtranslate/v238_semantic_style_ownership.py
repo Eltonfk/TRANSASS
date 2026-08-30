@@ -280,7 +280,13 @@ def validate_ownership_mapping(
         concatenated.append(text)
         validated.append({"text": text, "owner_segment_id": owner, "run_index": index})
     joined = "".join(concatenated)
-    if joined != target_text:
+    # Normaliza espaços duplos/múltiplos para comparação: modelos menores
+    # (qwen3.5:9b) frequentemente não reproduzem espaços duplos exatos de
+    # formatação ASS (\N\N → dois espaços).  Trata espaços extras como
+    # equivalentes ao normalizar para validação sem perder o render original.
+    def _norm_ws(s: str) -> str:
+        return re.sub(r" {2,}", " ", s)
+    if joined != target_text and _norm_ws(joined) != _norm_ws(target_text):
         return [], {**trace, "valid": False, "reason": "TARGET_CONCATENATION_MISMATCH", "actual": joined}
     if seen != expected:
         return [], {**trace, "valid": False, "reason": "MISSING_OWNER_SEGMENT", "actual_segment_ids": sorted(seen)}
@@ -378,8 +384,12 @@ def render_target_ownership(
         output.append(row["text"])
         current = dict(segment.effective_style_state)
     result = "".join(output)
-    if strip_ass_tags(result) != target_text:
-        return None, {"valid": False, "reason": "TARGET_TEXT_IDENTITY", "actual": strip_ass_tags(result)}
+    # Normaliza espaços múltiplos (ver nota em validate_ownership_mapping).
+    def _norm_ws(s: str) -> str:
+        return re.sub(r" {2,}", " ", s)
+    actual = strip_ass_tags(result)
+    if actual != target_text and _norm_ws(actual) != _norm_ws(target_text):
+        return None, {"valid": False, "reason": "TARGET_TEXT_IDENTITY", "actual": actual}
     return result, {
         "valid": True,
         "reason": "SEMANTIC_STYLE_OWNERSHIP_RENDERED",
