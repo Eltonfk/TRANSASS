@@ -145,6 +145,15 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
                 candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
             )
+            # Gemini profile budget (mesma lógica de app.py)
+            primary_provider = str((transport_config.get("primary") or {}).get("provider", "")).lower()
+            gemini_profile = transport_config.get("gemini_profile") or {}
+            if primary_provider == "gemini" and gemini_profile.get("enabled", True):
+                from v238_llama_policy import OperationCallBudget
+                retry_budget = max(1, int(gemini_profile.get("retry_budget", 8)))
+                if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
+                    ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
+                    ctx["gemini_profile"] = gemini_profile
             ctx["response_provider"] = provider
             ctx["operation"] = "RETRANSLATE"
             ctx["defer_intermediate_cleanup"] = False

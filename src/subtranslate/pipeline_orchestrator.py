@@ -123,7 +123,19 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
             raise ValueError("V238_LIVE_OPERATION_ID_REQUIRED")
         if mode != "LIVE_CAPTURED":
             ctx.setdefault("operation_id", f"offline-{uuid.uuid4()}")
-        ctx.setdefault("operation_budget", OperationCallBudget(qwen_physical_maximum=int(ctx.get("qwen_physical_maximum", 131)), llama_generation_maximum=1))
+        # Gemini profile: limita qwen_physical_maximum para respeitar 15 RPM / quota free
+        gemini_profile = ctx.get("gemini_profile") or {}
+        # também aceita perfil via transport_config-like context
+        if not gemini_profile:
+            # tenta derivar de model/gemini_profile se presente no ctx
+            maybe_cfg = ctx.get("transport_config") or {}
+            gemini_profile = maybe_cfg.get("gemini_profile") or {}
+        default_max = int(gemini_profile.get("retry_budget", 131)) if gemini_profile.get("enabled", False) and str(ctx.get("model") or "").lower().startswith("gemini") else int(ctx.get("qwen_physical_maximum", 131))
+        # se perfil gemini ativo mas ctx model ainda é genérico, checa ctx gemini_profile enabled
+        if gemini_profile.get("enabled", False) and not str(ctx.get("model") or "").lower().startswith("gemini"):
+            # fallback: usa retry_budget do profile se provider for gemini (detecta via gemini_profile enabled)
+            default_max = int(gemini_profile.get("retry_budget", 8))
+        ctx.setdefault("operation_budget", OperationCallBudget(qwen_physical_maximum=default_max, llama_generation_maximum=1))
     if ctx.get("operation") == "RETRANSLATE" and not plan.supports_retranslation:
         raise UnsupportedPipelineError(f"retranslation is not supported by pipeline plan: {plan.id}")
     if output.exists():

@@ -1092,6 +1092,18 @@ def _run_episode_v238(job: dict) -> None:
         candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
         candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
     )
+    # Gemini profile: aplica retry_budget como OperationCallBudget
+    # (131 é default qwen; para gemini free tier limita a 8 para respeitar 15 RPM)
+    primary_provider = str((transport_cfg.get("primary") or {}).get("provider", "")).lower()
+    gemini_profile = transport_cfg.get("gemini_profile") or {}
+    if primary_provider == "gemini" and gemini_profile.get("enabled", True):
+        from v238_llama_policy import OperationCallBudget
+        retry_budget = max(1, int(gemini_profile.get("retry_budget", 8)))
+        # só injeta se ainda não existe (orchestrator usa setdefault)
+        if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
+            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
+            ctx["gemini_profile"] = gemini_profile  # expõe para orchestrator/metrics
+            _append_log(f"Gemini budget ativo: qwen_physical_maximum={retry_budget} (profile)", level="info", job_id=job.get("id"))
     ctx["response_provider"] = provider
     ctx["operation"] = "TRANSLATE"
     ctx["defer_intermediate_cleanup"] = False
