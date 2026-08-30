@@ -274,8 +274,13 @@ def validate_ownership_mapping(
             return [], {**trace, "valid": False, "reason": "EMPTY_TARGET_RUN", "row_index": index}
         if owner not in expected:
             return [], {**trace, "valid": False, "reason": "UNKNOWN_OWNER_SEGMENT", "owner_segment_id": owner}
+        # Modelos pequenos às vezes fragmentam o mesmo owner em runs adjacentes;
+        # coalesce em vez de falhar — particionamento semântico equivalente.
         if validated and validated[-1]["owner_segment_id"] == owner:
-            return [], {**trace, "valid": False, "reason": "ADJACENT_DUPLICATE_OWNER_RUN", "owner_segment_id": owner}
+            validated[-1]["text"] += text
+            concatenated[-1] += text
+            # mantém seen, não cria nova entrada
+            continue
         seen.add(owner)
         concatenated.append(text)
         validated.append({"text": text, "owner_segment_id": owner, "run_index": index})
