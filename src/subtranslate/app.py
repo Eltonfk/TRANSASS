@@ -988,10 +988,15 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
     if gemini_model:
         primary["model"] = gemini_model
 
-    # Valida API key para gemini
+    # Valida API key para gemini — sem key falha com 403/404
     keys = transport_cfg.get("keys") or {}
     if not keys.get("gemini"):
-        _append_log("AVISO: Gemini selecionado mas sem API key (keys.gemini vazio) — chamadas falharão com 404", level="warning")
+        _append_log("AVISO: Gemini selecionado mas sem API key (keys.gemini vazio) — fallback para ollama", level="warning")
+        fallback = transport_cfg.get("fallback") or {"provider": "ollama", "model": "qwen3.5:9b"}
+        if fallback and fallback.get("provider"):
+            transport_cfg["primary"] = dict(fallback)
+            _append_log(f"Fallback ativo: {fallback.get('provider')}/{fallback.get('model')}", level="info")
+            return  # não aplica profile gemini
     # Garante budget mínimo para temporadas (perfis antigos tinham 8)
     retry_budget = int(profile.get("retry_budget", 32))
     if retry_budget < 16:

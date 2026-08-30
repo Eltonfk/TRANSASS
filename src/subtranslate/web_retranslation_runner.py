@@ -145,17 +145,38 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 candidate_commit=os.environ.get("CANDIDATE_COMMIT") or "7eb7b5d",
                 candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID") or "v2.4.9-track2-v238",
             )
-            # Gemini profile budget (mesma lógica de app.py) — garante mínimo 32
+            # Gemini profile: aplica modelo válido e budget, fallback se sem key
             primary_provider = str((transport_config.get("primary") or {}).get("provider", "")).lower()
             gemini_profile = transport_config.get("gemini_profile") or {}
             if primary_provider == "gemini" and gemini_profile.get("enabled", True):
-                from v238_llama_policy import OperationCallBudget
-                retry_budget = max(1, int(gemini_profile.get("retry_budget", 32)))
-                if retry_budget < 16:
-                    retry_budget = 32
-                if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
-                    ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
-                    ctx["gemini_profile"] = gemini_profile
+                if not (transport_config.get("keys") or {}).get("gemini"):
+                    print("AVISO: Gemini sem API key — fallback para ollama", flush=True)
+                    fallback = transport_config.get("fallback") or {"provider": "ollama", "model": "qwen3.5:9b"}
+                    if fallback and fallback.get("provider"):
+                        transport_config["primary"] = dict(fallback)
+                        ctx["model"] = str(fallback.get("model") or "")
+                        # não aplica profile gemini
+                        # segue para response_provider que será recriado? provider já criado com gemini, mas ctx model será ollama — precisa recriar provider?
+                        # recria provider com fallback
+                        from web_durable_provider import WebDurableResponseProvider
+                        provider = WebDurableResponseProvider(transport_config, mode="LIVE_CAPTURED", capture_root=capture_root)
+                        ctx["response_provider"] = provider
+                        ctx["model"] = str(fallback.get("model") or "")
+                    # pula aplicação do profile
+                else:
+                    # Corrige modelo inválido (ex: 3.6-flash) para o do profile
+                    gemini_model = str(gemini_profile.get("model", "gemini-1.5-flash")).strip()
+                    if gemini_model and str((transport_config.get("primary") or {}).get("model") or "") != gemini_model:
+                        if "3.6" in str(transport_config.get("primary", {}).get("model") or ""):
+                            transport_config["primary"]["model"] = gemini_model
+                            ctx["model"] = gemini_model
+                    from v238_llama_policy import OperationCallBudget
+                    retry_budget = max(1, int(gemini_profile.get("retry_budget", 32)))
+                    if retry_budget < 16:
+                        retry_budget = 32
+                    if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
+                        ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
+                        ctx["gemini_profile"] = gemini_profile
             ctx["response_provider"] = provider
             ctx["operation"] = "RETRANSLATE"
             ctx["defer_intermediate_cleanup"] = False
