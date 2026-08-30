@@ -414,10 +414,17 @@ def _render_event(
                 response.setdefault("owner_vector", solved["unique_canonical_owner_vector"])
             mapping = _ownership_mapping(program, _plain(target_text), response)
             if mapping is None:
-                raise ResponseProviderError("V238_OWNERSHIP_UNPROVEN")
+                # Fallback determinístico em vez de falhar o episódio:
+                # modelos pequenos podem não provar ownership completo;
+                # base (rc4) preserva texto traduzido com estilo base.
+                counters["semantic_ownership_fallback"] = counters.get("semantic_ownership_fallback", 0) + 1
+                details.update({"path": "SEMANTIC_OWNERSHIP_FALLBACK_UNPROVEN", "span_issues": span_issues})
+                return base, details
             rendered, validation = render_target_ownership(source_text, _plain(target_text), program, mapping)
             if rendered is None or not validation.get("valid"):
-                raise ResponseProviderError("V238_OWNERSHIP_VALIDATION_FAILED")
+                counters["semantic_ownership_fallback"] = counters.get("semantic_ownership_fallback", 0) + 1
+                details.update({"path": "SEMANTIC_OWNERSHIP_FALLBACK_VALIDATION", "span_issues": span_issues, "validation": validation})
+                return base, details
             counters["semantic_ownership_render"] += 1
             details.update({"path": "SEMANTIC_OWNERSHIP", "span_issues": span_issues, "validation": validation})
             return rendered, details
