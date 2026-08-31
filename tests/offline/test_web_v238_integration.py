@@ -203,6 +203,18 @@ def test_c4_default_pipeline_is_v238():
     assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8"}
 
 
+def test_c4_generates_model_digest_when_missing():
+    with tempfile.TemporaryDirectory(prefix="c4-digest-") as raw:
+        path = Path(raw) / "transport_config.json"
+        saved = c4.save_transport_config(path, {
+            "primary": {"provider": "nvidia", "model": "nvidia/llama-3.1-8b-instruct"},
+            "keys": {"nvidia": "nvapi-test"},
+        })
+        assert saved["model_digest"]
+        assert saved["primary_model_digest"] == saved["model_digest"]
+        assert c4.load_transport_config(path)["model_digest"] == saved["model_digest"]
+
+
 def test_c4_save_and_load_pipeline():
     with tempfile.TemporaryDirectory(prefix="c4-") as raw:
         path = Path(raw) / "transport_config.json"

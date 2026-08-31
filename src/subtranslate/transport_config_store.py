@@ -9,6 +9,7 @@ Writes are atomic with a timestamped backup of the previous file.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -41,6 +42,19 @@ DEFAULT_CONFIG = {
 }
 
 
+def _model_digest(engine: dict[str, Any] | None) -> str | None:
+    """Gera identidade estável para provider, modelo e endpoint."""
+    if not engine:
+        return None
+    provider = str(engine.get("provider") or "").strip().lower()
+    model = str(engine.get("model") or "").strip()
+    base_url = str(engine.get("base_url") or "").strip()
+    if not provider or not model:
+        return None
+    material = "|".join((provider, model, base_url))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 class TransportConfigError(RuntimeError):
     pass
 
@@ -64,6 +78,12 @@ def load_transport_config(path: Path) -> dict[str, Any]:
         raise TransportConfigError("transport config inválido")
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update({k: v for k, v in value.items() if k in merged})
+    if not merged.get("model_digest"):
+        merged["model_digest"] = _model_digest(merged.get("primary"))
+    if not merged.get("primary_model_digest"):
+        merged["primary_model_digest"] = merged.get("model_digest")
+    if merged.get("fallback") and not merged.get("fallback_model_digest"):
+        merged["fallback_model_digest"] = _model_digest(merged.get("fallback"))
     return merged
 
 
@@ -137,9 +157,9 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         authorized = ["qwen", "gemini", "nvidia"]
     if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
         raise TransportConfigError("authorized_primary_models inválido")
-    model_digest = str(payload.get("model_digest") or "").strip() or None
-    primary_model_digest = str(payload.get("primary_model_digest") or model_digest or "").strip() or None
-    fallback_model_digest = str(payload.get("fallback_model_digest") or "").strip() or None
+    model_digest = str(payload.get("model_digest") or "").strip() or _model_digest(primary_clean)
+    primary_model_digest = str(payload.get("primary_model_digest") or model_digest or "").strip() or _model_digest(primary_clean)
+    fallback_model_digest = str(payload.get("fallback_model_digest") or "").strip() or _model_digest(fallback_clean)
     # Gemini profile: merge com defaults quando provider=gemini
     gemini_profile = payload.get("gemini_profile") or {}
     default_gemini = DEFAULT_CONFIG.get("gemini_profile", {})
