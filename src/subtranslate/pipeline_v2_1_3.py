@@ -1649,7 +1649,19 @@ class Client:
             )
         call_id = str(uuid.uuid4())
         payload: dict[str, Any] = {
-            "model": self.model, "messages": [{"role": "user", "content": prompt}],
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Você é um tradutor de legendas. Responda somente com JSON válido no formato exato "
+                        '{"translations":[{"id":inteiro,"text":"texto"}]} . '
+                        "Use exatamente os IDs recebidos, na mesma quantidade. Não inclua nenhum campo extra "
+                        "como kind, context, previous, next, classificação ou comentários."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
             "stream": False, "format": schema, "think": self.config.think,
             "options": {"temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict},
             "keep_alive": self.config.keep_alive,
@@ -2189,6 +2201,12 @@ class Runner:
             return
         missing = [unit for unit in units if any(event.id not in valid or self.results[event.id].retry_recommended for event in unit.events)]
         if not issues and not missing:
+            return
+        # A transport/validation attempt may report an advisory issue while
+        # still producing a valid result for every unit (for example after a
+        # durable subset is merged).  There is then nothing to isolate or
+        # retry; indexing ``missing[0]`` would raise an unrelated crash.
+        if not missing:
             return
         # A failed batch is isolated before any retry budget is consumed.
         # Counting/recording a retry at every recursive split caused an
