@@ -1122,6 +1122,9 @@ def _run_episode_v238(job: dict) -> None:
     ctx["response_provider"] = provider
     ctx["operation"] = "TRANSLATE"
     ctx["defer_intermediate_cleanup"] = False
+    # O pipeline V2.3.8 roda in-process; fornece uma consulta cooperativa para
+    # parar antes da próxima chamada/retry sem matar o processo do servidor.
+    ctx["cancel_check"] = lambda: bool(state.get("cancel_requested"))
     # Transport do provider primário para o V226 (config.transport):
     # o Client.call (pipeline_v2_1_3.py:1440-1463) usa config.transport se
     # presente; sem ele, cai no default Ollama (qwen3.5:9b do env).

@@ -412,6 +412,7 @@ def translate_subtitle_file_v2_2_5(
         # Pluggable transport provider (primary/fallback engine) injected from
         # the web transport config; Client.call uses it when present.
         config.transport = execution_context.get("transport")
+        config.cancel_check = execution_context.get("cancel_check")
     # Source language of the subtitle: explicit context wins, then the
     # configured environment default (web queue injects it per job), then
     # English.  Applied even without an execution context so direct plan

@@ -2126,6 +2126,15 @@ class Runner:
                     self._last_call_id = observation.get("call_id")
                     self._call_sequence += 1
                 return set(), ["RATE_LIMIT_429"]
+            # 4xx permanentes (ex.: NVIDIA 404 por model ID inválido) não
+            # devem iniciar cascata de retries: repetir a mesma requisição não
+            # pode corrigir autenticação, endpoint ou nome de modelo.
+            match = re.search(r"(?:HTTP_STATUS:|status code )([45]\d\d)", str(exc), re.I)
+            if match and 400 <= int(match.group(1)) < 500 and int(match.group(1)) not in {408, 409, 429}:
+                if self.calls:
+                    observation = self.calls[-1]
+                    observation.update({"non_retryable_transport": True, "http_status": int(match.group(1)), "success": False})
+                return set(), [f"NON_RETRYABLE_TRANSPORT_{match.group(1)}"]
             if self.calls:
                 observation = self.calls[-1]
                 observation.update({
@@ -2154,13 +2163,23 @@ class Runner:
                        *, attempt_type: str, logical_batch_id: str, batch_index: int | None = None) -> None:
         if not units:
             return
+        cancel_check = getattr(self.config, "cancel_check", None)
+        if callable(cancel_check) and cancel_check():
+            for unit in units:
+                for event in unit.events:
+                    self.results[event.id].status = "failed"
+                    self.results[event.id].failure_reason = "STOP_REQUESTED"
+            return
         ids = [event.id for unit in units for event in unit.events]
         valid, issues = self._attempt(
             units, phase=phase, parent_call_id=parent_call_id,
             attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
         )
         current_call_id = self._last_call_id
-        if any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")):
+        terminal_issue = any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")) or any(
+            reason.startswith("NON_RETRYABLE_TRANSPORT_") for reason in issues
+        )
+        if terminal_issue:
             failure = "; ".join(issues)
             for unit in units:
                 for event in unit.events:
@@ -2199,6 +2218,10 @@ class Runner:
         result = self.results[event.id]
         retry_parent = current_call_id
         for retry in range(self.config.max_retries):
+            if callable(cancel_check) and cancel_check():
+                result.status = "failed"
+                result.failure_reason = "STOP_REQUESTED"
+                return
             simplified = retry >= 1
             retry_phase = "retry_simplified" if simplified else "retry_local"
             result.retry_count += 1
@@ -2273,6 +2296,13 @@ class Runner:
     def run(self) -> dict[str, Any]:
         packed = self.plan_initial_batches()
         for batch_index, batch in enumerate(packed):
+            cancel_check = getattr(self.config, "cancel_check", None)
+            if callable(cancel_check) and cancel_check():
+                for unit in batch:
+                    for event in unit.events:
+                        self.results[event.id].status = "failed"
+                        self.results[event.id].failure_reason = "STOP_REQUESTED"
+                break
             self._process_units(
                 batch, "initial", attempt_type="INITIAL",
                 logical_batch_id=f"v226-initial-{batch_index:06d}", batch_index=batch_index,
