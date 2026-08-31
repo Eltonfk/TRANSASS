@@ -149,6 +149,21 @@ class OpenAICompatTransport(BaseTransport):
         return content
 
 
+class NvidiaTransport(OpenAICompatTransport):
+    """NVIDIA NIM API (build.nvidia.com) — OpenAI-compatible /chat/completions.
+
+    Offers several free models (e.g. ``meta/llama-3.1-8b-instruct``,
+    ``nvidia/llama-3.1-nemotron-70b-instruct``).  Reuses the OpenAI-compatible
+    wire format with a default base URL so the user only needs the API key.
+    """
+
+    name = "nvidia"
+
+    @staticmethod
+    def default_base_url() -> str:
+        return "https://integrate.api.nvidia.com/v1"
+
+
 class GeminiTransport(BaseTransport):
     """Google Generative Language API (generateContent)."""
 
@@ -209,6 +224,7 @@ _PROVIDERS = {
     "ollama": OllamaTransport,
     "openai_compat": OpenAICompatTransport,
     "gemini": GeminiTransport,
+    "nvidia": NvidiaTransport,
 }
 
 
@@ -237,6 +253,7 @@ def api_key_from_env(provider_name: str, environ_getter=None) -> str | None:
         "openai_compat": ("TRANSPORT_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
                           "OPENROUTER_API_KEY"),
         "gemini": ("TRANSPORT_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "nvidia": ("TRANSPORT_API_KEY", "NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"),
         "ollama": ("TRANSPORT_API_KEY",),
     }
     for env_name in env_names.get(provider_name, ("TRANSPORT_API_KEY",)):

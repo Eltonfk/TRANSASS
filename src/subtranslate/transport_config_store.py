@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-ALLOWED_PROVIDERS = {"ollama", "openai_compat", "gemini"}
+ALLOWED_PROVIDERS = {"ollama", "openai_compat", "gemini", "nvidia"}
 ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8"}
 DEFAULT_PIPELINE = "v2_3_8"
 DEFAULT_CONFIG = {
@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "keys": {},
     "source_language": "inglês",
     "pipeline": DEFAULT_PIPELINE,
-    "authorized_primary_models": ["qwen", "gemini"],
+    "authorized_primary_models": ["qwen", "gemini", "nvidia"],
     "model_digest": None,
     "primary_model_digest": None,
     "fallback_model_digest": None,
@@ -134,7 +134,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
         raise TransportConfigError(f"pipeline inválido: {pipeline}")
     authorized = payload.get("authorized_primary_models")
     if authorized is None:
-        authorized = ["qwen", "gemini"]
+        authorized = ["qwen", "gemini", "nvidia"]
     if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
         raise TransportConfigError("authorized_primary_models inválido")
     model_digest = str(payload.get("model_digest") or "").strip() or None

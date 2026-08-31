@@ -87,7 +87,9 @@ def test_c2_project_request_chat_shape():
         capture_root=Path("/tmp/captures"),
     )
     chat = provider._project_request({"text": "Olá mundo", "event_id": 1})
-    assert chat["messages"] == [{"role": "user", "content": "Olá mundo"}]
+    assert chat["messages"][-1] == {"role": "user", "content": "Olá mundo"}
+    assert chat["messages"][0]["role"] == "system"
+    assert "português do Brasil" in chat["messages"][0]["content"]
     assert chat["options"]["temperature"] == 0.0
     assert chat["format"] == "json"
 
@@ -196,8 +198,8 @@ def test_m10_build_context_does_not_inject_for_live():
 # ---------------------------------------------------------------------------
 
 
-def test_c4_default_pipeline_is_legacy():
-    assert c4.DEFAULT_PIPELINE == "legacy"
+def test_c4_default_pipeline_is_v238():
+    assert c4.DEFAULT_PIPELINE == "v2_3_8"
     assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8"}
 
 

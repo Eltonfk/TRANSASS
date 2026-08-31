@@ -48,6 +48,17 @@ def test_openai_compat_wire_format_and_auth():
     assert t.extract_content(body) == "OK"
 
 
+def test_nvidia_nim_uses_openai_compat_wire_format_and_default_endpoint():
+    t = tp.NvidiaTransport(model="meta/llama-3.1-8b-instruct", api_key="nvapi-test")
+    assert t.endpoint() == "https://integrate.api.nvidia.com/v1/chat/completions"
+    assert t.headers()["Authorization"] == "Bearer nvapi-test"
+    request = t.build_request(CANONICAL)
+    assert request["model"] == "meta/llama-3.1-8b-instruct"
+    assert request["stream"] is False
+    body = json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()
+    assert t.extract_content(body) == "OK"
+
+
 def test_gemini_wire_format_and_extract():
     t = tp.GeminiTransport(model="gemini-2.0-flash",
                            base_url="https://generativelanguage.googleapis.com/v1beta",
@@ -80,8 +91,24 @@ def test_factory_defaults_to_ollama_and_validates():
         tp.transport_from_config({"provider": "openai_compat"}, {})  # sem options/messages
 
 
+def test_factory_builds_nvidia_without_manual_base_url():
+    t = tp.transport_from_config(
+        {"provider": "nvidia", "model": "meta/llama-3.1-8b-instruct", "api_key": "nvapi-test"},
+        CANONICAL,
+    )
+    assert isinstance(t, tp.NvidiaTransport)
+    assert t.base_url == "https://integrate.api.nvidia.com/v1"
+    assert t.headers()["Authorization"] == "Bearer nvapi-test"
+
+
 def test_api_key_env_resolution():
     env = {"GEMINI_API_KEY": "key-from-env"}
     value = tp.api_key_from_env("gemini", environ_getter=env.get)
     assert value == "key-from-env"
     assert tp.api_key_from_env("gemini", environ_getter={}.get) is None
+
+
+def test_nvidia_api_key_env_resolution():
+    env = {"NVIDIA_API_KEY": "nvapi-from-env"}
+    assert tp.api_key_from_env("nvidia", environ_getter=env.get) == "nvapi-from-env"
+    assert tp.api_key_from_env("nvidia", environ_getter={}.get) is None
