@@ -130,7 +130,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
             # tenta derivar de model/gemini_profile se presente no ctx
             maybe_cfg = ctx.get("transport_config") or {}
             gemini_profile = maybe_cfg.get("gemini_profile") or {}
-        default_max = int(gemini_profile.get("retry_budget", 131)) if gemini_profile.get("enabled", False) and str(ctx.get("model") or "").lower().startswith("gemini") else int(ctx.get("qwen_physical_maximum", 131))
+        default_max = int(gemini_profile.get("retry_budget", 131)) if gemini_profile.get("enabled", False) and str(ctx.get("model") or "").lower().startswith("gemini") else int(ctx.get("qwen_physical_maximum", os.environ.get("V238_QWEN_PHYSICAL_MAXIMUM", 131)))
         # se perfil gemini ativo mas ctx model ainda é genérico, checa ctx gemini_profile enabled
         if gemini_profile.get("enabled", False) and not str(ctx.get("model") or "").lower().startswith("gemini"):
             # fallback: usa retry_budget do profile se provider for gemini (detecta via gemini_profile enabled)

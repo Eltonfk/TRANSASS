@@ -32,6 +32,7 @@ services:
       TRANSLATOR_WEB_STATE_DIR: /app/state
       ANIME_SUBTITLE_LIBRARY_ROOT: /app/state/anime-subtitle-library
       TRANSLATOR_GLOSSARY_PATH: /app/state/glossary_v1.json
+      V238_QWEN_PHYSICAL_MAXIMUM: ${V238_QWEN_PHYSICAL_MAXIMUM:-256}
     volumes:
       # Aponte MEDIA_ROOT para a pasta com seus vídeos/séries e STATE_DIR para
       # onde o app deve guardar o estado (Library, filas, config de motor).

@@ -265,6 +265,13 @@ def _restore_semantic_text(event: Event, translated: str) -> tuple[str | None, d
         # Reapply the source-owned ASS tags at their source segment/offset.
         # This is the same deterministic contract used by V2.2.4, but keeps
         # the translated member's intentional leading whitespace.
+        # Standalone visual symbols (notably ``&`` in sign cards) are not
+        # linguistic slots.  Preserve their source glyph instead of allowing
+        # a model variant such as ``e`` to create a false break inside a word.
+        for index, source_part in enumerate(source_parts):
+            source_visible = TAG_RE.sub("", source_part).strip()
+            if source_visible and not _WORD_RE.search(source_visible) and source_visible not in {"\\N", "\\h"}:
+                translated_parts[index] = source_part
         restored = r"\N".join(
             _replace_source_payload(source_part, target_part)
             for source_part, target_part in zip(source_parts, translated_parts)
