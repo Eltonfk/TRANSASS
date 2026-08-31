@@ -89,6 +89,21 @@ def test_m8_projects_failed_with_unresolved():
     assert "v238_unresolved_units" in projected["critical_flags"]
 
 
+def test_m8_does_not_allow_skipped_unresolved_units_to_complete():
+    result = {
+        "stages": [{"id": "FULL_TRANSLATION_V238", "result": {}}],
+        "karaoke": {"song_units": 2, "translated_units": 2, "failures": [], "structural_failures": []},
+        "primary_ledger": [
+            {"event_id": 1, "status": "RESOLVED"},
+            {"event_id": 2, "status": "BLOCKED"},
+        ],
+        "llama_phase": {"state": "SKIPPED_ALLOWED"},
+    }
+    projected = web._project_v238_summary(result)
+    assert projected["status"] == "FAILED"
+    assert projected["critical_flags"] == ["v238_unresolved_units"]
+
+
 def test_m8_projects_failed_with_karaoke_failures():
     result = {
         "stages": [{"id": "FULL_TRANSLATION_V238", "result": {}}],

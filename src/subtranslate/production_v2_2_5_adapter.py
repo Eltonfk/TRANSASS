@@ -405,6 +405,7 @@ def translate_subtitle_file_v2_2_5(
     started = time.perf_counter()
     config, merged_glossary = _config(subtitle_path, glossary)
     if execution_context:
+        config.model = execution_context.get("model") or execution_context.get("model_override") or config.model
         config.operation_budget = execution_context.get("operation_budget")
         config.model_digest = execution_context.get("primary_model_digest") or execution_context.get("model_digest")
         if execution_context.get("durable_call_root"):

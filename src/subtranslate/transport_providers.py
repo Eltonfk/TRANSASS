@@ -159,6 +159,18 @@ class NvidiaTransport(OpenAICompatTransport):
 
     name = "nvidia"
 
+    NVIDIA_MODEL_NAMESPACES = {
+        "deepseek-ai", "google", "meta", "microsoft", "minimaxai", "mistralai",
+        "moonshotai", "nvidia", "openai", "poolside", "qwen", "sarvamai",
+        "stepfun-ai", "stockmark", "thinkingmachines", "upstage", "z-ai",
+    }
+
+    def __init__(self, *, model: str, base_url: str | None = None, api_key: str | None = None):
+        namespace = model.split("/", 1)[0].casefold() if "/" in model else ""
+        if namespace not in self.NVIDIA_MODEL_NAMESPACES:
+            raise TransportBlocked("NVIDIA_MODEL_AUTHORITY_MISMATCH")
+        super().__init__(model=model, base_url=base_url, api_key=api_key)
+
     @staticmethod
     def default_base_url() -> str:
         return "https://integrate.api.nvidia.com/v1"

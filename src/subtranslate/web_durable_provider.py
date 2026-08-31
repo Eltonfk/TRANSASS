@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from v238_response_provider import DurableResponseProvider
-from transport_providers import transport_from_config
+from transport_providers import TransportBlocked, transport_from_config
 
 
 def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay: float = 0.0) -> bytes:
@@ -179,8 +179,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
         primary = self._transport_config.get("primary") or {}
         if primary.get("provider"):
             return primary
-        fallback = self._transport_config.get("fallback") or {}
-        return fallback or {"provider": "ollama", "model": "qwen3.5:9b"}
+        raise TransportBlocked("TRANSPORT_PRIMARY_MISSING")
 
 
 __all__ = ["WebDurableResponseProvider", "_http_post", "_decode_model_content"]

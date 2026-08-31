@@ -101,6 +101,14 @@ def test_factory_builds_nvidia_without_manual_base_url():
     assert t.headers()["Authorization"] == "Bearer nvapi-test"
 
 
+def test_nvidia_rejects_local_model_identifier_before_network():
+    with pytest.raises(tp.TransportBlocked, match="NVIDIA_MODEL_AUTHORITY_MISMATCH"):
+        tp.transport_from_config(
+            {"provider": "nvidia", "model": "qwen3.5:9b", "api_key": "nvapi-test"},
+            CANONICAL,
+        )
+
+
 def test_api_key_env_resolution():
     env = {"GEMINI_API_KEY": "key-from-env"}
     value = tp.api_key_from_env("gemini", environ_getter=env.get)

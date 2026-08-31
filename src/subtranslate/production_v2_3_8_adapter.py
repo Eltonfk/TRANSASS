@@ -36,7 +36,7 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     if provider is None:
         raise RuntimeError("V238_EXECUTION_CONTEXT_REQUIRED")
     execution_context.update(enforce_v238_runtime_context(execution_context))
-    execution_context.setdefault("v238_allow_primary_ledger_failures", True)
+    execution_context["v238_allow_primary_ledger_failures"] = False
     full_started = time.perf_counter()
 
     # Every mode traverses the same materializer protocol.  Live execution
@@ -65,17 +65,7 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     if eligible:
         llama_provider = execution_context.get("llama_provider")
         if llama_provider is None:
-            # M7 (gate canonico): com v238_allow_primary_ledger_failures=True
-            # (default no adapter, linha 39), pula a fase llama com
-            # SKIPPED_ALLOWED em vez de falhar o episódio inteiro.  As
-            # unidades BLOCKED/SUSPECT ficam não publicáveis, mas o episódio
-            # prossegue (D2=a: sem Llama phase na web).
-            if execution_context.get("v238_allow_primary_ledger_failures"):
-                llama_phase = {"state": "SKIPPED_ALLOWED", "eligible_count": len(eligible), "calls": 0,
-                               "load_requested": False, "unload_requested": False, "publishable": False,
-                               "results": [], "lineage": []}
-            else:
-                raise BaseTranslationMaterializerError("V238_CANONICAL_LLAMA_PROVIDER_REQUIRED")
+            raise BaseTranslationMaterializerError("V238_PRIMARY_LEDGER_UNRESOLVED")
         else:
             llama_tag = str(execution_context.get("llama_model_tag") or LLAMA_MODEL_TAG)
             llama_digest = str(execution_context.get("llama_model_digest") or LLAMA_MODEL_DIGEST)

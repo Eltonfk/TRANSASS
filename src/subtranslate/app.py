@@ -913,21 +913,14 @@ def _project_v238_summary(result: dict) -> dict:
                   if isinstance(row, dict) and str(row.get("status", "")).upper() in {"BLOCKED", "SUSPECT"}]
     events = len(primary_ledger) if primary_ledger else int(karaoke.get("song_units") or 0)
     resolved = max(0, events - len(unresolved)) if events else 0
-    # M7/SKIPPED_ALLOWED: com llama_provider=None e
-    # v238_allow_primary_ledger_failures=True, unidades BLOCKED/SUSPECT são
-    # permitidas (não publicáveis) — o episódio COMPLETA em vez de falhar.
-    llama_phase = result.get("llama_phase") if isinstance(result.get("llama_phase"), dict) else {}
-    skipped_allowed = str(llama_phase.get("state", "")).upper() == "SKIPPED_ALLOWED"
-    ok = not failures and not structural and (not unresolved or skipped_allowed)
+    ok = not failures and not structural and not unresolved
     status = "COMPLETED" if ok else "FAILED"
     last_stage = stages[-1].get("id") if stages and isinstance(stages[-1], dict) else "FULL_TRANSLATION_V238"
     flags: dict = {}
     critical_flags: list[str] = []
-    if unresolved and not skipped_allowed:
+    if unresolved:
         flags["v238_unresolved_units"] = len(unresolved)
         critical_flags.append("v238_unresolved_units")
-    elif unresolved and skipped_allowed:
-        flags["v238_skipped_allowed_units"] = len(unresolved)
     return {
         "status": status,
         "stage": last_stage,
