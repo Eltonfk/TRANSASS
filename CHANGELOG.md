@@ -4,6 +4,35 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.12] - 2026-09-01
+
+### Adicionado
+- Interface web reformulada: navegação em quatro áreas (Traduzir, Acervo e
+  revisão, Memória aprovada, Diagnóstico), fluxo de tradução em três passos,
+  toasts, atalhos de teclado (`/` e `Esc`), feedback "Carregando…" e bloqueio
+  de clique duplo, atualização da fila a cada 2 s com metadata de episódios
+  limitada a 10 s, e respostas de interface sem ledgers forenses gigantes
+  (63 MB → 31,8 KB). Páginas HTML com `Cache-Control: no-store`.
+
+### Corrigido
+- **Memória do host durante tradução**: o cache de prompts do Ollama vivia na
+  RAM do sistema (teto padrão de 8192 MiB) e nunca era reaproveitado porque
+  cada lote de tradução usa um prompt diferente. Desabilitado via
+  `OLLAMA_PROMPT_CACHE_RAM=0` / `LLAMA_ARG_CACHE_RAM=0` — libera ~8 GiB de
+  RAM do host sem perda de performance (o modelo permanece 100% na GPU).
+- `keep_alive` unificado em `ollama_runtime.py` (default `5m`, env
+  `OLLAMA_KV_CACHE_TYPE`/`OLLAMA_KEEP_ALIVE`), substituindo 15 literais `30m`.
+- `job["summary"]` podado: o `primary_ledger` por evento (durável em disco no
+  failure-ledger) deixou de ser duplicado no `jobs.json` — arquivo deixa de
+  crescer dezenas de MB por job.
+- Persistência do `jobs.json` compacta (sem `indent`), reduzindo o pico de
+  dump e o tamanho do arquivo.
+- `num_ctx` reduzido para 2560 com `TRANSLATOR_BATCH_SIZE=8`, alinhado aos
+  guards de identidade de payload (B4-B7).
+- Validação de envelope de apresentação V2.3.8 aceita spans estilizados no
+  base sem transição inline efetiva (eventos de karaokê/letra), evitando
+  falso positivo `V238_BASE_SEMANTIC_STYLE_OWNERSHIP_AMBIGUOUS`.
+
 ## [2.4.11] - 2026-08-30
 
 ### Corrigido
