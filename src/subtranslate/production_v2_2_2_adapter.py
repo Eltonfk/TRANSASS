@@ -31,6 +31,7 @@ from pipeline_v2_1_3 import (
     is_multi_speaker,
     load_events,
     normalize_delimiter_style,
+    preserve_source_punctuation_profile,
     normalize_idiomatic_output,
     reconstruct_event,
     validate_inline_tags,
@@ -209,8 +210,13 @@ def _reconstruct_line_break_event(event: Event, response: dict[str, Any]) -> tup
         return event.original_text, ["TEXT_NOT_STRING"]
     if any(token in translated for token in (r"\N", "{", "}", "§T", "§N", "§G")):
         return event.original_text, ["MODEL_EMITTED_STRUCTURAL_TOKEN"]
-    normalized, delimiter_changed = normalize_delimiter_style(event.clean_text, translated.strip())
-    flags: list[str] = ["DELIMITER_STYLE_NORMALIZED"] if delimiter_changed else []
+    normalized, punctuation_changed = preserve_source_punctuation_profile(event.clean_text, translated.strip())
+    normalized, delimiter_changed = normalize_delimiter_style(event.clean_text, normalized)
+    flags: list[str] = []
+    if punctuation_changed:
+        flags.append("PUNCTUATION_PROFILE_NORMALIZED")
+    if delimiter_changed:
+        flags.append("DELIMITER_STYLE_NORMALIZED")
     slots = _split_translation_safe(normalized, [segment.clean_text for segment in event.segments])
     if slots is None:
         return event.original_text, ["LINE_BREAK_INSIDE_WORD"]

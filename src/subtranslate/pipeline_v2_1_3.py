@@ -1376,6 +1376,54 @@ def normalize_delimiter_style(source: str, output: str) -> tuple[str, bool]:
     return normalized, normalized != output
 
 
+# Sentence punctuation is a presentation property of a subtitle line.  In
+# particular, lyric/source lines frequently have no commas or full stops; a
+# language model must not invent them merely because they are idiomatic in the
+# target language.  Quotes, apostrophes and dashes are intentionally excluded:
+# they can be lexical (e.g. ``d'água`` or ``guarda-chuva``) or are handled by
+# ``normalize_delimiter_style`` above.
+_PUNCTUATION_CLASSES: tuple[frozenset[str], ...] = (
+    frozenset(",，、"),
+    frozenset(".。"),
+    frozenset("!！"),
+    frozenset("?？"),
+    frozenset(";；"),
+    frozenset(":："),
+    frozenset("…"),
+)
+_PUNCTUATION_CHARS = frozenset(char for group in _PUNCTUATION_CLASSES for char in group)
+
+
+def preserve_source_punctuation_profile(source: str, output: str) -> tuple[str, bool]:
+    """Prevent translation from introducing punctuation absent in ``source``.
+
+    The comparison is performed on visible source text (ASS tags and line
+    break tokens are ignored).  For each punctuation class, output characters
+    are retained only when that class occurs in the source event.  This keeps
+    punctuation that is genuinely present while making unpunctuated dialogue
+    and opening/ending lyrics remain unpunctuated after translation.
+    """
+    source_visible = TAG_RE.sub("", source or "").replace(r"\N", "")
+    allowed = {char for group in _PUNCTUATION_CLASSES if any(char in source_visible for char in group) for char in group}
+    if all(any(char in source_visible for char in group) for group in _PUNCTUATION_CLASSES):
+        return output, False
+    changed = False
+    pieces: list[str] = []
+    position = 0
+    for match in TAG_RE.finditer(output or ""):
+        chunk = output[position:match.start()]
+        filtered = "".join(char for char in chunk if char not in _PUNCTUATION_CHARS or char in allowed)
+        changed = changed or filtered != chunk
+        pieces.append(filtered)
+        pieces.append(match.group(0))
+        position = match.end()
+    chunk = (output or "")[position:]
+    filtered = "".join(char for char in chunk if char not in _PUNCTUATION_CHARS or char in allowed)
+    changed = changed or filtered != chunk
+    pieces.append(filtered)
+    return "".join(pieces), changed
+
+
 def replace_romanization_gloss(original_text: str, translated_gloss: str) -> str:
     """Replace only the first visible bracket gloss; preserve base/tags exactly."""
     replacement = "[" + translated_gloss.strip() + "]"
@@ -1487,6 +1535,9 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
                 # `word\\Nword` is indistinguishable from a real intra-word
                 # split during the post-reconstruction validator.
                 base = left + " " + r"\N" + right
+    base, punctuation_normalized = preserve_source_punctuation_profile(event.clean_text, base)
+    if punctuation_normalized:
+        flags.append("PUNCTUATION_PROFILE_NORMALIZED")
     base, delimiter_style_normalized = normalize_delimiter_style(event.clean_text, base)
     if delimiter_style_normalized:
         flags.append("DELIMITER_STYLE_NORMALIZED")

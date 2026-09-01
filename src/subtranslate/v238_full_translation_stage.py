@@ -32,6 +32,7 @@ from v238_semantic_style_ownership import (
     render_target_ownership,
 )
 from v238_source_payload import rc4_replace_source_payload
+from pipeline_v2_1_3 import preserve_source_punctuation_profile
 
 
 STAGE_ID = "FULL_TRANSLATION_V238"
@@ -287,10 +288,17 @@ def _render_event(
 ) -> tuple[str, dict[str, Any]]:
     """Run the final deterministic layers for one generic ASS event."""
     counters["source_payload"] += 1
+    normalized_target, punctuation_changed = preserve_source_punctuation_profile(source_text, target_text)
+    # All later envelope/temporal reconstruction paths must consume the same
+    # normalized payload; otherwise a bypass branch could reintroduce model-
+    # invented punctuation after the base materializer ran.
+    target_text = normalized_target
     base = rc4_replace_source_payload(source_text, target_text)
     if base is None:
         raise ResponseProviderError("V238_SOURCE_PAYLOAD_RECONSTRUCTION_FAILED")
     details: dict[str, Any] = {"event_id": event_id, "path": "SOURCE_PAYLOAD"}
+    if punctuation_changed:
+        details["punctuation_profile"] = "SOURCE_PRESERVED"
     group_probe = getattr(provider, "v238_group_key", None)
     if callable(group_probe) and group_probe(event_id) is None:
         # The canonical base materializer has already produced the V226
