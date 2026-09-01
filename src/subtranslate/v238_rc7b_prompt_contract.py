@@ -14,7 +14,7 @@ from v238_rc7a_prompt_contract import build_rc7a_request
 
 RC7B_OPTIONS = {
     "temperature": 0.0,
-    "num_ctx": 4096,
+    "num_ctx": 2560,
     "num_predict": 384,
 }
 

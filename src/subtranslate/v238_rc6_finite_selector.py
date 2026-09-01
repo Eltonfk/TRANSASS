@@ -75,7 +75,7 @@ def build_selector_request(*, semantic_group_id:str, owners:list[dict[str,str]],
     atoms=target_atoms(target); labels=presentation["canonical_to_presented"]
     source="\n".join(f"OWNER {chr(64+labels[i])}: {owner['source_text']}" for i,owner in enumerate(owners,1))
     user="\n".join([f"SEMANTIC_GROUP: {semantic_group_id}","TASK: SELECT ONE FINITE CANDIDATE; DO NOT BUILD A MAPPING.","SOURCE OWNERS:",source,"TARGET ATOMS (immutable, shown once):"]+[f"ATOM {i}: {a}" for i,a in enumerate(atoms,1)]+["CANDIDATE CATALOG:"]+presentation["catalog"]+[f"NONE CHOICE: {presentation['none_choice_id']}","Return only a JSON root array containing exactly one integer choice ID. Choose NONE only if no listed candidate represents the semantic ownership."])
-    return {"model":model,"messages":[{"role":"system","content":"Select exactly one finite candidate. Return only [choice_id]. Do not return mappings, text, or objects."},{"role":"user","content":user}],"format":selector_schema(),"options":{"temperature":0.0,"num_ctx":4096,"num_predict":32},"stream":False,"think":False,"keep_alive":"30m"}
+    return {"model":model,"messages":[{"role":"system","content":"Select exactly one finite candidate. Return only [choice_id]. Do not return mappings, text, or objects."},{"role":"user","content":user}],"format":selector_schema(),"options":{"temperature":0.0,"num_ctx":2560,"num_predict":32},"stream":False,"think":False,"keep_alive":"30m"}
 
 def validate_selector_output(value:Any,presentation:dict[str,Any])->tuple[int|None,dict[str,Any]]:
     try: jsonschema.Draft7Validator(selector_schema()).validate(value)

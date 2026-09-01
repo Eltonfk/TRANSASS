@@ -122,7 +122,7 @@ def validate_payload() -> dict[str, Any]:
     if payload.get("model") != MODEL or payload.get("stream") is not False or payload.get("think") is not False:
         raise ExecutionBlocked("B4_PAYLOAD_MODEL_OR_STREAM_MISMATCH")
     options = payload.get("options")
-    if options != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+    if options != {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0}:
         raise ExecutionBlocked("B4_PAYLOAD_OPTIONS_MISMATCH")
     schema = payload.get("format")
     try:

@@ -139,7 +139,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
                     },
                     {"role": "user", "content": json.dumps(contract, ensure_ascii=False, separators=(",", ":"))},
                 ],
-                "options": {"temperature": 0.0, "num_ctx": 4096, "num_predict": 384},
+                "options": {"temperature": 0.0, "num_ctx": 2560, "num_predict": 384},
                 "format": OWNERSHIP_SCHEMA,
                 "stream": False,
                 "think": False,

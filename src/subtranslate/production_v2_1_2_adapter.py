@@ -32,7 +32,7 @@ APPROVED_MODEL = "qwen3.5:9b"
 APPROVED_CONFIG = {
     "think": False,
     "temperature": 0.0,
-    "num_ctx": 4096,
+    "num_ctx": 2560,
     "num_predict": 384,
     "keep_alive": ollama_keep_alive(),
     "timeout_seconds": 240.0,

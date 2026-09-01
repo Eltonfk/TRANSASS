@@ -16,7 +16,7 @@ CANONICAL = {
         {"role": "system", "content": "SYSTEM PROMPT"},
         {"role": "user", "content": "TARGET: [...] GLOSSARY: {} SCHEMA: {...}"},
     ],
-    "options": {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0},
+    "options": {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0},
     "stream": False,
     "think": False,
 }

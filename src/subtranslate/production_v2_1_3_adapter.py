@@ -33,7 +33,7 @@ APPROVED_PIPELINE = "v2_1_3"
 APPROVED_CONFIG = {
     "think": False,
     "temperature": 0.0,
-    "num_ctx": 4096,
+    "num_ctx": 2560,
     "num_predict": 1024,
     "keep_alive": ollama_keep_alive(),
     "timeout_seconds": 240.0,

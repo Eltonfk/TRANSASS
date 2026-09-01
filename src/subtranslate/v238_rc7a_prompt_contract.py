@@ -59,7 +59,7 @@ def build_rc7a_request(*, stage: str, semantic_group_id: str, owners: list[dict[
             {"role": "user", "content": "\n".join(lines)},
         ],
         "format": json.loads(json.dumps(CHOICE_SCHEMA)),
-        "options": {"temperature": 0.0, "num_ctx": 4096, "num_predict": 32},
+        "options": {"temperature": 0.0, "num_ctx": 2560, "num_predict": 32},
         "stream": False,
         "think": False,
         "keep_alive": "30m",

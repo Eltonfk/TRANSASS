@@ -117,7 +117,7 @@ class Config:
     model: str = "qwen3.5:9b"
     think: bool = False
     temperature: float = 0.0
-    num_ctx: int = 4096
+    num_ctx: int = 2560
     # V226 responses must have enough output headroom for the canonical JSON
     # envelope.  This is part of the family configuration identity; callers
     # may still override it explicitly, but the canonical default is 1024.

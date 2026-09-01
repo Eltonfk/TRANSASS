@@ -299,7 +299,7 @@ def alignment_schema(span_count: int) -> dict[str, Any]:
 
 def build_alignment_request(
     spans: Iterable[SemanticStyledSpan], *, source_text: str, target_text: str,
-    model: str, num_ctx: int = 4096, num_predict: int = 384,
+    model: str, num_ctx: int = 2560, num_predict: int = 384,
 ) -> dict[str, Any]:
     """Build a model request with linguistic data only, never raw ASS."""
     span_rows = [

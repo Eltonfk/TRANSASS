@@ -160,7 +160,7 @@ def build_atom_vector_request(*, semantic_group_id: str, target_text: str, sourc
             {"role": "user", "content": json.dumps(contract, ensure_ascii=False, separators=(",", ":"))},
         ],
         "format": schema,
-        "options": {"temperature": 0.0, "num_ctx": 4096, "num_predict": 384},
+        "options": {"temperature": 0.0, "num_ctx": 2560, "num_predict": 384},
         "stream": False,
         "think": False,
         "keep_alive": "30m",

@@ -86,7 +86,7 @@ class Config:
     model: str = "qwen3.5:9b"
     think: bool = False
     temperature: float = 0.0
-    num_ctx: int = 4096
+    num_ctx: int = 2560
     # 192 truncated a resposta estruturada já em blocos de quatro eventos na
     # amostra real; 384 é o limite experimental inicial e continua ajustável
     # pelo arquivo de configuração, sem alterar o código.

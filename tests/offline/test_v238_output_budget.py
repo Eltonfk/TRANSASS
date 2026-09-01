@@ -159,9 +159,9 @@ class OutputBudgetTests(unittest.TestCase):
 
     def test_r6b_dry_limits_allow_one_initial_and_zero_retry(self):
         """The pre-call contract is a dry bound, never an implicit retry path."""
-        config = Config("http://ollama.invalid", num_ctx=4096, num_predict=1024, max_retries=0)
+        config = Config("http://ollama.invalid", num_ctx=2560, num_predict=1024, max_retries=0)
         self.assertEqual(config.num_predict, 1024)
-        self.assertEqual(config.num_ctx, 4096)
+        self.assertEqual(config.num_ctx, 2560)
         self.assertEqual(config.max_retries, 0)
         dry_contract = {"initial_maximum": 1, "retry_maximum": 0}
         self.assertEqual(dry_contract, {"initial_maximum": 1, "retry_maximum": 0})

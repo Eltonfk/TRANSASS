@@ -599,7 +599,7 @@ def execute_batch(config: dict[str, Any], config_path: Path, batch_index: int,
         raise RunnerBlocked(f"BATCH_PAYLOAD_INVALID:b{batch_index}")
     if payload.get("model") != MODEL or payload.get("stream") is not False or payload.get("think") is not False:
         raise RunnerBlocked(f"BATCH_PAYLOAD_MODEL_OR_STREAM_MISMATCH:b{batch_index}")
-    if payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+    if payload.get("options") != {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0}:
         raise RunnerBlocked(f"BATCH_PAYLOAD_OPTIONS_MISMATCH:b{batch_index}")
 
     from transport_providers import api_key_from_env, transport_from_config
@@ -1395,7 +1395,7 @@ def retry_one(config: dict[str, Any], config_path: Path, batch_index: int,
 
     regular(payload_path)
     canonical_payload = json.loads(payload_path.read_bytes())
-    if canonical_payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+    if canonical_payload.get("options") != {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0}:
         raise RunnerBlocked(f"RETRY_PAYLOAD_OPTIONS_MISMATCH:b{batch_index}")
 
     from transport_providers import api_key_from_env, transport_from_config

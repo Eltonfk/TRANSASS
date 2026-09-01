@@ -176,7 +176,7 @@ def _ollama_translate(text: str, *, context_before: str = "", context_after: str
     )
     response = requests.post(endpoint, json={"model": chosen_model, "stream": False,
         "think": False, "keep_alive": ollama_keep_alive(),
-        "options": {"temperature": 0, "num_ctx": 4096, "num_predict": 384}, "format": "json",
+        "options": {"temperature": 0, "num_ctx": 2560, "num_predict": 384}, "format": "json",
         "messages": [{"role": "user", "content": prompt}]}, timeout=240)
     response.raise_for_status()
     payload = response.json()

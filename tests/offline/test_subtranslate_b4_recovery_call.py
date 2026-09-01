@@ -52,7 +52,7 @@ class B4ExecutorTests(unittest.TestCase):
                       "items": {"type": "object", "additionalProperties": False,
                                 "required": ["id", "text"], "properties": {"id": {"type": "integer"}, "text": {"type": "string"}}}}}}
         self.payload = {"format": schema, "keep_alive": "30m", "messages": [{"role": "user", "content": "fixed"}],
-                        "model": executor.MODEL, "options": {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0},
+                        "model": executor.MODEL, "options": {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0},
                         "stream": False, "think": False}
         self.payload_path.write_bytes(executor.canonical_bytes(self.payload))
         (self.runtime / "operation.json").write_text(json.dumps({"operation_id": executor.OPERATION_ID}))

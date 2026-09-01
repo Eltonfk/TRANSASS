@@ -268,7 +268,7 @@ def execute(batch_index: int) -> dict[str, Any]:
         raise ExecutionBlocked("BATCH_PAYLOAD_INVALID")
     if payload.get("model") != MODEL or payload.get("stream") is not False or payload.get("think") is not False:
         raise ExecutionBlocked("BATCH_PAYLOAD_MODEL_OR_STREAM_MISMATCH")
-    if payload.get("options") != {"num_ctx": 4096, "num_predict": 1024, "temperature": 0.0}:
+    if payload.get("options") != {"num_ctx": 2560, "num_predict": 1024, "temperature": 0.0}:
         raise ExecutionBlocked("BATCH_PAYLOAD_OPTIONS_MISMATCH")
     schema = payload.get("format")
     try:
