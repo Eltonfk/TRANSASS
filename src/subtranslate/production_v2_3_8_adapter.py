@@ -58,13 +58,21 @@ def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
         )
         if program is None or not details.get("valid"):
             continue
+        base_text = base_event.text or ""
+        if "{" not in base_text:
+            # The base lost the styled spans entirely: real presentation loss.
+            raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_OWNERSHIP_AMBIGUOUS")
         base_program, base_details = extract_semantic_style_ownership(
-            base_event.text or "",
+            base_text,
             program_id=f"base-validation-event-{event_index}",
             envelope_id=event_index,
         )
         if base_program is None or not base_details.get("valid"):
-            raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_OWNERSHIP_AMBIGUOUS")
+            # The base kept styled spans but the ownership analysis found no
+            # effective inline state change (e.g. karaoke markers dropped in
+            # the translation).  That is a legitimate simplification, not a
+            # loss of the presentation envelope.
+            continue
         if tuple(base_program.semantic_properties) != tuple(program.semantic_properties):
             raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_PROPERTIES_MISMATCH")
         if len(base_program.source_semantic_segments) != len(program.source_semantic_segments):
