@@ -49,6 +49,12 @@ def _project_v238_summary(result: dict) -> dict:
     """G3: projeta o resultado do orchestrator v2_3_8 para o formato
     exigido pelo web layer, incluindo v238_metrics (mesma lógica do app.py)."""
     stages = result.get("stages") if isinstance(result.get("stages"), list) else []
+    # The per-event ledger is durable on disk; keep only counters in the
+    # persisted summary so jobs.json does not grow tens of MB per job.
+    stages = [
+        {"id": stage.get("id"), "result": {key: value for key, value in stage.get("result", {}).items() if key != "primary_ledger"}}
+        for stage in stages if isinstance(stage, dict)
+    ]
     karaoke = result.get("karaoke") if isinstance(result.get("karaoke"), dict) else {}
     primary_ledger = result.get("primary_ledger") if isinstance(result.get("primary_ledger"), list) else []
     failures = karaoke.get("failures") if isinstance(karaoke.get("failures"), list) else []
@@ -174,6 +180,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 configuration_hash=os.environ.get("CONFIGURATION_HASH"),
                 candidate_commit=os.environ.get("CANDIDATE_COMMIT"),
                 candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID"),
+                failure_ledger_root=Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "failure-ledger",
             )
             # Gemini profile: aplica modelo válido e budget, fallback se sem key
             primary_provider = str((transport_config.get("primary") or {}).get("provider", "")).lower()

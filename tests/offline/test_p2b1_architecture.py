@@ -82,7 +82,11 @@ class DispatchTests(unittest.TestCase):
             def augment(source, output, **kwargs):
                 calls.append("v230")
                 Path(output).write_text("final", encoding="utf-8")
-                return {"stage": "v230"}
+                return {
+                    "stage": "v230", "song_units": 0, "translated_units": 0,
+                    "translated_events": 0, "unsupported": 0,
+                    "failures": [], "structural_failures": [],
+                }
 
             return SimpleNamespace(augment_karaoke_candidate_v2_3_0=augment)
 

@@ -565,7 +565,7 @@ class PerCallDurabilityTests(unittest.TestCase):
                 status_code = 200
 
                 def __init__(self, payload):
-                    content = payload["messages"][0]["content"]
+                    content = next(message["content"] for message in payload["messages"] if "TARGET: " in message["content"])
                     target = json.loads(content.split("TARGET: ", 1)[1].split("\nGLOSSARY:", 1)[0])
                     translations = [{"id": item["id"], "text": "texto traduzido"} for item in target]
                     inner = json.dumps({"translations": translations}, ensure_ascii=False)
@@ -574,7 +574,8 @@ class PerCallDurabilityTests(unittest.TestCase):
             transports = []
 
             def local_provider(*args, **kwargs):
-                transports.append(tuple(item["id"] for item in json.loads(kwargs["json"]["messages"][0]["content"].split("TARGET: ", 1)[1].split("\nGLOSSARY:", 1)[0])))
+                content = next(message["content"] for message in kwargs["json"]["messages"] if "TARGET: " in message["content"])
+                transports.append(tuple(item["id"] for item in json.loads(content.split("TARGET: ", 1)[1].split("\nGLOSSARY:", 1)[0])))
                 return Response(kwargs["json"])
 
             def runner_for(operation_id):

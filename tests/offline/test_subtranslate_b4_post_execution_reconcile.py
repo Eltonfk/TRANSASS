@@ -56,7 +56,7 @@ def test_build_after_refuses_duplicate_reconciliation():
 
 def test_cli_contract_contains_separate_plan_and_apply():
     source = MODULE_PATH.read_text(encoding="utf-8")
-    assert 'group.add_argument("--plan"' in source
-    assert 'group.add_argument("--apply"' in source
+    assert 'add_argument("--plan"' in source
+    assert 'add_argument("--apply"' in source
     assert "subtranslate_canonical_backup.py" not in source
     assert "subtranslate_b4_recovery_call.py" not in source

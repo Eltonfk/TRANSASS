@@ -257,7 +257,15 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
                     return self.body
 
             def fake_post(url, **kwargs):
-                content = kwargs["json"]["messages"][0]["content"]
+                # The V2.2.x Ollama envelope keeps the system contract in
+                # message 0 and the TARGET payload in the user message.  Do
+                # not couple this seam test to list position: locate the
+                # actual translation prompt by its fixed marker.
+                content = next(
+                    message["content"]
+                    for message in kwargs["json"]["messages"]
+                    if "TARGET: " in message.get("content", "")
+                )
                 match = re.search(r"TARGET: (\[.*?\])\nGLOSSARY:", content, re.S)
                 targets = json.loads(match.group(1))
                 translations = [{"id": item["id"], "text": "olá"} for item in targets]

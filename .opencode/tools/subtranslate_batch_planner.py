@@ -188,6 +188,8 @@ class _PayloadCaptured(Exception):
 
 def _build_runner_with_engine(source_path: Path, episode_title: str, engine_root: Path) -> tuple[Any, Any]:
     engine_src = engine_root / "src/subtranslate"
+    for module_name in ("pipeline_v2_1_3", "production_v2_1_3_adapter", "production_v2_2_6_adapter"):
+        sys.modules.pop(module_name, None)
     if str(engine_src) not in sys.path:
         sys.path.insert(0, str(engine_src))
 

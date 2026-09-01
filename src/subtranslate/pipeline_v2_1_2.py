@@ -22,6 +22,8 @@ from typing import Any
 import pysubs2
 import requests
 
+from ollama_runtime import ollama_keep_alive
+
 
 TAG_RE = re.compile(r"\{[^}]*\}")
 TOKEN_RE = re.compile(r"(\{[^}]*\}|\\N)")
@@ -89,7 +91,7 @@ class Config:
     # amostra real; 384 é o limite experimental inicial e continua ajustável
     # pelo arquivo de configuração, sem alterar o código.
     num_predict: int = 384
-    keep_alive: str = "30m"
+    keep_alive: str = ollama_keep_alive()
     timeout_seconds: float = 240
     batch_target_size: int = 6
     context_before: int = 3

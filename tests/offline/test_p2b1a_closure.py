@@ -6,6 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+# The application intentionally persists control-plane state at import time.
+# Keep this historical closure suite hermetic even when the host's /app is
+# read-only (as it is outside the production container).
+_TEST_STATE_ROOT = tempfile.mkdtemp(prefix="p2b1a-state-")
+os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", _TEST_STATE_ROOT)
+os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", str(Path(_TEST_STATE_ROOT) / "library"))
+os.environ.setdefault("ANIME_LIBRARY_ROOTS", str(Path(_TEST_STATE_ROOT) / "media"))
+
 import pipeline_orchestrator as orchestrator
 from pipeline_orchestrator import PipelineStageValidationError
 
@@ -174,11 +182,11 @@ class ContractAndControlPlaneTests(unittest.TestCase):
                 return {"pipeline": plan, "plan_id": plan, "output": Path(output).name, "events": 1, "resolved": 1, "flags": {}, "critical_flags": [], "retry_budget": {}, "retry_calls": 0, "calls": 0, "stages": []}
             def archive_translation(*args, **kwargs):
                 archived.append((args, kwargs))
-            with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "v2_3_0"}), patch.object(translator, "TRANSLATOR_PIPELINE", "v2_3_0"), patch.object(translator, "VIDEO_EXTENSIONS", {".mkv"}), patch.object(translator, "has_pt_subtitle", return_value=False), patch.object(translator, "is_ready_for_translation", return_value=True), patch.object(translator, "find_subtitle_stream", return_value=(0, "eng", ".ass")), patch.object(translator, "extract_subtitle", side_effect=lambda v, i, p: Path(p).write_text("source", encoding="utf-8")), patch.object(translator, "load_glossary_for_folder", return_value={}), patch.object(anime_library_hooks, "archive_source", return_value={"series_id": 1, "episode_id": 2}), patch.object(anime_library_hooks, "archive_translation", side_effect=archive_translation), patch.object(translator, "execute_pipeline_plan", side_effect=execute):
+            with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "v2_3_0"}), patch.object(translator, "TRANSLATOR_PIPELINE", "v2_3_0"), patch.object(translator, "VIDEO_EXTENSIONS", {".mkv"}), patch.object(translator, "has_pt_subtitle", return_value=False), patch.object(translator, "is_ready_for_translation", return_value=True), patch.object(translator, "find_subtitle_stream", return_value=(0, "eng", ".ass")), patch.object(translator, "extract_subtitle", side_effect=lambda v, i, p: Path(p).write_text("source", encoding="utf-8")), patch.object(translator, "load_glossary_for_folder", return_value={}), patch.object(anime_library_hooks, "archive_source", return_value={"series_id": 1, "episode_id": 2}), patch.object(anime_library_hooks, "archive_translation", side_effect=archive_translation), patch.object(anime_library_hooks, "archive_v230_pipeline", side_effect=archive_translation), patch.object(translator, "execute_pipeline_plan", side_effect=execute):
                 self.assertEqual(translator.process_folder(root), 0)
             self.assertEqual(len(archived), 1)
             self.assertEqual(Path(archived[0][0][1]).name, "source.pt-BR.ass")
-            self.assertEqual(archived[0][1]["pipeline_version"], "v2_3_0")
+            self.assertEqual(archived[0][1]["execution_result"]["pipeline"], "v2_3_0")
 
 
 class DockerClosureTests(unittest.TestCase):

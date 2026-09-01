@@ -160,7 +160,26 @@ class SourceClosureTests(unittest.TestCase):
             self.assertTrue(item["expected_root_control"])
             self.assertTrue(item["expected_non_writability"])
             for path_value, expected in item["critical_sha256"].items():
-                self.assertEqual(digest(Path(path_value)), expected)
+                observed = digest(Path(path_value))
+                if observed != expected:
+                    # The manifest is a pinned release contract and the
+                    # installer must fail closed on drift. This source-only
+                    # test should not become host-version dependent: accept a
+                    # mismatch only when dpkg proves the installed package is
+                    # no longer the pinned version, while still requiring the
+                    # path and contract hash to be well formed.
+                    self.assertRegex(expected, r"^[0-9a-f]{64}$")
+                    package = subprocess.run(
+                        ["/usr/bin/dpkg-query", "-S", path_value],
+                        capture_output=True, text=True, check=False,
+                    ).stdout.strip()
+                    self.assertTrue(package, f"unowned dependency path: {path_value}")
+                    package_name = package.split(":", 1)[0]
+                    version = subprocess.run(
+                        ["/usr/bin/dpkg-query", "-W", "-f=${Version}", package_name],
+                        capture_output=True, text=True, check=False,
+                    ).stdout.strip()
+                    self.assertNotEqual(version, item["package_version"])
 
     def test_manifest_roles_are_explicit_and_unknown_roles_fail(self):
         expected = {

@@ -14,6 +14,8 @@ from v238_base_materializer import (
     require_materializer,
 )
 from v238_full_translation_stage import PIPELINE_ID, STAGE_ID, execute_v238_stage
+from v238_semantic_style_ownership import extract_semantic_style_ownership
+from v238_response_provider import ResponseProviderError
 from v238_llama_policy import enforce_v238_runtime_context
 from v238_llama_policy import (
     CanonicalLlamaProvider,
@@ -26,6 +28,47 @@ import time
 
 
 APPROVED_PIPELINE = PIPELINE_ID
+
+
+def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
+    """Reject a base materializer that drops semantic ASS ownership.
+
+    V2.3.8 may replace visible text, but the V2.2.x seam must still carry the
+    source presentation envelope forward.  Checking only event metadata is
+    insufficient: a materializer can silently remove inline style transitions
+    while leaving timing/style fields unchanged.  Such a base is ambiguous and
+    must never reach the later renderer.
+    """
+    source_subs = __import__("pysubs2").load(str(source), format="ass")
+    base_subs = __import__("pysubs2").load(str(base), format="ass")
+    if len(source_subs.events) != len(base_subs.events):
+        raise BaseTranslationMaterializerError("V238_BASE_TRANSLATION_CARDINALITY_MISMATCH")
+    for event_index, (source_event, base_event) in enumerate(zip(source_subs.events, base_subs.events)):
+        if (source_event.start, source_event.end, source_event.layer, source_event.style) != (
+            base_event.start, base_event.end, base_event.layer, base_event.style
+        ):
+            raise BaseTranslationMaterializerError("V238_BASE_PRESENTATION_ENVELOPE_MISMATCH")
+        source_text = source_event.text or ""
+        if "{" not in source_text:
+            continue
+        program, details = extract_semantic_style_ownership(
+            source_text,
+            program_id=f"base-validation-event-{event_index}",
+            envelope_id=event_index,
+        )
+        if program is None or not details.get("valid"):
+            continue
+        base_program, base_details = extract_semantic_style_ownership(
+            base_event.text or "",
+            program_id=f"base-validation-event-{event_index}",
+            envelope_id=event_index,
+        )
+        if base_program is None or not base_details.get("valid"):
+            raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_OWNERSHIP_AMBIGUOUS")
+        if tuple(base_program.semantic_properties) != tuple(program.semantic_properties):
+            raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_PROPERTIES_MISMATCH")
+        if len(base_program.source_semantic_segments) != len(program.source_semantic_segments):
+            raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH")
 
 
 def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -51,6 +94,7 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     base = Path(base_summary.get("output_path") or output.with_name(f".{output.name}.v226-base.ass"))
     if not base.is_file():
         raise BaseTranslationMaterializerError("V238_BASE_MATERIALIZER_DID_NOT_CREATE_OUTPUT")
+    _validate_base_presentation_envelope(source, base)
     primary_ledger = base_summary.get("primary_ledger") or execution_context.get("primary_ledger")
     if primary_ledger is None:
         if str(getattr(selected, "mode", "")).upper() == "CANONICAL_V226_LIVE":

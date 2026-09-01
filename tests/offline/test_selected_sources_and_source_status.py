@@ -19,16 +19,19 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
-# app.py imports Flask at module level; inject a minimal fake so the test runs
-# without Flask installed (same approach as test_auto_classify_anime.py).
-_fake_flask = types.ModuleType("flask")
-_fake_flask.Flask = MagicMock()
-_fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
-_fake_flask.Response = MagicMock()
-_fake_flask.jsonify = MagicMock()
-_fake_flask.request = MagicMock()
-_fake_flask.send_file = MagicMock()
-sys.modules.setdefault("flask", _fake_flask)
+# Prefer the real Flask package. The fallback is intentionally installed only
+# when the dependency is unavailable, so this module cannot contaminate other
+# test modules with a process-global fake implementation.
+try:
+    import flask as _flask  # noqa: F401
+except ImportError:
+    _fake_flask = types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    sys.modules["flask"] = _fake_flask
 
 _TMP = tempfile.TemporaryDirectory()
 os.environ["TRANSLATOR_WEB_STATE_DIR"] = _TMP.name

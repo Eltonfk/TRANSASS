@@ -76,6 +76,7 @@ def build_v238_execution_context(
     configuration_hash: str | None = None,
     candidate_commit: str | None = None,
     candidate_image_id: str | None = None,
+    failure_ledger_root: str | Path | None = None,
     llama_model_tag: str | None = None,
     llama_model_digest: str | None = None,
 ) -> dict:
@@ -104,6 +105,7 @@ def build_v238_execution_context(
         "configuration_hash": configuration_hash,
         "candidate_commit": candidate_commit,
         "candidate_image_id": candidate_image_id,
+        "failure_ledger_root": str(failure_ledger_root) if failure_ledger_root is not None else None,
         "llama_model_tag": llama_model_tag,
         "llama_model_digest": llama_model_digest,
     }

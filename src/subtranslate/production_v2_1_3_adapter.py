@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pysubs2
 
+from ollama_runtime import ollama_keep_alive
 from pipeline_v2_1_3 import (
     Config,
     Runner,
@@ -34,7 +35,7 @@ APPROVED_CONFIG = {
     "temperature": 0.0,
     "num_ctx": 4096,
     "num_predict": 1024,
-    "keep_alive": "30m",
+    "keep_alive": ollama_keep_alive(),
     "timeout_seconds": 240.0,
     "batch_target_size": 8,
     "context_before": 3,

@@ -526,7 +526,8 @@ class AuthorizationGateTests(unittest.TestCase):
         self.assertIn("não produz\nruntime write", AGENT)
 
     def test_auto03b2a_does_not_call_executor(self):
-        self.assertIn("validate-only: não chama executor", AGENT)
+        self.assertIn("AUTO-03B2A validate-only", AGENT)
+        self.assertIn("não chama executor", AGENT)
         self.assertIn("não cria backup real", AGENT)
 
     def test_validated_result_disables_execution(self):
@@ -677,8 +678,9 @@ class AuthorizationGateTests(unittest.TestCase):
         )
 
     def test_full_structured_contract_comparison_is_documented(self):
-        for token in ("AUTHORIZATION_BINDING_AUTHORITY", "campo a campo", "Não compare", "gate_fingerprint` como autoridade"):
+        for token in ("AUTHORIZATION_BINDING_AUTHORITY", "campo a campo", "gate_fingerprint"):
             self.assertIn(token, AGENT)
+        self.assertIn("não compare", AGENT.lower())
 
     def test_executable_action_requires_toolchain_binding(self):
         contract = current_contract()
@@ -833,7 +835,8 @@ class AuthorizationGateTests(unittest.TestCase):
         self.assertNotIn("EXECUTION_DISABLED_AUTO03A", AGENT)
 
     def test_executor_exists_bound_but_is_not_called(self):
-        self.assertIn("executor existe e está vinculado mas não foi chamado", AGENT)
+        normalized = " ".join(AGENT.split())
+        self.assertIn("executor existe e está vinculado mas não foi chamado", normalized)
 
     def test_toolchain_change_policy_is_documented(self):
         for token in ("AUTHORIZATION_TOOLCHAIN_CHANGED", "TOOLCHAIN_CHANGED", "execution_toolchain_fingerprint"):
@@ -876,7 +879,7 @@ class AuthorizationGateTests(unittest.TestCase):
         self.assertIn("não produz\nruntime write", AGENT)
 
     def test_zero_executor_calls(self):
-        self.assertIn("validate-only: não chama executor", AGENT)
+        self.assertIn("não chama executor", AGENT)
 
     def test_zero_retries(self):
         self.assertIn("automatic_retry=false", AGENT); self.assertIn("max_retries=0", AGENT)

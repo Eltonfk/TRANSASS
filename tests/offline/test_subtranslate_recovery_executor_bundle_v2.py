@@ -208,7 +208,17 @@ class RecoveryExecutorV2Tests(unittest.TestCase):
                 text=True, capture_output=True, check=False,
             )
             self.assertIn(result.returncode, (2, 3))
-            self.assertIn("OFFICIAL_SCHEMA_UNAVAILABLE", result.stdout)
+            report = json.loads(result.stdout)
+            # Missing bundle dependencies must fail closed before any
+            # candidate fallback.  Depending on which immutable precondition
+            # is observed first, the structured report may expose the
+            # canonical-prestate blocker at the top level and the missing
+            # bundle object in the toolchain evidence.
+            serialized = json.dumps(report, sort_keys=True)
+            self.assertTrue(
+                "OFFICIAL_SCHEMA_UNAVAILABLE" in serialized
+                or "FILE_DISAPPEARED" in serialized
+            )
             self.assertNotIn(str(ROOT / "src"), result.stdout)
 
     def test_fixture_apply_preserves_v1_semantics_and_v2_backup_policy(self):

@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from v238_response_provider import DurableResponseProvider
 from transport_providers import TransportBlocked, transport_from_config
+from ollama_runtime import ollama_keep_alive
 
 
 def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay: float = 0.0) -> bytes:
@@ -142,7 +143,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 "format": OWNERSHIP_SCHEMA,
                 "stream": False,
                 "think": False,
-                "keep_alive": "30m",
+                "keep_alive": ollama_keep_alive(),
             }
         # Prompt de tradução explícito para pt-BR, incluindo contexto de anime
         # e instrução para NÃO preservar letras de música em inglês (OP/ED English).

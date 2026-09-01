@@ -345,7 +345,13 @@ class CanonicalV226LiveMaterializer:
         # The frozen V2.2.5 seam names its Translation Memory root
         # ``memory_db_root``.  Keep the V2.3.8 context spelling flexible, but
         # never forward the historical ``memory_root`` keyword to V2.2.5.
-        base_kwargs = {key: context.get(key) for key in ("glossary", "anime_series_id", "episode_id", "job_id") if context.get(key) is not None}
+        base_kwargs = {key: context.get(key) for key in ("glossary", "anime_series_id", "episode_id", "job_id", "failure_ledger_root") if context.get(key) is not None}
+        # Direct callers (including offline seam tests) often provide an
+        # isolated checkpoint root but no process-wide ledger environment.
+        # Keep the ledger inside that same isolated state boundary instead of
+        # falling back to the container-only ``/app/state`` path.
+        if "failure_ledger_root" not in base_kwargs and context.get("checkpoint_root"):
+            base_kwargs["failure_ledger_root"] = Path(context["checkpoint_root"]).parent / "failure-ledger"
         if memory_db_root is not None:
             base_kwargs["memory_db_root"] = memory_db_root
         call_context = dict(context)

@@ -9,7 +9,8 @@ import sys
 import types
 from pathlib import Path
 
-# Mock flask before importing app
+# Mock flask before importing app only when the optional dependency is absent.
+# A process-global fake otherwise contaminates unrelated app tests.
 import os
 import tempfile
 
@@ -17,26 +18,30 @@ _TMP_STATE = tempfile.mkdtemp(prefix="v238-fase2-state-")
 os.environ["TRANSLATOR_WEB_STATE_DIR"] = _TMP_STATE
 os.environ["TRANSLATOR_BASE_LIBRARY"] = _TMP_STATE
 
-flask_mock = types.ModuleType("flask")
-class _Flask:
-    def __init__(self, *args, **kwargs):
-        self.routes = {}
+try:
+    import flask as _flask  # noqa: F401
+except ImportError:
+    flask_mock = types.ModuleType("flask")
 
-    def route(self, rule, **options):
-        def decorator(fn):
-            self.routes[rule] = fn
-            return fn
-        return decorator
+    class _Flask:
+        def __init__(self, *args, **kwargs):
+            self.routes = {}
 
-    def test_client(self):
-        return None
+        def route(self, rule, **options):
+            def decorator(fn):
+                self.routes[rule] = fn
+                return fn
+            return decorator
 
-flask_mock.Flask = _Flask
-flask_mock.Response = type("Response", (), {})
-flask_mock.jsonify = lambda *a, **k: {"_jsonify": True}
-flask_mock.request = types.SimpleNamespace(get_json=lambda silent=False: {})
-flask_mock.send_file = lambda *a, **k: None
-sys.modules["flask"] = flask_mock
+        def test_client(self):
+            return None
+
+    flask_mock.Flask = _Flask
+    flask_mock.Response = type("Response", (), {})
+    flask_mock.jsonify = lambda *a, **k: {"_jsonify": True}
+    flask_mock.request = types.SimpleNamespace(get_json=lambda silent=False: {})
+    flask_mock.send_file = lambda *a, **k: None
+    sys.modules["flask"] = flask_mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "subtranslate"))
 

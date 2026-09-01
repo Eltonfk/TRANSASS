@@ -12,18 +12,21 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# The classification logic lives in app.py, which imports Flask at module level.
-# The unit environment has no Flask installed, so we inject a minimal fake
-# Flask whose @route decorator is the identity function. This keeps the test
-# environment-independent (no Flask, no real Library, no ffprobe).
-_fake_flask = types.ModuleType("flask")
-_fake_flask.Flask = MagicMock()
-_fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
-_fake_flask.Response = MagicMock()
-_fake_flask.jsonify = MagicMock()
-_fake_flask.request = MagicMock()
-_fake_flask.send_file = MagicMock()
-sys.modules["flask"] = _fake_flask
+# The classification logic lives in app.py, which imports Flask at module
+# level. Use the real dependency when available; only provide the historical
+# minimal shim in environments where Flask is genuinely absent. Unconditional
+# injection leaked a fake module into later tests and hid real integration
+# regressions.
+try:
+    import flask as _flask  # noqa: F401
+except ImportError:
+    _fake_flask = types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    sys.modules["flask"] = _fake_flask
 
 _TMP = tempfile.TemporaryDirectory()
 os.environ["TRANSLATOR_WEB_STATE_DIR"] = _TMP.name

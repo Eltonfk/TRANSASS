@@ -69,7 +69,13 @@ def _fsync_dir(path: Path) -> None:
 
 def load_transport_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
-        return json.loads(json.dumps(DEFAULT_CONFIG))
+        # Defaults must carry the same model identity as a persisted config.
+        # Without this, a first-run V2.3.8 web job enters LIVE_CAPTURED with
+        # ``model_digest=None`` and fails before making its first call.
+        merged = json.loads(json.dumps(DEFAULT_CONFIG))
+        merged["model_digest"] = _model_digest(merged.get("primary"))
+        merged["primary_model_digest"] = merged["model_digest"]
+        return merged
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

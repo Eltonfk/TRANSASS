@@ -39,6 +39,7 @@ from pathlib import Path
 import requests
 import pysubs2
 
+from ollama_runtime import ollama_keep_alive
 from pipeline_registry import UnsupportedPipelineError, get_pipeline_plan
 from pipeline_orchestrator import execute_pipeline_plan
 from pipeline_lineage import public_summary
@@ -65,7 +66,23 @@ BATCH_SIZE = max(1, int(os.environ.get("TRANSLATOR_BATCH_SIZE", "4")))
 OLLAMA_TIMEOUT = int(os.environ.get("TRANSLATOR_OLLAMA_TIMEOUT", "240"))
 MIN_FILE_AGE_SECONDS = int(os.environ.get("TRANSLATOR_MIN_FILE_AGE_SECONDS", "600"))
 BASE_LIBRARY = Path(os.environ.get("TRANSLATOR_BASE_LIBRARY", "/shows"))
-OLLAMA_URL = os.environ.get("TRANSLATOR_OLLAMA_URL", OLLAMA_URL)
+def _ollama_endpoint(url: str) -> str:
+    """Accept either an Ollama base URL or its ``/api/chat`` endpoint.
+
+    The legacy client posts directly, while the pluggable V2 transport adds
+    ``/api/chat`` itself.  Normalizing here prevents a bare base URL from
+    producing a confusing HTTP 405 in the legacy web path, without changing
+    already-correct endpoint configuration.
+    """
+    value = str(url or "").strip().rstrip("/")
+    if value.endswith("/api/chat"):
+        return value
+    if value.endswith("/api"):
+        return value + "/chat"
+    return value + "/api/chat"
+
+
+OLLAMA_URL = _ollama_endpoint(os.environ.get("TRANSLATOR_OLLAMA_URL", OLLAMA_URL))
 OLLAMA_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", OLLAMA_MODEL)
 # O modelo de fallback só é usado depois de todas as tentativas do principal e
 # nunca recebe placeholders. Isso permite uma alternativa de protocolo sem
@@ -806,7 +823,7 @@ def review_translation_candidate(source: str, candidate: str, context: str) -> s
         "format": schema,
         "think": False,
         "options": {"temperature": 0},
-        "keep_alive": "30m",
+        "keep_alive": ollama_keep_alive(),
     }
     response = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
     response.raise_for_status()
@@ -922,7 +939,7 @@ def translate_batch(
         "format": response_schema,
         "think": False,   # qwen3 é um modelo de raciocínio; sem isso ele pode devolver <think>... antes do JSON
         "options": {"temperature": 0},
-        "keep_alive": "30m",
+        "keep_alive": ollama_keep_alive(),
     }
     resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
     resp.raise_for_status()

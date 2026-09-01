@@ -326,6 +326,19 @@ class MountManifestRepairTests(unittest.TestCase):
                     target.write_text("/usr/bin/python3.12\n")
                 else:
                     target.write_bytes(source.read_bytes())
+            # The host package may have received a security update since the
+            # frozen source manifest was authored.  This fixture models a
+            # mechanically buildable root-controlled installation, so bind
+            # its copied dependency metadata to the bytes observed on this
+            # host instead of accidentally testing stale package hashes.
+            external_file = root / source_map["system_external_dependency_set"]
+            external = json.loads(external_file.read_bytes())
+            for dependency in external["dependencies"]:
+                for resolved_path in dependency["critical_resolved_paths"]:
+                    dependency["critical_sha256"][resolved_path] = digest(Path(resolved_path))
+                if dependency.get("package_name") == "libssl3t64":
+                    dependency["package_version"] = "HOST_OBSERVED"
+            external_file.write_bytes((json.dumps(external, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
             components = {relative: digest(root / relative) for relative in source_map.values()}
             manifest = {
                 "schema_version": "1.0.0",

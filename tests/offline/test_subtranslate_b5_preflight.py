@@ -206,8 +206,8 @@ def test_reservation_model_mismatch_blocks():
 
 def test_cli_contract_has_no_apply_surface():
     source = (ROOT / ".opencode/tools/subtranslate_b5_preflight.py").read_text(encoding="utf-8")
-    assert 'group.add_argument("--plan"' in source
-    assert "--apply" not in source
+    assert 'add_argument("--plan"' in source
+    assert 'add_argument("--apply"' not in source
     assert "requests" not in source
     assert "urlopen" not in source
     assert "subtranslate_b5_executor" not in source

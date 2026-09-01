@@ -203,6 +203,23 @@ def test_c4_default_pipeline_is_v238():
     assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8"}
 
 
+def test_c4_missing_config_has_model_identity_for_live_jobs(tmp_path):
+    config = c4.load_transport_config(tmp_path / "first-run.json")
+    assert config["model_digest"] == c4._model_digest(config["primary"])
+    assert config["primary_model_digest"] == config["model_digest"]
+
+
+def test_c1_can_carry_local_failure_ledger_root(tmp_path):
+    ctx = c1.build_v238_execution_context(
+        job={"id": "job-ledger"},
+        transport_config={"primary": {"provider": "ollama", "model": "qwen3.5:9b"}},
+        source_language="inglês",
+        operation_id="op-ledger",
+        failure_ledger_root=tmp_path / "failure-ledger",
+    )
+    assert ctx["failure_ledger_root"] == str(tmp_path / "failure-ledger")
+
+
 def test_c4_generates_model_digest_when_missing():
     with tempfile.TemporaryDirectory(prefix="c4-digest-") as raw:
         path = Path(raw) / "transport_config.json"

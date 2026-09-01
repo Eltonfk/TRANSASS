@@ -7,8 +7,14 @@ is exercised without running the real runner.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
+
+# The executor is a protected tool source, not an importable package module.
+# Resolve its canonical source directory explicitly instead of relying on the
+# caller's PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).parents[2] / ".opencode" / "tools"))
 
 import subtranslate_track2_live_captured_executor as ex
 

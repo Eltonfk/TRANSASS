@@ -396,6 +396,7 @@ def translate_subtitle_file_v2_2_5(
     anime_series_id: int | None = None,
     episode_id: int | None = None,
     job_id: str | None = None,
+    failure_ledger_root: str | Path | None = None,
     execution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if subtitle_path.suffix.lower() not in {".ass", ".ssa"}:
@@ -433,7 +434,7 @@ def translate_subtitle_file_v2_2_5(
         "model": config.model,
         "source_path": str(subtitle_path),
         "output_path": str(output_path),
-    })
+    }, root=failure_ledger_root)
     ledger.set_source(subtitle_path)
     config.diagnostic_capture = True
     runner = V225MemoryRunner(events, profile, config, merged_glossary, memory, anime_series_id, episode_id, effective_job)

@@ -32,6 +32,12 @@ import pipeline_orchestrator as orchestrator  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def test_legacy_ollama_url_accepts_base_or_chat_endpoint():
+    assert at._ollama_endpoint("http://ollama:11434") == "http://ollama:11434/api/chat"
+    assert at._ollama_endpoint("http://ollama:11434/api") == "http://ollama:11434/api/chat"
+    assert at._ollama_endpoint("http://ollama:11434/api/chat") == "http://ollama:11434/api/chat"
+
+
 def test_run_pipeline_passes_source_language(tmp_path, monkeypatch):
     source = tmp_path / "ep01.ass"
     source.write_text("[Script Info]\n")
