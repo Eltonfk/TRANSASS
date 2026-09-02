@@ -94,6 +94,42 @@ class CanonicalSummaryConsumptionTests(unittest.TestCase):
         self.assertEqual(job["summary"], summary)
         self.assertEqual(job["stage"], "RETRANSLATION")
 
+    def test_nested_primary_ledger_is_not_persisted_in_job_summary(self):
+        job = self._job()
+        summary = {
+            "status": "COMPLETED",
+            "stage": "FULL_TRANSLATION_V238",
+            "events": 3683,
+            "resolved": 3683,
+            "flags": {},
+            "stages": [{
+                "id": "BASE_MATERIALIZATION",
+                "result": {
+                    "base_materializer": {
+                        "primary_ledger": [{"event_id": i, "status": "RESOLVED"} for i in range(5000)],
+                        "resolved": 3683,
+                    },
+                    "calls": 43,
+                },
+            }],
+        }
+        self._consume(job, "WEB_RETRANSLATION_SUMMARY " + json.dumps(summary))
+        encoded = json.dumps(job["summary"], ensure_ascii=False)
+        self.assertNotIn("primary_ledger", encoded)
+        self.assertLess(len(encoded), 10_000)
+
+    def test_structured_summary_log_is_bounded(self):
+        summary = {
+            "status": "COMPLETED",
+            "stage": "FULL_TRANSLATION_V238",
+            "events": 3683,
+            "resolved": 3683,
+            "primary_ledger": [{"event_id": i} for i in range(5000)],
+        }
+        line = app._summary_log_line("WEB_RETRANSLATION_SUMMARY", summary)
+        self.assertLess(len(line), 300)
+        self.assertNotIn("primary_ledger", line)
+
     def test_app_has_no_adapter_success_marker_state_list(self):
         source = open(app.__file__, encoding="utf-8").read()
         for marker in ("V2_1_2_SUMMARY", "V2_1_3_SUMMARY", "V2_2_0_SUMMARY", "V2_2_1_SUMMARY", "V2_2_2_SUMMARY", "V2_2_3_SUMMARY", "V2_2_4_SUMMARY", "V2_2_5_SUMMARY"):

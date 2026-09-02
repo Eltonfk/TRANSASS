@@ -38,6 +38,7 @@ from pipeline_v2_1_3 import preserve_source_punctuation_profile
 STAGE_ID = "FULL_TRANSLATION_V238"
 PIPELINE_ID = "v2_3_8"
 _TAG_RE = re.compile(r"\{[^{}]*\}")
+_KARAOKE_TAG_RE = re.compile(r"\\(?:k|K|kf|ko)\d+")
 
 
 def _sha256(path: Path) -> str:
@@ -293,6 +294,13 @@ def _render_event(
     # normalized payload; otherwise a bypass branch could reintroduce model-
     # invented punctuation after the base materializer ran.
     target_text = normalized_target
+    # A preserved lyric/credit line must keep its karaoke timing envelope
+    # byte-for-byte.  Reallocating words through rc4/visual reconstruction is
+    # lossy when the source has a ``\\k`` tag in the middle of a word: it can
+    # move the tag and consume the separating space.  If the visible payload
+    # is unchanged, the source envelope is already the authoritative result.
+    if _KARAOKE_TAG_RE.search(source_text) and _plain(source_text) == _plain(target_text):
+        return source_text, {"event_id": event_id, "path": "KARAOKE_IDENTITY_PRESERVED"}
     base = rc4_replace_source_payload(source_text, target_text)
     if base is None:
         raise ResponseProviderError("V238_SOURCE_PAYLOAD_RECONSTRUCTION_FAILED")

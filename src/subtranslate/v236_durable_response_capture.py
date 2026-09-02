@@ -164,12 +164,43 @@ class DurableResponseCaptureV1:
         by the generic V2.3.8 provider so tests and callers can inject a
         transport without giving the capture layer a second HTTP authority.
         """
+        return self.run_injected_transport(lambda: bytes(raw_body), metadata=metadata)[1]
+
+    def run_injected_transport(
+        self,
+        transport: Callable[[], bytes],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[bytes, dict[str, Any]]:
+        """Run one injected transport inside the durable state boundary.
+
+        ``TRANSPORT_IN_PROGRESS`` is durable *before* control reaches the
+        transport callback.  A process observed in a socket wait can therefore
+        be distinguished from a request that was persisted but never sent.
+        Any callback failure is terminal evidence for this call and is never
+        silently replayed.
+        """
         current = self._state()
         if current["state"] != "REQUEST_DURABLE":
             raise RuntimeError("DURABLE_CAPTURE_INJECTED_NOT_PERMITTED_FROM_CURRENT_STATE")
         self._transition("TRANSPORT_IN_PROGRESS", transport_started_at=_now(), transport_metadata=metadata or {})
+        try:
+            raw_body = transport()
+            if not isinstance(raw_body, (bytes, bytearray)):
+                raise TypeError("DURABLE_CAPTURE_INJECTED_TRANSPORT_MUST_RETURN_BYTES")
+            raw_body = bytes(raw_body)
+        except BaseException as exc:
+            self._transition(
+                "CAPTURE_INCOMPLETE",
+                transport_error=f"{type(exc).__name__}:{exc}"[:1000],
+                partial_response_path=None,
+                partial_response_bytes=0,
+                transport_finished_at=_now(),
+                client_exit_status=1,
+            )
+            raise
         canonical = self.call_dir / "raw-http-response.bin"
-        _write_bytes_durable(canonical, bytes(raw_body))
+        _write_bytes_durable(canonical, raw_body)
         _fsync_directory(self.call_dir)
         transport = {
             "http_status": 200,
@@ -181,7 +212,8 @@ class DurableResponseCaptureV1:
             "injected_transport": True,
         }
         _atomic_json(self.call_dir / "transport_result.json", transport)
-        return self._transition("RESPONSE_DURABLE", **transport)
+        state = self._transition("RESPONSE_DURABLE", **transport)
+        return raw_body, state
 
     def validate(self, parser: Callable[[bytes], Any], validator: Callable[[Any], Any]) -> dict[str, Any]:
         current = self._state()

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import sys
 import types
+import hashlib
+import json
 from pathlib import Path
 
 # Mock flask before importing app only when the optional dependency is absent.
@@ -73,6 +75,20 @@ def test_m8_projects_completed_summary():
     assert projected["unresolved"] == 0
     assert projected["v238_metrics"]["calls"] == 2
     assert projected["v238_metrics"]["budget_remaining"] == 129
+
+
+def test_m8_projects_measured_model_calls_when_legacy_calls_is_zero():
+    projected = web._project_v238_summary({
+        "stages": [],
+        "karaoke": {"song_units": 1, "translated_units": 1, "failures": [], "structural_failures": []},
+        "primary_ledger": [{"event_id": 1, "status": "RESOLVED"}],
+        "calls": 0,
+        "model_calls": 146,
+        "retry_calls": 0,
+        "aggregated_metrics": {"model_calls_total": 146, "v226_retries": 2},
+    })
+    assert projected["calls"] == 146
+    assert projected["retry_calls"] == 0
 
 
 def test_m8_projects_failed_with_unresolved():
@@ -209,3 +225,67 @@ def test_c7_telemetry_includes_v238_metrics():
     telemetry = web._job_telemetry(job)
     assert telemetry["v238_metrics"]["calls"] == 2
     assert telemetry["v238_metrics"]["budget_remaining"] == 129
+
+
+def test_c7_telemetry_reports_live_semantic_reconstruction(tmp_path):
+    old_state_dir = web.STATE_DIR
+    web.STATE_DIR = tmp_path
+    try:
+        capture_root = tmp_path / "v238-runs" / "job-semantic" / "captures"
+        completed = capture_root / "v238-ownership-event-341"
+        active = capture_root / "v238-ownership-event-342"
+        completed.mkdir(parents=True)
+        active.mkdir(parents=True)
+        (completed / "capture_state.json").write_text(json.dumps({
+            "call_id": completed.name, "state": "RESPONSE_DURABLE",
+        }), encoding="utf-8")
+        (active / "capture_state.json").write_text(json.dumps({
+            "call_id": active.name, "state": "TRANSPORT_IN_PROGRESS",
+        }), encoding="utf-8")
+        telemetry = web._job_telemetry({
+            "id": "job-semantic", "status": "TRANSLATING", "stage": "TRANSLATING",
+            "summary": {"events": 8, "resolved": 8, "unresolved": 0},
+        })
+    finally:
+        web.STATE_DIR = old_state_dir
+
+    assert telemetry["stage"] == "SEMANTIC_RECONSTRUCTION"
+    assert telemetry["semantic_calls"] == 2
+    assert telemetry["semantic_completed"] == 1
+    assert telemetry["semantic_in_progress"] == 1
+    assert telemetry["semantic_incomplete"] == 0
+    assert telemetry["current_event_id"] == 342
+    assert telemetry["last_activity_at"]
+
+
+def test_candidate_artifact_is_retained_downloadable_and_hash_bound(tmp_path):
+    old_state_dir = web.STATE_DIR
+    old_jobs = web.state["jobs"]
+    web.STATE_DIR = tmp_path
+    job_id = "candidate-job"
+    name = "episode.pt-BR.ass"
+    payload = b"[Script Info]\n"
+    candidate_dir = tmp_path / "staging" / f"retranslation-{job_id}"
+    candidate_dir.mkdir(parents=True)
+    candidate = candidate_dir / name
+    candidate.write_bytes(payload)
+    job = {
+        "id": job_id,
+        "status": "COMPLETED",
+        "stage": "CANDIDATE_READY",
+        "candidate_output_name": name,
+        "candidate_output_sha256": hashlib.sha256(payload).hexdigest(),
+        "candidate_download_url": f"/retranslation/candidates/{job_id}/download",
+    }
+    web.state["jobs"] = [job]
+    try:
+        assert web._candidate_artifact(job) == candidate
+        response = web.app.test_client().get(job["candidate_download_url"])
+        assert response.status_code == 200
+        assert response.data == payload
+        candidate.write_bytes(b"tampered")
+        rejected = web.app.test_client().get(job["candidate_download_url"])
+        assert rejected.status_code == 404
+    finally:
+        web.state["jobs"] = old_jobs
+        web.STATE_DIR = old_state_dir

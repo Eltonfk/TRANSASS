@@ -102,3 +102,21 @@ def test_ordinary_v238_event_uses_source_owned_reenvelope():
     assert details["path"] == "BASE_V226_PAYLOAD_REENVELOPED"
     assert validate_inline_tags(source, rendered) == []
     assert rendered.count(r"\N") == source.count(r"\N")
+
+
+def test_karaoke_identity_preserves_source_spacing_and_timing_tags():
+    class OrdinaryProvider:
+        pass
+
+    source = r"{\k106}O{\k94}s {\k79}i{\k36}u{\k132}sti {\k99}me{\k159}di{\k53}ta{\k109}bi{\k256}tur"
+    rendered, details = _render_event(
+        source,
+        source,
+        event_id=3658,
+        provider=OrdinaryProvider(),
+        model=None,
+        counters={"source_payload": 0},
+    )
+
+    assert rendered == source
+    assert details["path"] == "KARAOKE_IDENTITY_PRESERVED"

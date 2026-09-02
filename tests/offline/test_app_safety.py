@@ -1,6 +1,7 @@
 import tempfile
 import os
 import json
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +39,14 @@ class AppSafetyTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {"status": "ok"})
+
+    def test_brand_logo_endpoint_serves_bundled_asset(self):
+        response = self.client.get("/transass-logo.png")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/png")
+        self.assertGreater(len(response.data), 100_000)
+        self.assertEqual(hashlib.sha256(response.data).hexdigest(), "bfed2c710b8e31edbf007f5c907c134bf69822ec0505e400f23ced87326b1a71")
 
     def test_status_returns_only_log_entries_after_cursor(self):
         with web.state_lock:
@@ -81,6 +90,8 @@ class AppSafetyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertIn("Transass · Central de tradução", page)
+        self.assertIn('src="/transass-logo.png?v=1"', page)
+        self.assertIn('alt="TransASS"', page)
         self.assertIn("Troca o idioma. O nome continua questionável.", page)
         for workspace in ("translate", "library", "memory", "diagnostics"):
             self.assertEqual(page.count(f'data-view-panel="{workspace}"'), 1)

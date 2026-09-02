@@ -5,6 +5,7 @@ transports and in-memory configs only.
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -137,6 +138,71 @@ def test_c2_transport_semantics_by_provider():
     )
     assert gemini.transport_semantics == "NETWORK_NON_MODEL"
     assert ollama.transport_semantics == "OLLAMA_MODEL"
+
+
+def test_c2_marks_transport_in_progress_before_calling_live_client(tmp_path):
+    observed = []
+    capture_dir = tmp_path / "event-9"
+
+    def client(_payload):
+        state = json.loads((capture_dir / "capture_state.json").read_text(encoding="utf-8"))
+        observed.append(state["state"])
+        return {"translation": "resultado"}
+
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "ollama", "model": "qwen3.5:9b"}},
+        mode="LIVE_CAPTURED",
+        capture_root=tmp_path,
+    )
+    provider.client = client
+
+    response = provider.respond(
+        {"operation": "v238_ownership", "model": "qwen3.5:9b", "text": "alvo"},
+        capture_id="event-9",
+    )
+
+    state = json.loads((capture_dir / "capture_state.json").read_text(encoding="utf-8"))
+    assert response == {"translation": "resultado"}
+    assert observed == ["TRANSPORT_IN_PROGRESS"]
+    assert [item["state"] for item in state["history"]] == [
+        "REQUEST_DURABLE", "TRANSPORT_IN_PROGRESS", "RESPONSE_DURABLE",
+    ]
+
+
+def test_c2_transport_failure_is_durable_and_never_replayed(tmp_path):
+    calls = []
+
+    def client(_payload):
+        calls.append(1)
+        raise TimeoutError("synthetic timeout")
+
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "ollama", "model": "qwen3.5:9b"}},
+        mode="LIVE_CAPTURED",
+        capture_root=tmp_path,
+    )
+    provider.client = client
+    request = {"operation": "v238_ownership", "model": "qwen3.5:9b", "text": "alvo"}
+
+    try:
+        provider.respond(request, capture_id="event-timeout")
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("transport failure was not propagated")
+
+    state_path = tmp_path / "event-timeout" / "capture_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["state"] == "CAPTURE_INCOMPLETE"
+    assert state["transport_error"] == "TimeoutError:synthetic timeout"
+
+    try:
+        provider.respond(request, capture_id="event-timeout")
+    except RuntimeError as exc:
+        assert str(exc) == "DURABLE_CAPTURE_DUPLICATE_CALL_ID"
+    else:
+        raise AssertionError("incomplete transport was silently replayed")
+    assert calls == [1]
 
 
 # ---------------------------------------------------------------------------

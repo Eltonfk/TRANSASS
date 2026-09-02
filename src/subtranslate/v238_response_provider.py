@@ -195,12 +195,17 @@ class DurableResponseProvider:
                 self.metrics["application_network_calls"] += 1
             if self.transport_semantics == "OLLAMA_MODEL":
                 self.metrics["model_generation_calls"] += 1
-            raw = self.client(payload)
-            raw_bytes = raw if isinstance(raw, bytes) else _canonical(raw)
-            capture.receive_injected(raw_bytes, metadata={"mode": self.mode})
+            def invoke_client() -> bytes:
+                raw = self.client(payload)
+                return raw if isinstance(raw, bytes) else _canonical(raw)
+
+            raw_bytes, _capture_state = capture.run_injected_transport(
+                invoke_client,
+                metadata={"mode": self.mode, "transport_semantics": self.transport_semantics},
+            )
             self.metrics["durable_capture_writes"] += 1
             try:
-                response = _parse_response((call_dir / "raw-http-response.bin").read_bytes())
+                response = _parse_response(raw_bytes)
             except ResponseSchemaError as exc:
                 self.metrics["parse_failures"] += 1
                 self.metrics["schema_failures"] += 1

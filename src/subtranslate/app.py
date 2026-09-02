@@ -488,6 +488,64 @@ def _job_ledger_dir(job: dict) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def _semantic_capture_telemetry(job: dict) -> dict[str, Any]:
+    """Summarize V238 semantic captures without exposing request contents."""
+    job_id = str(job.get("id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", job_id):
+        return {"total": 0, "completed": 0, "in_progress": 0, "incomplete": 0,
+                "current_event_id": None, "last_activity_at": None}
+    capture_root = STATE_DIR / "v238-runs" / job_id / "captures"
+    if not capture_root.is_dir():
+        return {"total": 0, "completed": 0, "in_progress": 0, "incomplete": 0,
+                "current_event_id": None, "last_activity_at": None}
+    states: dict[str, int] = {}
+    latest_mtime = 0.0
+    latest_call_id = None
+    active_mtime = 0.0
+    active_call_id = None
+    total = 0
+    try:
+        for call_dir in capture_root.iterdir():
+            if not call_dir.is_dir():
+                continue
+            state_path = call_dir / "capture_state.json"
+            if not state_path.is_file():
+                continue
+            try:
+                value = json.loads(state_path.read_text(encoding="utf-8"))
+                state_name = str(value.get("state") or "UNKNOWN")
+                modified = state_path.stat().st_mtime
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            total += 1
+            states[state_name] = states.get(state_name, 0) + 1
+            if modified >= latest_mtime:
+                latest_mtime = modified
+                latest_call_id = str(value.get("call_id") or call_dir.name)
+            if state_name == "TRANSPORT_IN_PROGRESS" and modified >= active_mtime:
+                active_mtime = modified
+                active_call_id = str(value.get("call_id") or call_dir.name)
+    except OSError:
+        pass
+    event_match = re.search(r"event-(\d+)$", active_call_id or latest_call_id or "")
+    completed = sum(states.get(name, 0) for name in ("RESPONSE_DURABLE", "VALIDATED_PASS"))
+    in_progress = states.get("TRANSPORT_IN_PROGRESS", 0)
+    incomplete = sum(states.get(name, 0) for name in (
+        "CAPTURE_INCOMPLETE", "TRANSPORT_FAILED", "VALIDATED_FAIL",
+    ))
+    return {
+        "total": total,
+        "completed": completed,
+        "in_progress": in_progress,
+        "incomplete": incomplete,
+        "current_event_id": int(event_match.group(1)) if event_match else None,
+        "last_activity_at": (
+            datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
+            if latest_mtime else None
+        ),
+    }
+
+
 def _job_telemetry(job: dict) -> dict:
     """Derive real progress from the job state and persistent unit ledger.
 
@@ -527,6 +585,7 @@ def _job_telemetry(job: dict) -> dict:
             if path.is_file():
                 ledger_files.append(path)
 
+    semantic = _semantic_capture_telemetry(job)
     status = str(job.get("status") or "QUEUED").upper()
     stage = str(job.get("stage") or "").upper() or {
         "WAITING": "QUEUED", "STARTING": "STARTING", "TRANSLATING": "TRANSLATING",
@@ -549,6 +608,10 @@ def _job_telemetry(job: dict) -> dict:
     resolved = int(resolved) if isinstance(resolved, (int, float)) else None
     failed = int(failed) if isinstance(failed, (int, float)) else 0
 
+    if (status == "TRANSLATING" and semantic["total"]
+            and total is not None and resolved == total):
+        stage = "SEMANTIC_RECONSTRUCTION"
+
     calls = summary.get("total_ollama_calls", summary.get("qwen_calls"))
     if calls is None and isinstance(summary.get("calls"), list):
         calls = len(summary["calls"])
@@ -569,6 +632,8 @@ def _job_telemetry(job: dict) -> dict:
             current_event_id = ids[-1]
         elif isinstance(ids, (int, str)):
             current_event_id = ids
+    if semantic["current_event_id"] is not None:
+        current_event_id = semantic["current_event_id"]
     budget = summary.get("retry_budget") if isinstance(summary.get("retry_budget"), dict) else None
     if budget is None and attempts:
         budget = attempts[-1].get("retry_budget_after")
@@ -596,6 +661,9 @@ def _job_telemetry(job: dict) -> dict:
             last_activity = finished or started
     else:
         last_activity = finished or started
+    semantic_activity = semantic.get("last_activity_at")
+    if semantic_activity and (not last_activity or semantic_activity > last_activity):
+        last_activity = semantic_activity
     v238_metrics = summary.get("v238_metrics") if isinstance(summary.get("v238_metrics"), dict) else None
     return {
         "stage": stage,
@@ -610,6 +678,10 @@ def _job_telemetry(job: dict) -> dict:
         "elapsed_seconds": elapsed,
         "last_activity_at": last_activity,
         "ledger_available": bool(ledger_dir),
+        "semantic_calls": semantic["total"],
+        "semantic_completed": semantic["completed"],
+        "semantic_in_progress": semantic["in_progress"],
+        "semantic_incomplete": semantic["incomplete"],
         "v238_metrics": v238_metrics,
     }
 
@@ -626,6 +698,7 @@ def _public_job(job: dict | None) -> dict | None:
             "attempt", "retry_count", "dry_run", "critical_flags", "flags",
             "operation", "source_record_id", "old_record_id", "bulk_fail_fast",
             "not_started_reason", "new_record_id", "audit", "diagnostic",
+            "candidate_output_name", "candidate_output_sha256", "candidate_download_url",
         )
         if key in job
     }
@@ -853,6 +926,12 @@ def _summary_level(line: str) -> str:
 
 def _apply_canonical_pipeline_summary(job: dict, summary: dict) -> None:
     """Apply the single normal-path summary contract to a job."""
+    # Worker summaries may contain the complete per-event ledger under a
+    # stage's ``base_materializer`` result.  That ledger is already durable
+    # in the failure-ledger/checkpoint files; retaining it in jobs.json makes
+    # every status response unnecessarily huge.  Keep the canonical counters
+    # and forensic scalar fields, but drop only the duplicated ledger.
+    summary = _compact_summary_for_state(summary)
     job["summary"] = summary
     job["flags"] = summary.get("flags", {})
     job["critical_flags"] = summary.get("critical_flags", [])
@@ -952,9 +1031,43 @@ def _compact_v238_stages(stages: list) -> list:
             continue
         result = stage.get("result")
         if isinstance(result, dict):
-            result = {key: value for key, value in result.items() if key != "primary_ledger"}
+            result = _compact_summary_value(result)
         compact.append({"id": stage.get("id"), "result": result})
     return compact
+
+
+def _compact_summary_value(value):
+    """Copy summary data while omitting duplicated per-event ledgers.
+
+    This deliberately removes only fields named ``primary_ledger``.  The
+    authoritative ledger remains on disk, while failure metadata and all
+    other summary fields stay available to the UI and audit paths.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _compact_summary_value(item)
+            for key, item in value.items()
+            if key != "primary_ledger"
+        }
+    if isinstance(value, list):
+        return [_compact_summary_value(item) for item in value]
+    return value
+
+
+def _compact_summary_for_state(summary: dict) -> dict:
+    if not isinstance(summary, dict):
+        return summary
+    return _compact_summary_value(summary)
+
+
+def _summary_log_line(marker: str, summary: dict) -> str:
+    """Return a bounded log projection for a structured worker summary."""
+    safe = {
+        key: summary.get(key)
+        for key in ("status", "stage", "events", "resolved", "unresolved", "calls", "retry_calls")
+        if key in summary
+    }
+    return f"{marker} {json.dumps(safe, ensure_ascii=False, separators=(',', ':'))}"
 
 
 def _project_v238_summary(result: dict) -> dict:
@@ -982,6 +1095,15 @@ def _project_v238_summary(result: dict) -> dict:
     if unresolved:
         flags["v238_unresolved_units"] = len(unresolved)
         critical_flags.append("v238_unresolved_units")
+    aggregated_metrics = result.get("aggregated_metrics") if isinstance(result.get("aggregated_metrics"), dict) else {}
+    calls = result.get("calls")
+    if not isinstance(calls, int) or calls <= 0:
+        calls = result.get("model_calls")
+    if not isinstance(calls, int) or calls <= 0:
+        calls = aggregated_metrics.get("model_calls_total", 0)
+    retry_calls = result.get("retry_calls")
+    if not isinstance(retry_calls, int) or retry_calls < 0:
+        retry_calls = aggregated_metrics.get("v226_retries", 0)
     return {
         "status": status,
         "stage": last_stage,
@@ -992,8 +1114,8 @@ def _project_v238_summary(result: dict) -> dict:
         "critical_flags": critical_flags,
         "stages": _compact_v238_stages(stages),
         "v238_metrics": _v238_metrics_from_result(result),
-        "calls": int(result.get("calls", 0) or 0),
-        "retry_calls": int(result.get("retry_calls", 0) or 0),
+        "calls": int(calls or 0),
+        "retry_calls": int(retry_calls or 0),
     }
 
 
@@ -1397,6 +1519,13 @@ def _consume_worker_output_line(job: dict, line: str) -> None:
     elif "OK ->" in line:
         job["status"] = "PUBLISHING"
         job["stage"] = "ARCHIVING"
+    if line.startswith(("WEB_RETRANSLATION_SUMMARY ", "V2_2_4_FAILURE_SUMMARY ")):
+        try:
+            marker, raw_summary = line.split(" ", 1)
+            parsed = json.loads(raw_summary)
+            line = _summary_log_line(marker, parsed) if isinstance(parsed, dict) else marker
+        except (ValueError, TypeError):
+            pass
     _append_log(line, level=_summary_level(line), job_id=job["id"])
     _persist_locked()
 
@@ -1518,6 +1647,33 @@ def _run_episode(job: dict) -> None:
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+def _candidate_artifact(job: dict) -> Path | None:
+    """Resolve a completed candidate under its fixed job staging root."""
+    if job.get("stage") != "CANDIDATE_READY" or job.get("status") != "COMPLETED":
+        return None
+    job_id = str(job.get("id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", job_id):
+        return None
+    name = str(job.get("candidate_output_name") or "")
+    if not name or Path(name).name != name:
+        return None
+    expected_sha = str(job.get("candidate_output_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        return None
+    root = STATE_DIR / "staging" / f"retranslation-{job_id}"
+    candidate = root / name
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            return None
+        if candidate.resolve().parent != root.resolve():
+            return None
+        if hashlib.sha256(candidate.read_bytes()).hexdigest() != expected_sha:
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
 def _run_retranslation_episode(job: dict) -> None:
     """Retranslate from an archived source into a new immutable library record."""
     try:
@@ -1590,8 +1746,16 @@ def _run_retranslation_episode(job: dict) -> None:
                 except (ValueError, IndexError, TypeError):
                     with state_lock:
                         job["reason"] = "invalid_compatibility_summary_json"
+            log_line = line
+            if line.startswith(("WEB_RETRANSLATION_SUMMARY ", "V2_2_4_FAILURE_SUMMARY ")):
+                try:
+                    marker, raw_summary = line.split(" ", 1)
+                    parsed_for_log = json.loads(raw_summary)
+                    log_line = _summary_log_line(marker, parsed_for_log) if isinstance(parsed_for_log, dict) else marker
+                except (ValueError, TypeError):
+                    pass
             with state_lock:
-                _append_log(line, level=_summary_level(line), job_id=job["id"])
+                _append_log(log_line, level=_summary_level(log_line), job_id=job["id"])
                 _persist_locked()
         return_code = proc.wait()
         with state_lock:
@@ -1638,6 +1802,7 @@ def _run_retranslation_episode(job: dict) -> None:
                 job["library_record_created"] = False
                 job["candidate_output_name"] = output.name
                 job["candidate_output_sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()
+                job["candidate_download_url"] = f"/retranslation/candidates/{job['id']}/download"
                 job["finished_at"] = _now()
                 _append_log(
                     f"Candidato pronto; não arquivado nem publicado: {job.get('name', '')}",
@@ -1753,7 +1918,7 @@ def _run_retranslation_episode(job: dict) -> None:
             _append_log(f"Falhou retradução: {job.get('name', '')} — {error}", level="error", job_id=job["id"])
             _persist_locked()
     finally:
-        if not job.get("failure_staging_path"):
+        if not job.get("failure_staging_path") and _candidate_artifact(job) is None:
             shutil.rmtree(staging_root, ignore_errors=True)
         source_staging = job.get("source_staging_path")
         if source_staging:
@@ -1980,6 +2145,19 @@ def favicon_svg():
     return Response(
         FAVICON_SVG,
         mimetype="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.route("/transass-logo.png")
+def transass_logo():
+    """Serve the bundled brand mark without depending on external assets."""
+    logo_path = Path(__file__).resolve().with_name("transass_logo.png")
+    if not logo_path.is_file():
+        return Response(status=404)
+    return Response(
+        logo_path.read_bytes(),
+        mimetype="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
 
@@ -2389,6 +2567,18 @@ def history_route():
         if not technical:
             history = [item for item in history if not _technical_history(item)]
         return jsonify({"history": history, "technical_hidden": not technical})
+
+
+@app.route("/retranslation/candidates/<job_id>/download")
+def retranslation_candidate_download(job_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(job_id or "")):
+        return jsonify({"error": "candidato inválido"}), 404
+    with state_lock:
+        job = next((dict(item) for item in state["jobs"] if str(item.get("id")) == job_id), None)
+    candidate = _candidate_artifact(job or {})
+    if candidate is None:
+        return jsonify({"error": "candidato não encontrado ou integridade divergente"}), 404
+    return send_file(candidate, as_attachment=True, download_name=candidate.name)
 
 
 @app.route("/status")
@@ -3240,7 +3430,7 @@ body{background:radial-gradient(circle at 12% -8%,#193252 0,#0b1119 36%),#0b1119
 body:before{content:'';position:fixed;inset:0;pointer-events:none;background:linear-gradient(90deg,#4ea1ff08 1px,transparent 1px),linear-gradient(#4ea1ff06 1px,transparent 1px);background-size:36px 36px;mask-image:linear-gradient(to bottom,#0008,transparent 60%)}
 main{position:relative;max-width:1460px;padding:24px 24px 56px}
 .top{padding:18px 20px;margin-bottom:12px;border:1px solid #2c4661;border-radius:18px;background:linear-gradient(120deg,#17283ceF,#111b29f2);box-shadow:0 18px 46px #0005}
-.brand{display:flex;align-items:center;gap:13px}.brand-mark{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:linear-gradient(145deg,#4b9cff,#7357ff);box-shadow:0 9px 24px #2768c94d;color:white;font-weight:900;letter-spacing:-.08em}.top h1{font-size:1.58rem;letter-spacing:-.035em}.top .muted{margin-top:3px}.brand-joke{color:#91a4b8;font-size:.82rem}
+.brand{display:flex;align-items:center;gap:13px}.brand-logo{display:block;width:58px;height:58px;flex:none;object-fit:contain;filter:drop-shadow(0 8px 16px #0008)}.top h1{font-size:1.58rem;letter-spacing:-.035em}.top .muted{margin-top:3px}.brand-joke{color:#91a4b8;font-size:.82rem}
 .chips{justify-content:flex-end}.chip{padding:6px 11px;background:#111c2a;border-color:#334a63}.chip.online{background:#10271c}.chip.offline{color:#ffaaa5;border-color:#763a3a;background:#2a1518}
 .workspace-nav{display:flex;gap:6px;padding:5px;margin-bottom:16px;overflow-x:auto;border:1px solid #26394d;border-radius:13px;background:#0e1722d9;box-shadow:0 8px 26px #0002}.nav-button{flex:0 0 auto;min-height:38px;padding:8px 14px;border:0;background:transparent;color:#9fb0c2}.nav-button:hover:not(:disabled){transform:none;background:#172537;border-color:transparent}.nav-button.active{background:#20344c;color:#f4f8fc;box-shadow:inset 0 0 0 1px #3b5d80}.nav-button .nav-count{margin-left:5px;color:#7db5ff}
 .view[hidden]{display:none}.view{animation:view-in .16s ease-out}@keyframes view-in{from{opacity:.35;transform:translateY(4px)}to{opacity:1;transform:none}}
@@ -3260,10 +3450,10 @@ details summary{cursor:pointer}details summary:hover{color:#79c0ff}dialog{color-
 .app-footer{margin-top:18px;text-align:center;color:#6f8295;font-size:.78rem}.app-footer strong{color:#8fa4b8}
 @media(max-width:1080px){main{padding:18px 16px 44px}.grid{grid-template-columns:minmax(230px,280px) minmax(0,1fr)}.stats{grid-template-columns:repeat(3,minmax(80px,1fr))}.episode{grid-template-columns:24px 48px minmax(140px,1fr) auto auto}.episode select{grid-column:3/-1;justify-self:end}}
 @media(max-width:820px){.top{align-items:flex-start}.brand-joke{display:none}.nav-panel{position:static}.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,minmax(0,1fr))}.episode{grid-template-columns:24px 48px minmax(0,1fr) auto}.episode select{grid-column:3/-1;justify-self:stretch}.episode .badge{justify-self:start}.episodes-toolbar{display:block}.episodes-actions{justify-content:flex-start;margin-top:10px}#episodeSearch{flex:1 1 180px}.workflow-safety{display:none}.section-heading{display:block}.section-heading .button{margin-top:8px}}
-@media(max-width:560px){main{padding:10px 9px 30px}.top{padding:14px}.top h1{font-size:1.35rem}.brand-mark{width:39px;height:39px}.chips{justify-content:flex-start;margin-top:11px}.chips .chip{display:none}.chips #serviceChip{display:inline-flex}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.episode{grid-template-columns:24px 42px minmax(0,1fr);gap:7px}.episode .badge,.episode select{grid-column:3/-1}.actions .button,.record-actions .button{flex:1 1 130px}.panel{padding:13px}.workflow-strip{align-items:flex-start}.workflow-hint{white-space:normal}.control-groups{display:block}.queue-controls{margin-top:8px}.folder-actions{grid-template-columns:1fr}.toast-region{right:9px;bottom:9px;width:calc(100vw - 18px)}}
+@media(max-width:560px){main{padding:10px 9px 30px}.top{padding:14px}.top h1{font-size:1.35rem}.brand-logo{width:50px;height:50px}.chips{justify-content:flex-start;margin-top:11px}.chips .chip{display:none}.chips #serviceChip{display:inline-flex}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.episode{grid-template-columns:24px 42px minmax(0,1fr);gap:7px}.episode .badge,.episode select{grid-column:3/-1}.actions .button,.record-actions .button{flex:1 1 130px}.panel{padding:13px}.workflow-strip{align-items:flex-start}.workflow-hint{white-space:normal}.control-groups{display:block}.queue-controls{margin-top:8px}.folder-actions{grid-template-columns:1fr}.toast-region{right:9px;bottom:9px;width:calc(100vw - 18px)}}
 </style></head>
 <body><main>
-<header class="top"><div class="brand"><div class="brand-mark" aria-hidden="true">T·A</div><div><h1>Transass</h1><div class="muted">Central de tradução de legendas</div><div class="brand-joke">Troca o idioma. O nome continua questionável.</div></div></div><div class="chips"><span class="chip" id="pipelineChip">Pipeline…</span><span class="chip" id="modelChip">Modelo…</span><span class="chip" id="motorChip" title="Motor de tradução configurado">Motor…</span><span class="chip online" id="serviceChip">Serviço…</span><button class="button compact" id="openTransportConfig">⚙ Configurar motor</button></div></header>
+<header class="top"><div class="brand"><img class="brand-logo" src="/transass-logo.png?v=1" alt="TransASS" width="58" height="58"><div><h1>Transass</h1><div class="muted">Central de tradução de legendas</div><div class="brand-joke">Troca o idioma. O nome continua questionável.</div></div></div><div class="chips"><span class="chip" id="pipelineChip">Pipeline…</span><span class="chip" id="modelChip">Modelo…</span><span class="chip" id="motorChip" title="Motor de tradução configurado">Motor…</span><span class="chip online" id="serviceChip">Serviço…</span><button class="button compact" id="openTransportConfig">⚙ Configurar motor</button></div></header>
 <nav class="workspace-nav" aria-label="Áreas do Transass"><button class="nav-button active" data-view-button="translate" aria-current="page">▶ Traduzir <span class="nav-count" id="navQueueCount"></span></button><button class="nav-button" data-view-button="library">▣ Acervo e revisão</button><button class="nav-button" data-view-button="memory">✦ Memória aprovada</button><button class="nav-button" data-view-button="diagnostics">⌨ Diagnóstico</button></nav>
 <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 <section class="view" data-view-panel="translate">
@@ -3310,7 +3500,34 @@ async function autoClassifyFolder(folder){try{await api('/library/auto-classify'
 async function action(url){try{await api(url,{method:'POST'});await refresh(true)}catch(e){notify(e.message,'fail')}}
 function age(iso){if(!iso)return '—';const t=Date.parse(iso);if(!Number.isFinite(t))return esc(iso);const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return `há ${sec}s`;const min=Math.floor(sec/60);if(min<60)return `há ${min}min`;return `há ${Math.floor(min/60)}h ${min%60}min`}
 function duration(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(Number(sec)));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
-function renderStatus(d){statusData=d;const q=d.queue||{};$('doneCount').textContent=`${q.completed||0}/${q.total||0}`;$('waitCount').textContent=q.waiting||0;$('runCount').textContent=q.running||0;$('failCount').textContent=q.failed||0;$('skipCount').textContent=q.skipped||0;$('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;const cur=d.current_job;$('currentTitle').textContent=cur?`${cur.name} · ${cur.stage||cur.status}`:'Nenhum episódio em execução.';const t=cur||{};const total=t.total_units,resolved=t.resolved_units??0;const pct=total?Math.min(100,Math.round(100*resolved/total)):0;$('progressBar').style.width=pct+'%';const progressText=total!=null?`Unidades processadas: ${resolved}/${total}`:'PREPARANDO — total ainda não calculado';$('currentMeta').textContent=cur?`${progressText}${t.current_event_id!=null?` · unidade atual ${esc(t.current_event_id)}`:''}`:'';const details=cur?[`<span>Chamadas: <b>${t.calls??0}</b></span>`,`<span>Retries: <b>${t.retries??0}</b></span>`,t.retry_budget_total!=null?`<span>Budget: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',`<span>Tempo: <b>${duration(t.elapsed_seconds)}</b></span>`,`<span>Última atividade: <b>${age(t.last_activity_at)}</b></span>`].filter(Boolean).join(' · '):'';$('currentTelemetry').innerHTML=details;if(cur&&cur.status==='FAILED'){const event=cur.current_event_id!=null?` · evento/unidade ${esc(cur.current_event_id)}`:'';$('currentTelemetry').innerHTML+=`<div class="note" style="margin-top:6px">Falha: ${esc(cur.reason||cur.error||'resultado reprovado')}${event}</div>`}const interrupted=d.bulk_stop_reason==='STOPPED_ON_FAILURE'?'<div class="note">Temporada interrompida após a primeira falha. Os episódios restantes não foram iniciados.</div>':'';$('queueList').innerHTML=interrupted+(d.jobs||[]).filter(j=>['WAITING','FAILED','COMPLETED','SKIPPED_CURRENT_VALIDATED','NOT_STARTED_AFTER_FAILURE'].includes(j.status)).map(j=>`<div class="jobline"><span>${esc(j.episode||j.name)}</span>${badge(j.status)}</div>`).join('');$('pauseBtn').disabled=!d.running||d.pause_requested;$('resumeBtn').disabled=!d.queue_paused;$('stopBtn').disabled=!d.running&&!q.waiting;$('retryBtn').disabled=!!d.running||!(q.failed);syncSelectionUi()}
+function renderStatus(d){
+  statusData=d;
+  const q=d.queue||{};
+  $('doneCount').textContent=`${q.completed||0}/${q.total||0}`;
+  $('waitCount').textContent=q.waiting||0;
+  $('runCount').textContent=q.running||0;
+  $('failCount').textContent=q.failed||0;
+  $('skipCount').textContent=q.skipped||0;
+  $('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;
+  const cur=d.current_job,t=cur||{},stage=t.stage==='SEMANTIC_RECONSTRUCTION'?'RECONSTRUÇÃO SEMÂNTICA':(t.stage||t.status);
+  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:'Nenhum episódio em execução.';
+  const total=t.total_units,resolved=t.resolved_units??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
+  $('progressBar').style.width=pct+'%';
+  const semantic=t.semantic_calls??0;
+  const semanticText=semantic?` · reconstrução semântica: ${t.semantic_completed??0} concluída(s)${t.semantic_in_progress?` + ${t.semantic_in_progress} em andamento`:''}${t.semantic_incomplete?` · ${t.semantic_incomplete} incompleta(s)`:''}`:'';
+  const progressText=total!=null?`Unidades base: ${resolved}/${total}`:'PREPARANDO — total ainda não calculado';
+  $('currentMeta').textContent=cur?`${progressText}${semanticText}${t.current_event_id!=null?` · evento atual ${esc(t.current_event_id)}`:''}`:'';
+  const details=cur?[`<span>Chamadas base: <b>${t.calls??0}</b></span>`,semantic?`<span>Chamadas semânticas: <b>${semantic}</b></span>`:'',`<span>Retries: <b>${t.retries??0}</b></span>`,t.retry_budget_total!=null?`<span>Budget: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',`<span>Tempo: <b>${duration(t.elapsed_seconds)}</b></span>`,`<span>Última atividade: <b>${age(t.last_activity_at)}</b></span>`].filter(Boolean).join(' · '):'';
+  $('currentTelemetry').innerHTML=details;
+  if(cur&&cur.status==='FAILED'){const event=cur.current_event_id!=null?` · evento/unidade ${esc(cur.current_event_id)}`:'';$('currentTelemetry').innerHTML+=`<div class="note" style="margin-top:6px">Falha: ${esc(cur.reason||cur.error||'resultado reprovado')}${event}</div>`}
+  const interrupted=d.bulk_stop_reason==='STOPPED_ON_FAILURE'?'<div class="note">Temporada interrompida após a primeira falha. Os episódios restantes não foram iniciados.</div>':'';
+  $('queueList').innerHTML=interrupted+(d.jobs||[]).filter(j=>['WAITING','FAILED','COMPLETED','SKIPPED_CURRENT_VALIDATED','NOT_STARTED_AFTER_FAILURE'].includes(j.status)).map(j=>{const candidate=j.candidate_download_url?`<a class="button compact" href="${esc(j.candidate_download_url)}">Baixar candidato</a>`:'';return `<div class="jobline"><span>${esc(j.episode||j.name)}</span><span>${badge(j.status)} ${candidate}</span></div>`}).join('');
+  $('pauseBtn').disabled=!d.running||d.pause_requested;
+  $('resumeBtn').disabled=!d.queue_paused;
+  $('stopBtn').disabled=!d.running&&!q.waiting;
+  $('retryBtn').disabled=!!d.running||!(q.failed);
+  syncSelectionUi();
+}
 async function refresh(forceEpisodes=false){if(refreshInFlight)return;refreshInFlight=true;try{try{const d=await api('/status?after='+cursor);cursor=d.last_log_id||cursor;renderStatus(d);(d.log_details||d.log||[]).forEach(x=>{if(x.id!=null&&renderedLogIds.has(x.id))return;if(x.id!=null)renderedLogIds.add(x.id);const line=document.createElement('div');line.className=x.level||'';line.dataset.logId=x.id??'';line.textContent=`${x.time||''} ${x.line}`;$('logs').append(line)});$('logs').scrollTop=$('logs').scrollHeight}catch(e){console.error('status',e)}if(selectedFolder&&(forceEpisodes||Date.now()-lastEpisodesRefreshAt>=10000)){try{await loadEpisodes()}catch(e){$('libraryNote').textContent='Episódios temporariamente indisponíveis.';$('libraryNote').classList.remove('hidden');console.error('episodes',e)}}}finally{refreshInFlight=false}}
 async function loadHealth(){try{const d=await api('/health');$('serviceChip').textContent=d.status==='ok'?'Serviço online':'Serviço indisponível';$('serviceChip').classList.toggle('online',d.status==='ok');$('serviceChip').classList.toggle('offline',d.status!=='ok')}catch(e){$('serviceChip').textContent='Serviço indisponível';$('serviceChip').classList.remove('online');$('serviceChip').classList.add('offline')}}
 async function loadPipeline(){try{const d=await api('/pipeline');$('pipelineChip').textContent=d.pipeline_label;$('modelChip').textContent=d.model}catch(e){$('pipelineChip').textContent='Pipeline indisponível';$('modelChip').textContent='Modelo indisponível'}await loadHealth()}
