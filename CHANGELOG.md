@@ -4,6 +4,12 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.4.14] - 2026-09-02
+
+### Corrigido
+- Favicon do navegador atualizado para a marca compacta do TransASS, removendo
+  o símbolo genérico e mantendo cache invalidado para a nova identidade visual.
+
 ## [2.4.13] - 2026-09-02
 
 ### Adicionado

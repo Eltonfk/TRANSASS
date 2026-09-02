@@ -48,6 +48,14 @@ class AppSafetyTests(unittest.TestCase):
         self.assertGreater(len(response.data), 100_000)
         self.assertEqual(hashlib.sha256(response.data).hexdigest(), "bfed2c710b8e31edbf007f5c907c134bf69822ec0505e400f23ced87326b1a71")
 
+    def test_favicon_uses_transass_mark(self):
+        response = self.client.get("/favicon.svg")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/svg+xml")
+        self.assertIn("TransASS", response.get_data(as_text=True))
+        self.assertNotIn("🎬", response.get_data(as_text=True))
+
     def test_status_returns_only_log_entries_after_cursor(self):
         with web.state_lock:
             web._append_log("first")
@@ -92,6 +100,7 @@ class AppSafetyTests(unittest.TestCase):
         self.assertIn("Transass · Central de tradução", page)
         self.assertIn('src="/transass-logo.png?v=1"', page)
         self.assertIn('alt="TransASS"', page)
+        self.assertIn('href="/favicon.svg?v=2"', page)
         self.assertIn("Troca o idioma. O nome continua questionável.", page)
         for workspace in ("translate", "library", "memory", "diagnostics"):
             self.assertEqual(page.count(f'data-view-panel="{workspace}"'), 1)

@@ -80,9 +80,10 @@ class StatePersistenceError(RuntimeError):
 app = Flask(__name__)
 state_lock = threading.RLock()
 
-# This is the same official Subtranslate mark used by the previous web build.
-# It is served as a real asset so browser cache/path handling cannot remove it.
-FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#2f6fed"/><text x="32" y="43" text-anchor="middle" font-size="38">🎬</text></svg>'''
+# Compact browser-sized adaptation of the official TransASS mark.  Keeping it
+# inline avoids another runtime file while the full illustration remains the
+# larger, local ``transass_logo.png`` used in the application header.
+FAVICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title"><title id="title">TransASS</title><defs><linearGradient id="edge" x1="8" y1="8" x2="56" y2="56"><stop stop-color="#ff8fcf"/><stop offset=".5" stop-color="#65dfff"/><stop offset="1" stop-color="#ff8fcf"/></linearGradient><linearGradient id="letter" x1="14" y1="20" x2="50" y2="48"><stop stop-color="#f7fbff"/><stop offset=".55" stop-color="#b8eaff"/><stop offset="1" stop-color="#f58fca"/></linearGradient></defs><rect x="2" y="2" width="60" height="60" rx="15" fill="#071426" stroke="url(#edge)" stroke-width="2"/><path d="M12 13h36a7 7 0 0 1 7 7v15a7 7 0 0 1-7 7H31l-8 8v-8h-5a7 7 0 0 1-7-7V20a7 7 0 0 1 7-7Z" fill="#111d3d" stroke="#5edbff" stroke-width="1.5"/><path d="M17 23h29M17 28h19" stroke="#f493cf" stroke-width="2.4" stroke-linecap="round"/><text x="32" y="48" text-anchor="middle" font-family="Arial,sans-serif" font-size="20" font-weight="900" letter-spacing="-2" fill="url(#letter)">T<tspan fill="#f58fca">A</tspan></text></svg>'''
 
 
 def _now() -> str:
@@ -3418,7 +3419,7 @@ PAGE = r'''<!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1"><link rel="apple-touch-icon" href="/favicon.svg?v=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2"><link rel="apple-touch-icon" href="/favicon.svg?v=2">
 <title>Transass · Central de tradução</title>
 <style>
 :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#1c2430;--line:#30363d;--text:#e6edf3;--muted:#9da7b3;--blue:#3b82f6;--green:#3fb950;--yellow:#d29922;--red:#f85149;}
@@ -3606,7 +3607,7 @@ $('closeVersionDetails').onclick=()=>{$('versionDetailsDialog').close?.();$('ver
 
 
 REVIEW_PAGE = r'''<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1"><link rel="apple-touch-icon" href="/favicon.svg?v=1">
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2"><link rel="apple-touch-icon" href="/favicon.svg?v=2">
 <title>Revisão humana · Transass</title>
 <style>
 :root{color-scheme:dark;--bg:#0b1119;--panel:#131d28;--line:#2b3e52;--text:#edf4fb;--muted:#96a7b9;--green:#238636;--red:#8e2024;--blue:#247fdd}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 12% -8%,#193252 0,#0b1119 38%);color:var(--text);font:15px/1.48 system-ui,sans-serif;min-height:100vh}main{max-width:1320px;margin:auto;padding:22px 18px 52px}header{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:15px;padding:17px 19px;border:1px solid #304961;border-radius:16px;background:linear-gradient(120deg,#17283cef,#111b29f2);box-shadow:0 18px 44px #0004}h1{font-size:1.48rem;letter-spacing:-.025em;margin:2px 0}.back{display:inline-block;color:#80b7ff;text-decoration:none;font-size:.82rem;margin-bottom:2px}.muted{color:var(--muted)}.panel{background:linear-gradient(145deg,#151f2bf7,#101821f7);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 12px 28px #0003}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.button,button{border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#202e3e;color:var(--text);cursor:pointer;min-height:38px;text-decoration:none}.button:hover,button:hover{border-color:#5b7898;background:#293b4f}.button.primary{background:linear-gradient(135deg,#238636,#2e9f46)}.button.approve{background:linear-gradient(135deg,#247fdd,#326de0)}.button.reject{background:var(--red)}button:disabled{opacity:.45;cursor:not-allowed}select,input,textarea{background:#0a121b;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}input,textarea{width:100%}textarea{min-height:88px;resize:vertical}.segment{border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0;background:#0f1924}.segment:focus-within{border-color:#4778a8;box-shadow:0 0 0 3px #3275b322}.segment-head{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}.box{border:1px solid var(--line);border-radius:9px;padding:10px;white-space:pre-wrap;overflow:auto;background:#0a121b}.source{border-left:3px solid #d29922}.generated{border-left:3px solid #58a6ff}.context{font-size:.88rem;color:var(--muted);margin:8px 0}.badge{border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:.78rem}.ok{color:#b7f5c0}.warn{color:#f2cc60}.fail{color:#ffaba8}@media(max-width:760px){.cols{grid-template-columns:1fr}main{padding:10px 9px 34px}header{padding:14px}.toolbar>*{flex:1 1 140px}}
