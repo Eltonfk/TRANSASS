@@ -1,5 +1,9 @@
 # Transass
 
+<p align="center">
+  <img src="src/subtranslate/transass_logo.png" alt="TransASS — Translation Assistant" width="360">
+</p>
+
 [![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-216%20offline%20passing-brightgreen.svg)](tests/offline)
