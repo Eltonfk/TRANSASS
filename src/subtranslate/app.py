@@ -24,7 +24,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, jsonify, request, send_file, stream_with_context
 
 from anime_subtitle_library import (
     AnimeSubtitleLibrary,
@@ -72,13 +72,19 @@ GLOSSARY_PATH = Path(os.environ.get("TRANSLATOR_GLOSSARY_PATH", str(STATE_DIR / 
 glossary_store = GlossaryStore(GLOSSARY_PATH)
 MAX_LOGS = 3000
 MAX_HISTORY = 100
+EPISODE_PAGE_SIZE_DEFAULT = 40
+EPISODE_PAGE_SIZE_MAX = 200
+EPISODE_DISCOVERY_CACHE_TTL = 8.0
 
 
 class StatePersistenceError(RuntimeError):
     """State could not be durably committed; callers must fail closed."""
 
-app = Flask(__name__)
+_WEB_ASSET_ROOT = Path(__file__).resolve().parent
+app = Flask(__name__, static_folder=str(_WEB_ASSET_ROOT / "static"), static_url_path="/static")
 state_lock = threading.RLock()
+state_condition = threading.Condition(state_lock)
+_episode_discovery_cache: dict[str, tuple[float, tuple[Path, ...]]] = {}
 
 # Compact browser-sized adaptation of the official TransASS mark.  Keeping it
 # inline avoids another runtime file while the full illustration remains the
@@ -415,9 +421,30 @@ def _episode_record_for_video(video: Path, source_language: str | None = None) -
     }
 
 
-def _episode_records(folder: Path, source_language: str | None = None) -> list[dict]:
+def _discover_episode_videos(folder: Path) -> list[Path]:
+    """Return a short-lived snapshot of episode files.
+
+    Discovery is deliberately cached only for a few seconds: the library is
+    user-writable and workers may publish a new subtitle while the browser is
+    polling.  The cache avoids repeating the expensive recursive walk during
+    normal refreshes without turning filesystem state into an authority.
+    """
+    key = str(folder)
+    now = time.monotonic()
+    cached = _episode_discovery_cache.get(key)
+    if cached and now - cached[0] < EPISODE_DISCOVERY_CACHE_TTL:
+        return list(cached[1])
+    videos = tuple(sorted(
+        path for path in folder.rglob("*")
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    ))
+    _episode_discovery_cache[key] = (now, videos)
+    return list(videos)
+
+
+def _episode_records(folder: Path, source_language: str | None = None, videos: list[Path] | None = None) -> list[dict]:
     records = []
-    for video in sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS):
+    for video in (videos if videos is not None else _discover_episode_videos(folder)):
         try:
             records.append(_episode_record_for_video(video, source_language=source_language))
         except Exception as error:
@@ -816,6 +843,13 @@ def _persist_locked() -> None:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        # Wake SSE clients only after the durable state replacement completed.
+        try:
+            state_condition.notify_all()
+        except RuntimeError:
+            # A legacy caller may persist outside the lock; durability still
+            # succeeds and the next heartbeat will refresh SSE clients.
+            pass
     except OSError as exc:
         try:
             if temporary is not None:
@@ -2096,6 +2130,87 @@ def _build_jobs(sources: list[Path], session_id: str, folder: str, dry_run: bool
     )
 
 
+def _estimate_episode_units(video: Path) -> tuple[int | None, str | None]:
+    """Estimate subtitle units without extracting embedded tracks or writing.
+
+    Sidecar subtitles are safe to inspect in preflight.  Embedded-only media
+    reports ``None`` rather than triggering ffmpeg extraction as a side effect.
+    """
+    sidecars = sorted(
+        path for path in video.parent.glob(f"{video.stem}*")
+        if path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS
+        and TARGET_SUFFIX.lower() not in path.stem.lower()
+    )
+    if not sidecars:
+        return None, None
+    try:
+        from anime_subtitle_translator import load_subtitles
+        subtitles = load_subtitles(sidecars[0])
+        units = sum(1 for event in subtitles if str(getattr(event, "text", "")).strip())
+        return units, _safe_relative(sidecars[0])
+    except Exception:
+        return None, _safe_relative(sidecars[0])
+
+
+@app.route("/preflight", methods=["POST"])
+def translation_preflight():
+    """Read-only preview of a normal translation queue."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON inválido"}), 400
+    try:
+        folder = _validate_folder(data.get("folder", ""))
+        sources = _selected_sources(folder, data.get("episodes"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "pasta não encontrada"}), 404
+    try:
+        plan = get_pipeline_plan(_pipeline())
+    except UnsupportedPipelineError as error:
+        return jsonify({"error": str(error), "code": "unsupported_pipeline"}), 400
+    raw_langs = data.get("source_languages") or {}
+    source_languages = {str(k): str(v) for k, v in raw_langs.items() if v} if isinstance(raw_langs, dict) else {}
+    try:
+        batch_size = max(1, int(os.environ.get("TRANSLATOR_BATCH_SIZE", "4")))
+    except ValueError:
+        batch_size = 4
+    episodes = []
+    total_units = 0
+    known_units = True
+    for source in sources:
+        units, subtitle_path = _estimate_episode_units(source)
+        if units is None:
+            known_units = False
+        else:
+            total_units += units
+        episodes.append({
+            "source": _safe_relative(source),
+            "name": source.name,
+            "language": source_languages.get(_safe_relative(source)) or source_languages.get(source.name),
+            "estimated_units": units,
+            "estimated_batches": ((units + batch_size - 1) // batch_size) if units is not None else None,
+            "subtitle_source": subtitle_path,
+            "already_translated": bool(_existing_output(source)),
+        })
+    return jsonify({
+        "folder": _safe_relative(folder),
+        "pipeline": _pipeline_info(),
+        "pipeline_id": plan.id,
+        "model": _model() or "não configurado",
+        "source_languages": source_languages,
+        "batch_size": batch_size,
+        "episodes": episodes,
+        "counts": {
+            "selected": len(sources),
+            "estimated_units": total_units if known_units else None,
+            "estimated_batches": ((total_units + batch_size - 1) // batch_size) if known_units else None,
+            "estimation_complete": known_units,
+        },
+        "read_only": True,
+    })
+
+
 def _validate_folder(folder_name: str) -> Path:
     if not isinstance(folder_name, str) or not folder_name.strip():
         raise ValueError("pasta inválida")
@@ -2183,8 +2298,25 @@ def episodes_route():
     except FileNotFoundError:
         return jsonify({"error": "pasta não encontrada"}), 404
     source_language = request.args.get("source_language")
+    try:
+        offset = max(0, int(request.args.get("offset", "0")))
+        limit = int(request.args.get("limit", str(EPISODE_PAGE_SIZE_DEFAULT)))
+    except ValueError:
+        return jsonify({"error": "paginação inválida"}), 400
+    if limit < 1 or limit > EPISODE_PAGE_SIZE_MAX:
+        return jsonify({"error": f"limit deve estar entre 1 e {EPISODE_PAGE_SIZE_MAX}"}), 400
     with state_lock:
-        return jsonify({"folder": _safe_relative(folder), "episodes": _episode_records(folder, source_language=source_language)})
+        videos = _discover_episode_videos(folder)
+        total = len(videos)
+        page = _episode_records(folder, source_language=source_language, videos=videos[offset:offset + limit])
+        return jsonify({
+            "folder": _safe_relative(folder),
+            "episodes": page,
+            "offset": offset,
+            "limit": limit,
+            "total": total,
+            "has_more": offset + len(page) < total,
+        })
 
 
 @app.route("/source-status")
@@ -2570,6 +2702,38 @@ def history_route():
         return jsonify({"history": history, "technical_hidden": not technical})
 
 
+def _inbox_categories_locked() -> dict[str, list[dict]]:
+    """Group recent work into a small, actionable post-translation inbox."""
+    categories = {"ready_to_publish": [], "needs_review": [], "failed": []}
+    for raw in reversed(state.get("jobs", [])):
+        job = _public_job(raw)
+        if not job:
+            continue
+        status = str(raw.get("status") or "")
+        audit = raw.get("audit") or {}
+        flags = list(audit.get("blocking_flags") or audit.get("flags") or raw.get("blocking_flags") or [])
+        if status in {"FAILED", "NOT_STARTED_AFTER_FAILURE"}:
+            categories["failed"].append(job)
+        elif flags or raw.get("review_required") or audit.get("status") in {"PROBLEMAS DETECTADOS", "REVISÃO NECESSÁRIA"}:
+            categories["needs_review"].append(job)
+        elif status == "COMPLETED" and (job.get("candidate_download_url") or raw.get("stage") in {"CANDIDATE_READY", "READY_TO_PUBLISH"}):
+            categories["ready_to_publish"].append(job)
+        if sum(len(items) for items in categories.values()) >= 120:
+            break
+    return categories
+
+
+@app.route("/inbox")
+def inbox_route():
+    with state_lock:
+        categories = _inbox_categories_locked()
+    return jsonify({
+        "categories": categories,
+        "counts": {key: len(value) for key, value in categories.items()},
+        "updated_at": _now(),
+    })
+
+
 @app.route("/retranslation/candidates/<job_id>/download")
 def retranslation_candidate_download(job_id: str):
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", str(job_id or "")):
@@ -2589,23 +2753,52 @@ def status():
     except ValueError:
         return jsonify({"error": "cursor inválido"}), 400
     with state_lock:
-        current = next((job for job in state["jobs"] if job.get("id") == state.get("current_job_id")), None)
-        session_jobs = [job for job in state["jobs"] if job.get("session_id") == state.get("session_id")]
-        if current is None:
-            current = next((job for job in session_jobs if job.get("status") in {
-                "STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING",
-            }), None)
-        return jsonify({
-            "running": state["running"], "paused": state["paused"], "pause_requested": state["pause_requested"],
-            "stopped_by_user": state["stopped_by_user"], "folder": state["folder"], "session_id": state.get("session_id"),
-            "log": [{"id": entry["id"], "line": entry["line"]} for entry in state["log"] if entry["id"] > after],
-            "log_details": [entry for entry in state["log"] if entry["id"] > after], "last_log_id": state["log_sequence"],
-            "finished_ok": state["finished_ok"], "progress": current.get("progress") if current else None,
-            "current_job": _public_job(current), "jobs": [_public_job(job) for job in session_jobs],
-            "queue": _queue_counts(), "queue_paused": state["queue_paused"],
-            "bulk_stop_reason": state.get("bulk_stop_reason"), "bulk_failed_job_id": state.get("bulk_failed_job_id"),
-            "pipeline": _pipeline_info(),
-        })
+        return jsonify(_status_payload_locked(after))
+
+
+def _status_payload_locked(after: int = 0) -> dict:
+    """Build the browser status payload while ``state_lock`` is held."""
+    current = next((job for job in state["jobs"] if job.get("id") == state.get("current_job_id")), None)
+    session_jobs = [job for job in state["jobs"] if job.get("session_id") == state.get("session_id")]
+    if current is None:
+        current = next((job for job in session_jobs if job.get("status") in {
+            "STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING",
+        }), None)
+    return {
+        "running": state["running"], "paused": state["paused"], "pause_requested": state["pause_requested"],
+        "stopped_by_user": state["stopped_by_user"], "folder": state["folder"], "session_id": state.get("session_id"),
+        "log": [{"id": entry["id"], "line": entry["line"]} for entry in state["log"] if entry["id"] > after],
+        "log_details": [entry for entry in state["log"] if entry["id"] > after], "last_log_id": state["log_sequence"],
+        "finished_ok": state["finished_ok"], "progress": current.get("progress") if current else None,
+        "current_job": _public_job(current), "jobs": [_public_job(job) for job in session_jobs],
+        "queue": _queue_counts(), "queue_paused": state["queue_paused"],
+        "bulk_stop_reason": state.get("bulk_stop_reason"), "bulk_failed_job_id": state.get("bulk_failed_job_id"),
+        "pipeline": _pipeline_info(),
+    }
+
+
+@app.route("/events")
+def events():
+    """Stream status changes to the UI without forcing a tight poll loop."""
+    try:
+        cursor = max(0, int(request.args.get("after", "0")))
+    except ValueError:
+        return jsonify({"error": "cursor inválido"}), 400
+
+    @stream_with_context
+    def stream():
+        nonlocal cursor
+        first = True
+        while True:
+            with state_condition:
+                if not first:
+                    state_condition.wait(timeout=15.0)
+                first = False
+                payload = _status_payload_locked(cursor)
+            cursor = payload["last_log_id"]
+            yield f"event: status\ndata:{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+    return Response(stream(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _save_audit(record_id: int, audit: dict[str, Any]) -> dict[str, Any]:
@@ -3192,7 +3385,8 @@ def glossary_export_route():
 
 @app.route("/glossary/ui")
 def glossary_ui_route():
-    return Response("""<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Glossary</title><style>body{font:16px system-ui;max-width:900px;margin:1rem auto;padding:0 1rem}input,select{font:inherit;padding:.45rem;margin:.2rem;width:min(28rem,90%)}table{border-collapse:collapse;width:100%;margin-top:1rem}td,th{border-bottom:1px solid #ddd;text-align:left;padding:.4rem}small{color:#666}</style><h1>Glossário 1.0</h1><p><small>Orientação contextual para o modelo; não substitui nem alimenta automaticamente a Translation Memory.</small></p><input id=q placeholder='Buscar'><select id=s><option value=''>Todos os escopos</option><option>GLOBAL</option><option>ANIME</option><option>CHARACTER</option></select><table><thead><tr><th>Inglês</th><th>PT-BR</th><th>Categoria</th><th>Status</th></tr></thead><tbody id=rows></tbody></table><script>async function load(){let q=document.querySelector('#q').value,s=document.querySelector('#s').value;let d=await (await fetch('/glossary?q='+encodeURIComponent(q)+'&scope='+s)).json();document.querySelector('#rows').innerHTML=d.entries.map(e=>`<tr><td>${e.source_expression}</td><td>${e.preferred_pt_br}</td><td>${e.category}</td><td>${e.status}</td></tr>`).join('')}q.oninput=load;s.onchange=load;load()</script>""", mimetype="text/html")
+    template = (_WEB_ASSET_ROOT / "templates" / "glossary.html").read_text(encoding="utf-8")
+    return Response(template, mimetype="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.route("/memory/items/<int:item_id>")
@@ -3415,220 +3609,8 @@ def library_classifications():
         return _library_error(error)
 
 
-PAGE = r'''<!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2"><link rel="apple-touch-icon" href="/favicon.svg?v=2">
-<title>Transass · Central de tradução</title>
-<style>
-:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#1c2430;--line:#30363d;--text:#e6edf3;--muted:#9da7b3;--blue:#3b82f6;--green:#3fb950;--yellow:#d29922;--red:#f85149;}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(145deg,#0d1117,#111827);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1220px;margin:auto;padding:22px 16px 48px;min-width:0}h1,h2{margin:0}h1{font-size:1.35rem}.muted{color:var(--muted)}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px}.chips{display:flex;gap:8px;flex-wrap:wrap}.chip,.badge{border:1px solid var(--line);border-radius:999px;padding:5px 10px;font-size:.78rem;background:var(--panel2)}.online{color:#b7f5c0;border-color:#2ea043}.grid{display:grid;grid-template-columns:minmax(220px,min(36vw,360px)) minmax(0,1fr);gap:14px;align-items:start}.panel{background:rgba(22,27,34,.92);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:0 12px 30px #0002;min-width:0}.panel h2{font-size:.95rem;margin-bottom:12px}.wide{grid-column:1/-1}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}.crumb{min-height:38px;padding:8px 10px;background:#0d1117;border:1px solid var(--line);border-radius:8px;overflow:auto;white-space:nowrap}.crumb button{background:none;border:0;color:#79c0ff;padding:0;cursor:pointer}.actions{margin-top:12px}.button,button{border:1px solid var(--line);border-radius:8px;padding:9px 13px;background:#21262d;color:var(--text);cursor:pointer;min-height:40px}.button.primary{background:#238636;border-color:#2ea043}.button.warn{background:#9e6a03}.button.danger{background:#8e1519}.button:disabled,button:disabled{opacity:.45;cursor:not-allowed}select{background:#0d1117;border:1px solid var(--line);color:var(--text);padding:9px;border-radius:8px;min-height:40px;max-width:100%}.episodes{margin-top:12px;display:grid;gap:7px;max-height:420px;overflow:auto}.episode{display:grid;grid-template-columns:26px 58px minmax(0,1fr) auto;gap:8px;align-items:center;padding:9px;border:1px solid var(--line);border-radius:9px;background:#111820;min-width:0}.episode input{width:18px;height:18px}.epname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.badge.ok{color:#b7f5c0;border-color:#2ea043}.badge.fail{color:#ffaba8;border-color:#f85149}.badge.wait{color:#f2cc60;border-color:#9e6a03}.badge.neutral{color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.stat{padding:10px;background:#111820;border:1px solid var(--line);border-radius:9px;min-width:0}.stat b{display:block;font-size:1.15rem}.progress{height:10px;background:#30363d;border-radius:9px;overflow:hidden}.progress i{display:block;height:100%;background:linear-gradient(90deg,#2f81f7,#3fb950);width:0}.jobline{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px;border-bottom:1px solid #21262d;padding:8px 0;min-width:0}.jobline:last-child{border:0}.record-actions{display:flex;justify-content:flex-end;align-items:center;gap:6px;flex-wrap:wrap}.log{background:#080b0f;border:1px solid var(--line);border-radius:9px;padding:10px;max-height:290px;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap}.log .error{color:#ffaba8}.log .summary{color:#b7f5c0}.history{max-height:300px;overflow:auto}.note{padding:9px;background:#1f2937;border-left:3px solid var(--yellow);border-radius:5px;color:#e5e7eb}.hidden{display:none}@media(max-width:1020px){.grid{grid-template-columns:minmax(190px,29vw) minmax(0,1fr)}main{padding-left:12px;padding-right:12px}}@media(max-width:820px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.nav-panel{max-height:none}.stats{grid-template-columns:repeat(3,minmax(0,1fr))}.episode{grid-template-columns:24px 55px minmax(0,1fr) auto}}@media(max-width:480px){main{padding:12px 9px 32px}.top{display:block}.chips{margin-top:10px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.episode{grid-template-columns:24px 45px minmax(0,1fr)}.episode .badge{grid-column:3/-1;justify-self:start}.actions .button,.record-actions .button{flex:1 1 140px}.jobline{grid-template-columns:1fr}.record-actions{justify-content:flex-start}.panel{padding:12px}}
-:focus-visible{outline:2px solid #58a6ff;outline-offset:2px}.job-progress-meta{display:flex;gap:8px;flex-wrap:wrap;font-size:.88rem}.job-progress-meta span{white-space:nowrap}
-/* Product shell.  The primary translation workflow stays visible while
-   secondary tools live in focused workspaces instead of one endless page. */
-body{background:radial-gradient(circle at 12% -8%,#193252 0,#0b1119 36%),#0b1119;color:#edf4fb;min-height:100vh}
-body:before{content:'';position:fixed;inset:0;pointer-events:none;background:linear-gradient(90deg,#4ea1ff08 1px,transparent 1px),linear-gradient(#4ea1ff06 1px,transparent 1px);background-size:36px 36px;mask-image:linear-gradient(to bottom,#0008,transparent 60%)}
-main{position:relative;max-width:1460px;padding:24px 24px 56px}
-.top{padding:18px 20px;margin-bottom:12px;border:1px solid #2c4661;border-radius:18px;background:linear-gradient(120deg,#17283ceF,#111b29f2);box-shadow:0 18px 46px #0005}
-.brand{display:flex;align-items:center;gap:13px}.brand-logo{display:block;width:58px;height:58px;flex:none;object-fit:contain;filter:drop-shadow(0 8px 16px #0008)}.top h1{font-size:1.58rem;letter-spacing:-.035em}.top .muted{margin-top:3px}.brand-joke{color:#91a4b8;font-size:.82rem}
-.chips{justify-content:flex-end}.chip{padding:6px 11px;background:#111c2a;border-color:#334a63}.chip.online{background:#10271c}.chip.offline{color:#ffaaa5;border-color:#763a3a;background:#2a1518}
-.workspace-nav{display:flex;gap:6px;padding:5px;margin-bottom:16px;overflow-x:auto;border:1px solid #26394d;border-radius:13px;background:#0e1722d9;box-shadow:0 8px 26px #0002}.nav-button{flex:0 0 auto;min-height:38px;padding:8px 14px;border:0;background:transparent;color:#9fb0c2}.nav-button:hover:not(:disabled){transform:none;background:#172537;border-color:transparent}.nav-button.active{background:#20344c;color:#f4f8fc;box-shadow:inset 0 0 0 1px #3b5d80}.nav-button .nav-count{margin-left:5px;color:#7db5ff}
-.view[hidden]{display:none}.view{animation:view-in .16s ease-out}@keyframes view-in{from{opacity:.35;transform:translateY(4px)}to{opacity:1;transform:none}}
-.workflow-strip{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px;padding:12px 15px;border:1px solid #2e4966;border-radius:13px;background:#122034}.workflow-copy{display:flex;align-items:center;gap:10px;min-width:0}.workflow-step{display:grid;place-items:center;flex:0 0 auto;width:29px;height:29px;border-radius:50%;background:#2f81f7;color:white;font-weight:800}.workflow-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.workflow-safety{color:#87d99a;font-size:.82rem;white-space:nowrap}
-.grid{grid-template-columns:minmax(260px,310px) minmax(0,1fr);gap:16px}.panel{padding:18px;border-color:#293b4e;background:linear-gradient(145deg,#151f2bf7,#101821f7);box-shadow:0 12px 28px #0003}.panel h2{font-size:1.02rem;letter-spacing:-.015em}.panel-kicker{color:#6ea8fe;font-size:.69rem;font-weight:800;letter-spacing:.13em;text-transform:uppercase;margin-bottom:7px}.panel-subtitle{margin:-6px 0 12px;font-size:.84rem;color:#91a1b2}.nav-panel{position:sticky;top:12px}.crumb{background:#0a121b;border-color:#26394d}.actions{margin-top:10px}.actions .button{flex:0 1 auto}
-.button,button,select,input{border-radius:10px;transition:background .15s,border-color .15s,transform .15s,box-shadow .15s}.button:hover:not(:disabled),button:hover:not(:disabled){border-color:#5b7898;background:#29394c;transform:translateY(-1px)}.button:active:not(:disabled),button:active:not(:disabled){transform:translateY(0)}input{min-height:40px;padding:8px 10px;border:1px solid #303f50;background:#0a121b;color:var(--text);font:inherit}input::placeholder{color:#687c90}label{font-weight:600}label.muted,.muted label{font-weight:400}
-.button.primary{background:linear-gradient(135deg,#247fdd,#326de0);border-color:#559bff;box-shadow:0 6px 17px #1f6feb38}.button.success{background:linear-gradient(135deg,#238636,#2e9f46);border-color:#43b95b}.button.warn{background:#79550c;border-color:#a97b1c}.button.danger{background:#782226;border-color:#ad4146}.button.quiet{background:transparent}.button.compact{min-height:34px;padding:6px 10px}
-.folder-state{margin-top:12px;padding:10px 11px;border-radius:10px;background:#0e1823;border:1px solid #26384c}.folder-state strong{display:block;overflow-wrap:anywhere}.folder-actions{display:grid;grid-template-columns:1fr auto;gap:8px}.folder-actions select{width:100%}
-.stats{grid-template-columns:repeat(6,minmax(76px,1fr));gap:9px}.stat{padding:11px 12px;background:#0f1924;border-color:#26394d}.stat b{font-size:1.2rem}.stat .muted{font-size:.76rem}.stat.problem b{color:#ffaaa5}.stat.active b{color:#84b8ff}
-.control-groups{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.primary-controls,.queue-controls{display:flex;gap:8px;flex-wrap:wrap}.advanced-actions{margin-top:11px;padding-top:10px;border-top:1px solid #26384d}.advanced-actions summary{font-size:.86rem;color:#9eafc1}.advanced-actions .row{margin-top:9px}
-.wide{grid-column:1/-1}.episodes{max-height:540px;gap:8px}.episode{grid-template-columns:24px 52px minmax(180px,1fr) auto auto minmax(110px,150px);padding:10px 11px;background:#0f1924;border-color:#26394d}.episode:hover{border-color:#456786;background:#132235}.episode:has(input:checked){border-color:#3977b9;background:#142a43}.epname{font-size:.92rem}.episode .badge{white-space:nowrap}
-.episodes-panel{border-color:#304e6b;background:linear-gradient(145deg,#14263a,#101a25)}.episodes-toolbar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.episodes-toolbar h2{margin-bottom:2px}.episodes-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}.language-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding:10px 12px;border-radius:10px;background:#0e1824;border:1px solid #263a50}
-#episodeSearch{min-width:180px;width:min(260px,100%);padding:8px 10px;border:1px solid var(--line);background:#0a121b;color:var(--text)}#selectionSummary{font-size:.8rem;color:#80b8ff;white-space:nowrap}.empty-state{padding:28px 16px;text-align:center;border:1px dashed #33485e;border-radius:11px;color:#91a1b2;background:#0d151f}.empty-state b{display:block;color:#dfe9f3;margin-bottom:4px}
-.progress-card{min-height:220px}.progress{height:12px;margin-top:13px;background:#09111a;border:1px solid #26384d}.progress i{background:linear-gradient(90deg,#3987ff,#38c172)}.history{max-height:430px}.jobline{padding:10px 0;border-color:#253748}.note{background:#1c2b3b;border-left-color:#d29922}.section-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:13px}.section-heading h2{margin-bottom:3px}.section-shell{max-width:1220px;margin:0 auto}.secondary-panel{min-height:480px}
-details summary{cursor:pointer}details summary:hover{color:#79c0ff}dialog{color-scheme:dark}dialog::backdrop{background:#03070bcc;backdrop-filter:blur(3px)}.dialog-card{padding:20px;overflow:auto;max-height:88vh}.form-grid{display:grid;gap:10px}.form-field{display:grid;gap:5px}.form-help{font-size:.79rem;color:#8fa1b3}
-.toast-region{position:fixed;z-index:30;right:18px;bottom:18px;display:grid;gap:8px;width:min(390px,calc(100vw - 36px));pointer-events:none}.toast{padding:12px 14px;border:1px solid #38526e;border-radius:11px;background:#132132f5;box-shadow:0 14px 34px #0007;color:#edf5fd;animation:toast-in .18s ease-out}.toast.ok{border-color:#317947}.toast.fail{border-color:#994047}.toast.warn{border-color:#916c26}@keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.app-footer{margin-top:18px;text-align:center;color:#6f8295;font-size:.78rem}.app-footer strong{color:#8fa4b8}
-@media(max-width:1080px){main{padding:18px 16px 44px}.grid{grid-template-columns:minmax(230px,280px) minmax(0,1fr)}.stats{grid-template-columns:repeat(3,minmax(80px,1fr))}.episode{grid-template-columns:24px 48px minmax(140px,1fr) auto auto}.episode select{grid-column:3/-1;justify-self:end}}
-@media(max-width:820px){.top{align-items:flex-start}.brand-joke{display:none}.nav-panel{position:static}.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,minmax(0,1fr))}.episode{grid-template-columns:24px 48px minmax(0,1fr) auto}.episode select{grid-column:3/-1;justify-self:stretch}.episode .badge{justify-self:start}.episodes-toolbar{display:block}.episodes-actions{justify-content:flex-start;margin-top:10px}#episodeSearch{flex:1 1 180px}.workflow-safety{display:none}.section-heading{display:block}.section-heading .button{margin-top:8px}}
-@media(max-width:560px){main{padding:10px 9px 30px}.top{padding:14px}.top h1{font-size:1.35rem}.brand-logo{width:50px;height:50px}.chips{justify-content:flex-start;margin-top:11px}.chips .chip{display:none}.chips #serviceChip{display:inline-flex}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.episode{grid-template-columns:24px 42px minmax(0,1fr);gap:7px}.episode .badge,.episode select{grid-column:3/-1}.actions .button,.record-actions .button{flex:1 1 130px}.panel{padding:13px}.workflow-strip{align-items:flex-start}.workflow-hint{white-space:normal}.control-groups{display:block}.queue-controls{margin-top:8px}.folder-actions{grid-template-columns:1fr}.toast-region{right:9px;bottom:9px;width:calc(100vw - 18px)}}
-</style></head>
-<body><main>
-<header class="top"><div class="brand"><img class="brand-logo" src="/transass-logo.png?v=1" alt="TransASS" width="58" height="58"><div><h1>Transass</h1><div class="muted">Central de tradução de legendas</div><div class="brand-joke">Troca o idioma. O nome continua questionável.</div></div></div><div class="chips"><span class="chip" id="pipelineChip">Pipeline…</span><span class="chip" id="modelChip">Modelo…</span><span class="chip" id="motorChip" title="Motor de tradução configurado">Motor…</span><span class="chip online" id="serviceChip">Serviço…</span><button class="button compact" id="openTransportConfig">⚙ Configurar motor</button></div></header>
-<nav class="workspace-nav" aria-label="Áreas do Transass"><button class="nav-button active" data-view-button="translate" aria-current="page">▶ Traduzir <span class="nav-count" id="navQueueCount"></span></button><button class="nav-button" data-view-button="library">▣ Acervo e revisão</button><button class="nav-button" data-view-button="memory">✦ Memória aprovada</button><button class="nav-button" data-view-button="diagnostics">⌨ Diagnóstico</button></nav>
-<div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-<section class="view" data-view-panel="translate">
-<div class="workflow-strip"><div class="workflow-copy"><span class="workflow-step" id="workflowStep">1</span><div><b id="workflowTitle">Escolha uma temporada</b><div class="muted workflow-hint" id="workflowHint">Navegue até uma pasta com vídeos para começar.</div></div></div><div class="workflow-safety">✓ Sem sobrescrever PT-BR existente</div></div>
-<div class="grid">
-<section class="panel nav-panel"><div class="panel-kicker">Passo 1</div><h2>Origem</h2><p class="panel-subtitle">Encontre a temporada que vai ganhar uma bunda… digo, uma legenda nova.</p><div id="crumb" class="crumb" aria-label="Caminho atual"></div><div class="folder-actions actions"><select id="folderSelect" aria-label="Subpastas"></select><button class="button" id="enterBtn">Abrir pasta</button></div><div class="row actions"><button class="button quiet" id="upBtn">← Voltar</button><button class="button primary" id="useBtn">Carregar esta temporada</button></div><div class="folder-state"><span class="muted">Temporada ativa</span><strong id="selectedFolderLabel">Nenhuma carregada</strong></div><div id="libraryNote" class="note hidden"></div></section>
-<section class="panel"><div class="panel-kicker">Passo 3</div><h2>Fila de tradução</h2><p class="panel-subtitle">Resumo honesto: se algo der ruim, a fila conta. Sem retry ninja.</p><div class="stats"><div class="stat"><b id="doneCount">0/0</b><span class="muted">concluídos</span></div><div class="stat active"><b id="waitCount">0</b><span class="muted">na fila</span></div><div class="stat active"><b id="runCount">0</b><span class="muted">em execução</span></div><div class="stat problem"><b id="failCount">0</b><span class="muted">falhas</span></div><div class="stat"><b id="skipCount">0</b><span class="muted">ignorados</span></div><div class="stat"><b id="notStartedAfterFailureCount">0</b><span class="muted">bloqueados pela falha</span></div></div><div class="control-groups actions"><div class="primary-controls"><button class="button primary" id="startBtn" disabled>Selecione episódios</button><button class="button" id="retryBtn">Reprocessar falhos</button></div><div class="queue-controls"><button class="button warn" id="pauseBtn">Pausar</button><button class="button" id="resumeBtn">Continuar</button><button class="button danger" id="stopBtn">Parar fila</button></div></div><details class="advanced-actions"><summary>Ações avançadas e de manutenção</summary><div class="row"><label title="Planejamento sem tradução nem publicação"><input type="checkbox" id="dryrun"> Simulação (zero tradução/publicação)</label><button class="button" id="auditSeasonBtn">Auditar temporada</button><button class="button warn" id="retranslateSeasonBtn">Retraduzir temporada inteira</button></div></details></section>
-<section class="panel wide episodes-panel"><div class="panel-kicker">Passo 2</div><div class="episodes-toolbar"><div><h2>Escolha os episódios</h2><div class="panel-subtitle">A seleção fica aqui; a ansiedade pode esperar na fila.</div></div><div class="episodes-actions"><input id="episodeSearch" type="search" placeholder="Filtrar episódios…" aria-label="Filtrar episódios"><span id="selectionSummary" aria-live="polite">0 selecionados</span><button class="button compact" id="selectMissing">Sem PT-BR</button><button class="button compact" id="selectLegacy">Legadas</button><button class="button compact quiet" id="clearSelection">Limpar</button><button class="button compact warn" id="retranslateSelectedBtn" disabled>Retraduzir</button></div></div><div class="language-bar"><label for="seasonLang"><b>Idioma da fonte</b></label><select id="seasonLang" title="Aplica a todos os episódios da pasta"><option value="inglês">inglês</option></select><button class="button compact" id="detectSeasonLang" title="Detecta os idiomas disponíveis na temporada">Detectar automaticamente</button><span class="muted">Pode ser ajustado por episódio na lista.</span></div><div id="episodes" class="episodes"><div class="empty-state"><b>Nenhuma temporada carregada</b>Escolha uma pasta ao lado e clique em “Carregar esta temporada”.</div></div></section>
-<section class="panel progress-card"><div class="section-heading"><div><div class="panel-kicker">Agora</div><h2>Progresso atual</h2></div></div><div id="currentTitle" class="muted">Nenhum episódio em execução.</div><div class="progress" aria-label="Progresso por unidade"><i id="progressBar"></i></div><div id="currentMeta" class="muted" style="margin-top:8px"></div><div id="currentTelemetry" class="muted job-progress-meta" style="margin-top:6px"></div><div id="queueList" style="margin-top:10px"></div></section>
-<section class="panel"><div class="section-heading"><div><div class="panel-kicker">Recentes</div><h2>Histórico</h2></div><label class="muted"><input type="checkbox" id="showTechnical"> incluir jobs técnicos</label></div><div id="history" class="history muted">Nenhuma sessão registrada.</div></section>
-</div></section>
-<section class="view section-shell" data-view-panel="library" hidden><section class="panel secondary-panel"><div class="section-heading"><div><div class="panel-kicker">Biblioteca persistente</div><h2>Acervo e versões</h2><div class="muted">Compare, revise e publique sem apagar o que veio antes.</div></div><span class="chip" id="libraryStats">Carregando acervo…</span></div><div id="archiveSeries" class="history muted">Nenhuma série anime catalogada.</div><div id="archiveDetails" class="history" style="margin-top:12px"></div></section></section>
-<section class="view section-shell" data-view-panel="memory" hidden><section class="panel secondary-panel"><div class="section-heading"><div><div class="panel-kicker">Conhecimento controlado</div><h2>Memória aprovada</h2><div class="muted" id="memoryStats">Somente correções humanas aprovadas entram aqui. O robô não vota na própria prova.</div></div><button class="button" id="memorySync">Sincronizar aprovações</button></div><div id="memoryItems" class="history">Nenhuma memória ativa.</div></section></section>
-<section class="view section-shell" data-view-panel="diagnostics" hidden><section class="panel secondary-panel"><div class="section-heading"><div><div class="panel-kicker">Transparência operacional</div><h2>Diagnóstico e logs</h2><div class="muted">O lugar onde “deu ruim” vira evidência reproduzível.</div></div><button class="button compact" id="clearVisualLogs">Limpar visualização</button></div><div id="logs" class="log"></div></section></section>
-<dialog id="versionDetailsDialog" style="width:min(720px,calc(100vw - 24px));max-width:720px;max-height:88vh;padding:0;border:1px solid #34495e;border-radius:16px;background:#121b26;color:#e6edf3;box-shadow:0 24px 80px #0008"><div class="dialog-card"><div class="section-heading"><div><div class="panel-kicker">Biblioteca</div><h2 id="versionDetailsTitle">Detalhes da versão</h2><div id="versionDetailsSubtitle" class="muted"></div></div><button class="button compact" id="closeVersionDetails" aria-label="Fechar detalhes">Fechar</button></div><div id="versionDetailsBody"><span class="muted">Carregando…</span></div></div></dialog>
-<dialog id="transportConfigDialog" style="width:min(620px,calc(100vw - 24px));max-width:620px;max-height:90vh;padding:0;border:1px solid #34495e;border-radius:16px;background:#121b26;color:#e6edf3;box-shadow:0 24px 80px #0008"><div class="dialog-card"><div class="section-heading"><div><div class="panel-kicker">Configuração</div><h2>Motor de tradução</h2><div class="muted">Um principal, um plano B e zero key passeando pelo navegador.</div></div><button class="button compact" id="closeTransportConfig">Fechar</button></div><div class="form-grid"><div class="form-field"><label for="tcSourceLanguage">Idioma padrão da legenda fonte</label><input id="tcSourceLanguage" placeholder="ex.: inglês, espanhol, japonês"><div class="form-help">O destino é sempre português do Brasil.</div></div><div class="form-field"><label for="tcPrimaryProvider">Motor principal</label><select id="tcPrimaryProvider"><option value="ollama">Ollama · local/GPU</option><option value="openai_compat">OpenAI-compatível · Groq, OpenRouter, LM Studio</option><option value="gemini">Gemini · Google</option><option value="nvidia">NVIDIA NIM · build.nvidia.com</option></select><input id="tcPrimaryModel" placeholder="Modelo, ex.: qwen3.5:9b"><input id="tcPrimaryBaseUrl" placeholder="Base URL · somente para OpenAI-compatível"></div><div class="form-field"><label for="tcFallbackProvider">Fallback opcional</label><select id="tcFallbackProvider"><option value="">— sem fallback —</option><option value="ollama">Ollama</option><option value="openai_compat">OpenAI-compatível</option><option value="gemini">Gemini</option><option value="nvidia">NVIDIA NIM</option></select><input id="tcFallbackModel" placeholder="Modelo do fallback"><input id="tcFallbackBaseUrl" placeholder="Base URL · somente para OpenAI-compatível"><div class="form-help">O fallback só entra quando o principal falha e deixa evidência própria.</div></div><div id="tcKeys" class="form-grid"></div><div class="note">As keys ficam somente no servidor, em arquivo local com permissão 600. Campo vazio mantém a key atual.</div><div class="row" style="justify-content:flex-end"><button class="button primary" id="tcSave">Salvar configuração</button></div><div id="tcStatus" class="muted" role="status"></div></div></div></dialog>
-<footer class="app-footer"><strong>Transass</strong> · durabilidade forense para arquivos cujo nome já começa com <i>ass</i>.</footer>
-</main>
-<script>
-const $=id=>document.getElementById(id);let path="",selectedFolder="",selectionFolder="",cursor=0,episodes=[],statusData=null,selectedEpisodeKeys=new Set(),refreshInFlight=false,renderedLogIds=new Set(),activeView="translate",lastEpisodesRefreshAt=0;let globalSourceLang="inglês";let seasonLangValue="inglês";const episodeSourceLang={};const langSelects={};
-async function api(url,opt){const r=await fetch(url,opt);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}
-function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
-function notify(message,tone='info',timeout=4800){const region=$('toastRegion');if(!region)return;const toast=document.createElement('div');toast.className=`toast ${tone}`;toast.textContent=message;region.append(toast);setTimeout(()=>toast.remove(),timeout)}
-function setView(name,{remember=true}={}){const target=document.querySelector(`[data-view-panel="${name}"]`);if(!target)return;activeView=name;document.querySelectorAll('[data-view-panel]').forEach(panel=>panel.hidden=panel!==target);document.querySelectorAll('[data-view-button]').forEach(button=>{const current=button.dataset.viewButton===name;button.classList.toggle('active',current);if(current)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current')});if(remember){try{localStorage.setItem('transass.activeView',name)}catch(e){}}if(name==='library')loadArchive();if(name==='memory')loadMemory()}
-function episodeKey(ep){return ep.library_episode_id?`id:${ep.library_episode_id}`:`source:${ep.source}`}
-function selected(){return episodes.filter(ep=>selectedEpisodeKeys.has(episodeKey(ep))).map(ep=>ep.source)}
-function selectedEpisodeIds(){return episodes.filter(ep=>selectedEpisodeKeys.has(episodeKey(ep))).map(ep=>ep.library_episode_id).filter(Boolean).map(Number)}
-function syncSelectionUi(){const count=selectedEpisodeKeys.size,busy=Boolean(statusData&&(statusData.running||(statusData.queue||{}).waiting));const summary=$('selectionSummary');if(summary){const query=($('episodeSearch')?.value||'').trim().toLowerCase(),visible=episodes.filter(ep=>!query||[ep.episode,ep.name,ep.status,ep.audit_status].some(value=>String(value||'').toLowerCase().includes(query))).length;summary.textContent=`${count} selecionado${count===1?'':'s'} · ${visible}/${episodes.length} exibidos`}$('startBtn').textContent=count?`Traduzir ${count} episódio${count===1?'':'s'}`:'Selecione episódios';$('startBtn').disabled=busy||count===0;$('retranslateSelectedBtn').disabled=busy||selectedEpisodeIds().length===0;$('clearSelection').disabled=count===0;if($('navQueueCount')){const q=statusData?.queue||{},pending=(q.waiting||0)+(q.running||0);$('navQueueCount').textContent=pending?String(pending):''}if(statusData?.running){$('workflowStep').textContent='3';$('workflowTitle').textContent='Tradução em andamento';$('workflowHint').textContent='Acompanhe o episódio atual. Se der ruim, o log não vai fingir demência.'}else if(!selectedFolder){$('workflowStep').textContent='1';$('workflowTitle').textContent='Escolha uma temporada';$('workflowHint').textContent='Navegue até uma pasta com vídeos e carregue a temporada.'}else if(!count){$('workflowStep').textContent='2';$('workflowTitle').textContent='Selecione os episódios';$('workflowHint').textContent='Use “Sem PT-BR” para pegar somente o que ainda precisa de tradução.'}else{$('workflowStep').textContent='3';$('workflowTitle').textContent='Pronto para traduzir';$('workflowHint').textContent=`${count} episódio${count===1?'':'s'} com fonte ${seasonLangValue||globalSourceLang} → português do Brasil.`}}
-function bindSelection(){document.querySelectorAll('#episodes input[type=checkbox]').forEach(input=>{input.onchange=()=>{const key=input.dataset.selectionKey;if(input.checked)selectedEpisodeKeys.add(key);else selectedEpisodeKeys.delete(key);syncSelectionUi()}});document.querySelectorAll('#episodes .srclang').forEach(sel=>{const key=sel.dataset.key;langSelects[key]=sel;sel.onfocus=()=>populateLangSelect(sel);sel.onchange=()=>{episodeSourceLang[key]=sel.value;refreshSourceStatus(key,sel.dataset.epid,sel.value)}});syncSelectionUi()}
-async function loadBrowse(){try{const d=await api('/browse?path='+encodeURIComponent(path));$('crumb').innerHTML=path?path.split('/').map((x,i)=>`<button data-p="${esc(path.split('/').slice(0,i+1).join('/'))}">${esc(x)}</button>`).join(' › '):'<span class="muted">Shows</span>';$('crumb').querySelectorAll('button').forEach(b=>b.onclick=()=>{path=b.dataset.p;loadBrowse()});const sel=$('folderSelect');sel.replaceChildren(...d.subfolders.map(folder=>{const option=document.createElement('option');option.value=folder;option.textContent = folder;return option}));if(!d.subfolders.length){const option=document.createElement('option');option.textContent='Nenhuma subpasta';option.disabled=true;sel.append(option)}$('upBtn').disabled=!path;$('enterBtn').disabled=!d.subfolders.length;$('useBtn').disabled=!d.has_videos;$('useBtn').textContent=selectedFolder===path?'Temporada carregada':'Carregar esta temporada';$('libraryNote').classList.add('hidden')}catch(e){$('libraryNote').textContent='Biblioteca temporariamente indisponível.';$('libraryNote').classList.remove('hidden');console.error('browse',e)}}
-let episodeRenderFingerprint='';
-function badge(status){const cls=status==='COMPLETED'||status==='ALREADY_TRANSLATED'?'ok':status==='FAILED'?'fail':['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING','PAUSED'].includes(status)?'wait':'neutral';const label=status==='ALREADY_TRANSLATED'?'Já traduzido':status==='NOT_STARTED'?'Não iniciado':status;return `<span class="badge ${cls}">${esc(label)}</span>`}
-function sourceBadge(ep){const s=ep.source_status||{};const status=s.status||'SOURCE_NOT_FOUND';const cls=s.available?'ok':status==='SOURCE_AMBIGUOUS'||status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'||status==='SOURCE_STATUS_ERROR'?'wait':'neutral';const text=s.display||(status==='SOURCE_AVAILABLE_LIBRARY'?'✓ Biblioteca':status==='SOURCE_AVAILABLE_SIDECAR'?'✓ Sidecar':status==='SOURCE_AVAILABLE_INTERNAL_TEXT'?'✓ Track interna':status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'?'⚠ PGS — OCR não suportado':status==='SOURCE_AMBIGUOUS'?'⚠ Fonte ambígua':status==='SOURCE_STATUS_ERROR'?'⚠ Metadata da fonte':'✕ Fonte não encontrada');return `<span class="badge ${cls}" title="${esc(s.reason||s.display||text)}">${text}</span>`}
-async function refreshSourceStatus(key, episodeId, lang){if(!episodeId)return;try{const d=await api('/source-status?episode_id='+encodeURIComponent(episodeId)+'&source_language='+encodeURIComponent(lang));const el=document.querySelector('[data-source-badge="'+key+'"]');if(el)el.innerHTML=sourceBadge(d)}catch(e){}}
-function renderEpisodes(){const box=$('episodes');const query=($('episodeSearch')?.value||'').trim().toLowerCase();if(!episodes.length){box.innerHTML='<div class="empty-state"><b>Nenhum vídeo encontrado</b>Esta pasta não parece ser uma temporada. Ou os episódios estão muito bem escondidos.</div>';syncSelectionUi();return}const visible=episodes.filter(ep=>!query||[ep.episode,ep.name,ep.status,ep.audit_status].some(value=>String(value||'').toLowerCase().includes(query)));if(!visible.length){box.innerHTML='<div class="empty-state"><b>Nada por aqui</b>Nenhum episódio corresponde ao filtro atual.</div>';syncSelectionUi();return}box.replaceChildren(...visible.map(ep=>{const row=document.createElement('label');row.className='episode';const key=episodeKey(ep),disabled=['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING'].includes(ep.status);const lang=episodeSourceLang[key]||seasonLangValue||globalSourceLang;const sel=`<select class="srclang" data-key="${esc(key)}" data-epid="${esc(ep.library_episode_id||'')}" data-path="${esc(ep.source||'')}" title="Idioma de origem da legenda" aria-label="Idioma de origem de ${esc(ep.name)}" style="min-height:30px;max-width:150px;padding:4px 6px"><option value="${esc(lang)}">${esc(lang)}</option></select>`;row.innerHTML=`<input type="checkbox" data-selection-key="${esc(key)}" data-source="${esc(ep.source)}" data-episode-id="${esc(ep.library_episode_id||'')}" aria-label="Selecionar ${esc(ep.name)}" ${selectedEpisodeKeys.has(key)?'checked':''} ${disabled?'disabled':''}><b>${esc(ep.episode||'—')}</b><span class="epname" title="${esc(ep.name)}">${esc(ep.name)}</span>${badge(ep.status)}${auditBadge(ep)}<span data-source-badge="${esc(key)}">${sourceBadge(ep)}</span>${sel}`;return row}));bindSelection()}
-async function populateLangSelect(sel){const epid=sel.dataset.epid;const rel=sel.dataset.path;if((!epid&&!rel)||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const q=epid?('episode_id='+encodeURIComponent(epid)):('path='+encodeURIComponent(rel));const d=await api('/source-options?'+q);const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.replaceChildren(...opts.map(l=>{const option=document.createElement('option');option.value=l;option.textContent=l;option.selected=l===cur;return option}))}catch(e){console.error('source-options',e)}}
-function applySeasonLang(lang){seasonLangValue=lang;episodes.forEach(ep=>{const key=episodeKey(ep);episodeSourceLang[key]=lang;const el=langSelects[key];if(el)el.value=lang});loadEpisodes()}
-async function detectSeasonLang(){const ep=episodes.find(e=>e.source)||episodes[0];if(!ep||!ep.source)return notify('Carregue uma temporada antes de detectar o idioma.','warn');try{const d=await api('/source-options?path='+encodeURIComponent(ep.source));const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return notify('Nenhum idioma textual foi detectado nesta temporada.','warn');const cur=$('seasonLang').value;const sel=$('seasonLang');sel.replaceChildren(...opts.map(l=>{const option=document.createElement('option');option.value=l;option.textContent=l;option.selected=l===cur;return option}));const chosen=opts.includes(cur)?cur:opts[0];applySeasonLang(chosen);notify(`Fonte detectada: ${chosen}.`,'ok')}catch(e){notify('Não foi possível detectar os idiomas: '+e.message,'fail')}}
-async function start(){try{const sel=episodes.filter(ep=>selected().includes(ep.source)&&ep.status!=='ALREADY_TRANSLATED');if(!sel.length)return notify('Selecione pelo menos um episódio sem PT-BR.','warn');const source_languages={};sel.forEach(ep=>{const key=episodeKey(ep);const el=langSelects[key];source_languages[ep.source]=el?el.value:globalSourceLang});await api('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:selectedFolder,episodes:sel.map(ep=>ep.source),source_languages,dry_run:$('dryrun').checked})});notify($('dryrun').checked?'Simulação enfileirada. Nenhum modelo será chamado.':`${sel.length} episódio${sel.length===1?'':'s'} enviado${sel.length===1?'':'s'} para a fila.`,'ok');await refresh(true)}catch(e){notify(e.message,'fail')}}
-async function auditSelectedSeason(){try{const series=await seriesForFolder();if(!series)return notify('A temporada atual ainda não está catalogada como ANIME.','warn');const m=selectedFolder.match(/(?:^|\/)Season\s*([0-9]+)/i);const body=m?{season:m[1]}:{};const d=await api('/audit/series/'+series.id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});notify(`Auditoria: ${d.counts['PROBLEMAS DETECTADOS']||0} com problemas · ${d.counts['REVISÃO RECOMENDADA']||0} para revisar · ${d.counts['AUDITORIA PARCIAL']||0} parciais.`,'ok',7000);await loadEpisodes();await loadArchive()}catch(e){notify(e.message,'fail')}}
-async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return notify('Selecione episódios com fonte original arquivada.','warn');const langs={};episodes.forEach(ep=>{const id=Number(ep.library_episode_id);if(ids.includes(id)){const key=episodeKey(ep);langs[id]=episodeSourceLang[key]||seasonLangValue||globalSourceLang}});const langBody=JSON.stringify({episode_ids:ids,source_languages:langs,process_eligible_only:!confirmBatch});if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const c=preview.counts||{};if(c.blocked){return notify(`Pré-flight bloqueado: ${c.blocked} episódio(s) sem fonte compatível. Nenhum job foi criado.`,'warn')}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) com ${c.skipped_current_validated||0} já atual(is) ignorado(s)? A regra é parar na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}const queued=await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const skipped=queued.not_eligible||queued.preflight?.counts?.blocked||0;if(skipped&&queued.queued){notify(`${queued.queued} episódio(s) enfileirado(s); ${skipped} seleção(ões) incompatível(is) foram ignoradas.`,'warn')}else notify(`${queued.queued||0} retradução(ões) enfileirada(s).`,'ok');await refresh(true)}catch(e){notify(e.message,'fail')}}
-async function seriesForFolder(){const d=await api('/library/series?classification=ANIME');return d.series.find(s=>selectedFolder===s.library_relative_path||selectedFolder.startsWith(s.library_relative_path+'/'))}
-async function autoClassifyFolder(folder){try{await api('/library/auto-classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});await loadArchive()}catch(e){console.warn('auto-classify',e)}}
-async function action(url){try{await api(url,{method:'POST'});await refresh(true)}catch(e){notify(e.message,'fail')}}
-function age(iso){if(!iso)return '—';const t=Date.parse(iso);if(!Number.isFinite(t))return esc(iso);const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return `há ${sec}s`;const min=Math.floor(sec/60);if(min<60)return `há ${min}min`;return `há ${Math.floor(min/60)}h ${min%60}min`}
-function duration(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(Number(sec)));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
-function renderStatus(d){
-  statusData=d;
-  const q=d.queue||{};
-  $('doneCount').textContent=`${q.completed||0}/${q.total||0}`;
-  $('waitCount').textContent=q.waiting||0;
-  $('runCount').textContent=q.running||0;
-  $('failCount').textContent=q.failed||0;
-  $('skipCount').textContent=q.skipped||0;
-  $('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;
-  const cur=d.current_job,t=cur||{},stage=t.stage==='SEMANTIC_RECONSTRUCTION'?'RECONSTRUÇÃO SEMÂNTICA':(t.stage||t.status);
-  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:'Nenhum episódio em execução.';
-  const total=t.total_units,resolved=t.resolved_units??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
-  $('progressBar').style.width=pct+'%';
-  const semantic=t.semantic_calls??0;
-  const semanticText=semantic?` · reconstrução semântica: ${t.semantic_completed??0} concluída(s)${t.semantic_in_progress?` + ${t.semantic_in_progress} em andamento`:''}${t.semantic_incomplete?` · ${t.semantic_incomplete} incompleta(s)`:''}`:'';
-  const progressText=total!=null?`Unidades base: ${resolved}/${total}`:'PREPARANDO — total ainda não calculado';
-  $('currentMeta').textContent=cur?`${progressText}${semanticText}${t.current_event_id!=null?` · evento atual ${esc(t.current_event_id)}`:''}`:'';
-  const details=cur?[`<span>Chamadas base: <b>${t.calls??0}</b></span>`,semantic?`<span>Chamadas semânticas: <b>${semantic}</b></span>`:'',`<span>Retries: <b>${t.retries??0}</b></span>`,t.retry_budget_total!=null?`<span>Budget: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',`<span>Tempo: <b>${duration(t.elapsed_seconds)}</b></span>`,`<span>Última atividade: <b>${age(t.last_activity_at)}</b></span>`].filter(Boolean).join(' · '):'';
-  $('currentTelemetry').innerHTML=details;
-  if(cur&&cur.status==='FAILED'){const event=cur.current_event_id!=null?` · evento/unidade ${esc(cur.current_event_id)}`:'';$('currentTelemetry').innerHTML+=`<div class="note" style="margin-top:6px">Falha: ${esc(cur.reason||cur.error||'resultado reprovado')}${event}</div>`}
-  const interrupted=d.bulk_stop_reason==='STOPPED_ON_FAILURE'?'<div class="note">Temporada interrompida após a primeira falha. Os episódios restantes não foram iniciados.</div>':'';
-  $('queueList').innerHTML=interrupted+(d.jobs||[]).filter(j=>['WAITING','FAILED','COMPLETED','SKIPPED_CURRENT_VALIDATED','NOT_STARTED_AFTER_FAILURE'].includes(j.status)).map(j=>{const candidate=j.candidate_download_url?`<a class="button compact" href="${esc(j.candidate_download_url)}">Baixar candidato</a>`:'';return `<div class="jobline"><span>${esc(j.episode||j.name)}</span><span>${badge(j.status)} ${candidate}</span></div>`}).join('');
-  $('pauseBtn').disabled=!d.running||d.pause_requested;
-  $('resumeBtn').disabled=!d.queue_paused;
-  $('stopBtn').disabled=!d.running&&!q.waiting;
-  $('retryBtn').disabled=!!d.running||!(q.failed);
-  syncSelectionUi();
-}
-async function refresh(forceEpisodes=false){if(refreshInFlight)return;refreshInFlight=true;try{try{const d=await api('/status?after='+cursor);cursor=d.last_log_id||cursor;renderStatus(d);(d.log_details||d.log||[]).forEach(x=>{if(x.id!=null&&renderedLogIds.has(x.id))return;if(x.id!=null)renderedLogIds.add(x.id);const line=document.createElement('div');line.className=x.level||'';line.dataset.logId=x.id??'';line.textContent=`${x.time||''} ${x.line}`;$('logs').append(line)});$('logs').scrollTop=$('logs').scrollHeight}catch(e){console.error('status',e)}if(selectedFolder&&(forceEpisodes||Date.now()-lastEpisodesRefreshAt>=10000)){try{await loadEpisodes()}catch(e){$('libraryNote').textContent='Episódios temporariamente indisponíveis.';$('libraryNote').classList.remove('hidden');console.error('episodes',e)}}}finally{refreshInFlight=false}}
-async function loadHealth(){try{const d=await api('/health');$('serviceChip').textContent=d.status==='ok'?'Serviço online':'Serviço indisponível';$('serviceChip').classList.toggle('online',d.status==='ok');$('serviceChip').classList.toggle('offline',d.status!=='ok')}catch(e){$('serviceChip').textContent='Serviço indisponível';$('serviceChip').classList.remove('online');$('serviceChip').classList.add('offline')}}
-async function loadPipeline(){try{const d=await api('/pipeline');$('pipelineChip').textContent=d.pipeline_label;$('modelChip').textContent=d.model}catch(e){$('pipelineChip').textContent='Pipeline indisponível';$('modelChip').textContent='Modelo indisponível'}await loadHealth()}
-async function loadTransportConfig(){try{const d=await api('/transport-config');const p=d.primary||{};const f=d.fallback||{};globalSourceLang=d.source_language||'inglês';if($('seasonLang'))$('seasonLang').value=globalSourceLang;$('motorChip').textContent=(p.provider||'?')+(f&&f.provider?` + ${f.provider}`:'')}catch(e){$('motorChip').textContent='Motor indisponível'}}
-async function openTransportConfig(){try{const d=await api('/transport-config');const p=d.primary||{},f=d.fallback||{};$('tcSourceLanguage').value=d.source_language||'inglês';$('tcPrimaryProvider').value=p.provider||'ollama';$('tcPrimaryModel').value=p.model||'';$('tcPrimaryBaseUrl').value=p.base_url||'';$('tcFallbackProvider').value=f?f.provider:'';$('tcFallbackModel').value=f?f.model:'';$('tcFallbackBaseUrl').value=f?f.base_url||'':'';const kc=d.keys_configured||{};let html='';for(const prov of ['ollama','openai_compat','gemini','nvidia']){if(prov==='ollama')continue;html+=`<label>Key ${prov}${kc[prov]?' <span class="badge">configurada</span>':''}</label><input id="tcKey_${prov}" type="password" placeholder="${kc[prov]?'deixe vazio para manter':'cole a API key'}" style="width:100%;margin:4px 0">`}$('tcKeys').innerHTML=html;$('tcStatus').textContent='';const dialog=$('transportConfigDialog');if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','')}catch(e){alert('Não foi possível carregar a configuração de motor.')}}
-async function saveTransportConfig(){const keys={};for(const prov of ['openai_compat','gemini','nvidia']){const el=$('tcKey_'+prov);if(el&&el.value.trim())keys[prov]=el.value.trim()}const payload={primary:{provider:$('tcPrimaryProvider').value,model:$('tcPrimaryModel').value.trim(),base_url:$('tcPrimaryBaseUrl').value.trim()||null},fallback:null,keys,source_language:$('tcSourceLanguage').value.trim()||'inglês'};if($('tcFallbackProvider').value){payload.fallback={provider:$('tcFallbackProvider').value,model:$('tcFallbackModel').value.trim(),base_url:$('tcFallbackBaseUrl').value.trim()||null}}try{await api('/transport-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});$('tcStatus').textContent='Salvo ✓';$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open');await loadTransportConfig();notify('Motor de tradução atualizado. A bunda agora sabe para onde ir.','ok')}catch(e){$('tcStatus').textContent='Erro: '+(e.message||e)}}
-$('openTransportConfig').onclick=openTransportConfig;$('closeTransportConfig').onclick=()=>{$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open')};$('tcSave').onclick=saveTransportConfig;
-async function loadHistory(){try{const d=await api('/history?technical='+($('showTechnical').checked?'1':'0'));$('history').innerHTML=d.history.length?d.history.slice().reverse().map(x=>`<div class="jobline"><span>${esc(x.folder||'')}<br><small>${esc(x.finished_at||x.created_at||'')}</small></span><span>${x.completed||0} concluídos · ${x.failed||0} falhos</span></div>`).join(''):'Nenhuma sessão registrada.'}catch(e){}}
-async function loadArchive(){try{const d=await api('/library');const c=d.counts||{};$('libraryStats').textContent=`${c.records||0} versões · ${c.objects||0} objetos · ${c.publications||0} publicados`;
-const s=await api('/library/series?classification=ANIME');$('archiveSeries').innerHTML=s.series.length?s.series.map(x=>`<div class="jobline"><span><b>${esc(x.title)}</b><br><small>${esc(x.library_relative_path||'')} · ${esc(x.classification)}</small></span><button class="button" data-library-series="${x.id}">Abrir</button></div>`).join(''):'Nenhuma série anime catalogada.';$('archiveSeries').querySelectorAll('[data-library-series]').forEach(b=>b.onclick=()=>openArchiveSeries(b.dataset.librarySeries));}catch(e){$('archiveSeries').textContent='Biblioteca indisponível';}}
-async function loadMemory(){try{const d=await api('/memory');const c=d.counts||{};$('memoryStats').textContent=`${c.active||0} ativas · ${c.items||0} históricas · ${c.conflicts||0} conflitos · ${c.usages||0} usos · somente SEGMENT_APPROVED`;$('memoryItems').innerHTML=(d.items||[]).map(x=>`<div class="jobline"><span><b>${esc(x.source)}</b> → ${esc(x.approved_text)}</span><span>${esc(x.anime_title||'Anime')} · ${esc(x.status)} · ${x.usage_count||0} usos <button class="button" data-memory-status="${x.id}" data-next-status="${x.status==='ACTIVE'?'INACTIVE':'ACTIVE'}">${x.status==='ACTIVE'?'Desativar':'Ativar'}</button></span></div>`).join('')||'Nenhuma memória materializada.';$('memoryItems').querySelectorAll('[data-memory-status]').forEach(b=>b.onclick=async()=>{try{await api('/memory/items/'+b.dataset.memoryStatus+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:b.dataset.nextStatus})});await loadMemory()}catch(e){alert(e.message)}})}catch(e){$('memoryStats').textContent='Memória indisponível';$('memoryItems').textContent='Não foi possível carregar a memória local.'}}
-$('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=async()=>{const button=$('useBtn');button.disabled=true;button.textContent='Carregando…';try{if(selectionFolder!==path){selectedEpisodeKeys.clear();selectionFolder=path}selectedFolder=path;episodeRenderFingerprint='';$('selectedFolderLabel').textContent=path||'Shows';await loadEpisodes();autoClassifyFolder(path);notify(`Temporada carregada: ${path||'Shows'}.`,'ok')}catch(e){notify('Não foi possível carregar a temporada: '+e.message,'fail')}finally{button.disabled=false;button.textContent='Temporada carregada'}};$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return notify('Série ainda não catalogada como ANIME.','warn');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){notify(e.message,'fail')}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('episodeSearch').oninput=renderEpisodes;$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;$('memorySync').onclick=async()=>{try{await api('/memory/sync',{method:'POST'});await loadMemory();notify('Memória sincronizada com as correções aprovadas.','ok')}catch(e){notify(e.message,'fail')}};$('clearVisualLogs').onclick=()=>{$('logs').replaceChildren();renderedLogIds.clear();notify('Visualização limpa; o histórico persistente continua intacto.','ok')};document.querySelectorAll('[data-view-button]').forEach(button=>button.onclick=()=>setView(button.dataset.viewButton));document.addEventListener('keydown',event=>{if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){event.preventDefault();setView('translate');$('episodeSearch').focus()}if(event.key==='Escape'){for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close?.()}});let initialView='translate';try{initialView=localStorage.getItem('transass.activeView')||'translate'}catch(e){}setView(initialView,{remember:false});loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();refresh();setInterval(()=>{refresh();loadHistory()},2000);setInterval(loadHealth,5000);setInterval(()=>{if(activeView==='library')loadArchive();if(activeView==='memory')loadMemory()},15000);
-
- // A primeira carga costumava enviar o idioma global (inglês) antes de
- // descobrir que a temporada só possui tracks francesas. A declaração abaixo
- // substitui a versão anterior por uma versão que autodetecta o idioma da
- // primeira fonte; uma escolha manual posterior continua sendo respeitada.
- async function loadEpisodes(){
-  if(!selectedFolder){episodes=[];$('episodes').innerHTML='<div class="empty-state"><b>Nenhuma temporada carregada</b>Escolha uma pasta e clique em “Carregar esta temporada”.</div>';syncSelectionUi();return}
-  if(selectionFolder!==selectedFolder){selectedEpisodeKeys.clear();selectionFolder=selectedFolder}
-  const lang=seasonLangValue||globalSourceLang;
-  const d=await api('/episodes?path='+encodeURIComponent(selectedFolder)+'&source_language='+encodeURIComponent(lang));
-  episodes=d.episodes;
-  lastEpisodesRefreshAt=Date.now();
-  const detectedFolder=globalThis.__subtranslateDetectedSourceFolder||'';
-  if(detectedFolder!==selectedFolder){
-   globalThis.__subtranslateDetectedSourceFolder=selectedFolder;
-   const first=episodes.find(ep=>ep.source);
-   if(first){
-    try{
-     const options=await api('/source-options?path='+encodeURIComponent(first.source));
-     const languages=Array.from(new Set((options.options||[]).map(o=>o.language).filter(Boolean)));
-     const detected=languages.includes(lang)?lang:languages[0];
-     if(detected&&detected!==lang){
-      seasonLangValue=detected;
-      const season=$('seasonLang');
-      if(season&&!Array.from(season.options).some(o=>o.value===detected)){
-       const option=document.createElement('option');option.value=detected;option.textContent=detected;season.append(option)
-      }
-      if(season)season.value=detected;
-      return loadEpisodes();
-     }
-    }catch(e){console.warn('source autodetect',e)}
-   }
-  }
-  const valid=new Set(episodes.map(episodeKey));
-  selectedEpisodeKeys=new Set([...selectedEpisodeKeys].filter(key=>valid.has(key)));
-  const fingerprint=JSON.stringify(episodes.map(ep=>[episodeKey(ep),ep.status,ep.audit_status,ep.ptbr,ep.source_status]));
-  if(fingerprint!==episodeRenderFingerprint){episodeRenderFingerprint=fingerprint;renderEpisodes()}else syncSelectionUi()
- }
-
- let currentArchiveSeriesId=null;
-function auditBadge(ep){const s=ep.audit_status||'NÃO AUDITADA';const cls=s==='SEM PROBLEMAS DETECTADOS'?'ok':s==='PROBLEMAS DETECTADOS'?'fail':['AUDITORIA PARCIAL','REVISÃO RECOMENDADA','VERSÕES SEPARADAS'].includes(s)?'wait':'neutral';const short=s==='SEM PROBLEMAS DETECTADOS'?'✓ sem problemas':s==='PROBLEMAS DETECTADOS'?'⚠ problemas':s==='AUDITORIA PARCIAL'?'◐ parcial':s==='REVISÃO RECOMENDADA'?'◐ revisão recomendada':s==='VERSÕES SEPARADAS'?'◐ estados por versão':'— não auditada';return `<span class="badge ${cls}" title="${esc(s)}">${short}</span>`}
-function recordValidated(record){return ['VALIDATED','OK','PUBLISHED'].includes(String(record.validation_status||'').toUpperCase())}
-function recordPublished(record){return record.published===true||record.publication_status==='PUBLISHED'||(record.publications||[]).some(item=>item.status==='PUBLISHED')}
-function recordLabel(record){if(record.pipeline_version)return record.pipeline_version;const k=(record.source_kind||'').toUpperCase();if(k==='IMPORTED_EXISTING')return 'Versão legada';if(k==='EXTRACTED')return 'Fonte extraída';return 'Pipeline desconhecido'}
-function recordAuditLabel(record){const status=record.audit_status||record.audit?.status,flags=record.audit?.flags||[];if(status==='REVISÃO RECOMENDADA'||(status==='PROBLEMAS DETECTADOS'&&flags.length&&flags.every(flag=>flag==='POSSIBLE_UNTRANSLATED_OUTPUT')))return '◐ possível resíduo · revisar';if(status==='PROBLEMAS DETECTADOS')return '⚠ problemas nesta versão';if(status==='SEM PROBLEMAS DETECTADOS')return '✓ sem problemas nesta versão';if(recordValidated(record))return '✓ validada';return status||'não auditada'}
-function recordStateBadge(record){const published=recordPublished(record);if(published)return '<span class="badge ok">✓ PUBLICADA</span>';if(recordValidated(record))return '<span class="badge wait">NÃO PUBLICADA</span>';return '<span class="badge neutral">'+esc(record.validation_status||'não validada')+'</span>'}
-function versionDetailsHtml(record){
- const lineage=record.lineage||[];
- const parent=lineage.find(item=>String(item.source_record_id)===String(record.id)&&item.parent_record_id!=null);
- const sourceText=parent?`English · record ${parent.parent_record_id}`:(record.source_language||'não informada');
- const published=recordPublished(record);
- const publication=record.publication||(record.publications||[]).find(item=>item.status==='PUBLISHED');
- const targetState=record.target_present?(record.target_record_id?`sidecar atual: record ${record.target_record_id}`:'sidecar atual: versão não catalogada'):'nenhum sidecar atual';
- const events=record.events_total!=null?`${esc(record.events_total)}/${esc(record.events_total)}`:'não informado';
- const validation=recordValidated(record);
- return `<div class="note"><b>${esc(record.series_title||'Anime')} · S${esc(record.season||'—')}E${esc(record.episode||'—')} — ${esc(record.episode_title||record.media_filename||'Episódio')}</b></div><div class="row" style="margin-top:10px;gap:6px"><span class="badge">${esc(recordLabel(record))}</span><span class="badge">${esc(record.language||'—')}</span><span class="badge">${esc(record.source_kind||'—')}</span>${recordStateBadge(record)}</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:12px"><div class="stat"><b>Estado</b><span>${validation?'VALIDADA':'NÃO VALIDADA'}</span></div><div class="stat"><b>Modelo</b><span>${esc(record.model||'não informado')}</span></div><div class="stat"><b>Fonte</b><span>${esc(sourceText)}</span></div><div class="stat"><b>Eventos</b><span>${events}</span></div></div><div class="panel" style="margin-top:12px;padding:10px"><b>Validação</b><div class="muted" style="margin-top:5px">${validation?'✓ Estrutura registrada · ✓ conteúdo registrado · ✓ sem críticos registrados':'Validação técnica pendente ou incompatível'}</div><div style="margin-top:8px"><b>Publicação</b><div class="muted">${published?'✓ Publicada no Jellyfin'+(publication?.published_at?` · ${esc(publication.published_at)}`:''):'NÃO PUBLICADA'}</div><div class="muted">Destino: ${esc(targetState)}</div></div></div><details style="margin-top:10px"><summary>Detalhes técnicos</summary><dl style="display:grid;grid-template-columns:minmax(120px,auto) 1fr;gap:4px 12px;overflow-wrap:anywhere"><dt>Record</dt><dd>${esc(record.id)}</dd><dt>Object</dt><dd>${esc(record.object_id)}</dd><dt>SHA-256</dt><dd>${esc(record.sha256||'—')}</dd><dt>Formato</dt><dd>${esc(record.format||'—')}</dd><dt>Source record</dt><dd>${esc(parent?.parent_record_id||'—')}</dd><dt>Audit</dt><dd>${esc(record.audit_status||'NÃO AUDITADA')}</dd>${publication?`<dt>Target</dt><dd>${esc(publication.target_relative_path||'—')}</dd>`:''}</dl></details><div class="record-actions" style="justify-content:flex-start;margin-top:14px">${validation&&!published?`<button class="button primary" data-modal-publish="${record.id}">Publicar no Jellyfin</button>`:''}<a class="button" href="/library/records/${record.id}/download">Baixar</a></div>`;
-}
-async function showVersionDetails(recordId){try{const record=await api('/library/records/'+recordId);$('versionDetailsTitle').textContent=`Detalhes · ${recordLabel(record)}`;$('versionDetailsSubtitle').textContent=`${record.language||'—'} · ${record.source_kind||'—'} · ${recordPublished(record)?'publicada':'não publicada'}`;$('versionDetailsBody').innerHTML=versionDetailsHtml(record);const dialog=$('versionDetailsDialog');if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');dialog.querySelectorAll('[data-modal-publish]').forEach(button=>button.onclick=()=>publishRecord(Number(button.dataset.modalPublish)))}catch(e){alert('Não foi possível carregar os detalhes desta versão.')}}
-async function publishRecord(recordId){try{const record=await api('/library/records/'+recordId);if(!recordValidated(record)){alert('Somente uma versão validada pode ser publicada.');return}const episode=await api('/library/episodes/'+record.episode_id);const current=(episode.records||[]).find(item=>recordPublished(item))||(record.target_record_id?(episode.records||[]).find(item=>String(item.id)===String(record.target_record_id)):null);const currentLabel=current?`${recordLabel(current)} / record ${current.id}`:(record.target_present?'sidecar atual não publicado como registro':'nenhuma versão publicada');const newLabel=`${recordLabel(record)} / record ${record.id}`;const currentHash=record.target_sha256||current?.sha256;const sameHash=currentHash&&currentHash===record.sha256;if(sameHash){alert('Esta versão já está publicada com o mesmo hash. Nenhuma ação adicional foi necessária.');return}const different=Boolean(currentHash&&currentHash!==record.sha256);const message=`Publicar ${newLabel} para ${record.series_title||'Anime'} S${record.season||'—'}E${record.episode||'—'}?\n\nVersão atualmente publicada: ${currentLabel}\nNova versão: ${newLabel}\n\nA versão anterior continuará preservada na Biblioteca.`;if(!confirm(message))return;const result=await api('/library/records/'+recordId+'/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm_replace:different})});$('versionDetailsDialog').close?.();if(currentArchiveSeriesId!=null)await openArchiveSeries(currentArchiveSeriesId);await loadArchive();alert(result.noop?'Esta versão já estava publicada.':'V2.2.1 publicada no Jellyfin.')}catch(e){alert(e.message||'Não foi possível publicar esta versão.')}}
-function versionRow(record, peers){const reviewable=String(record.language||'').toLowerCase()!=='eng';const peer=peers.find(item=>String(item.id)!==String(record.id));const compare=peer?`<button class="button" data-compare-old="${peer.id}" data-compare-new="${record.id}">Comparar</button>`:'';return `<div class="jobline" style="display:block;padding:11px 0"><div class="row" style="justify-content:space-between;align-items:flex-start"><div><b>${esc(recordLabel(record))}</b> <span class="badge">${esc(record.language||'—')}</span> <span class="badge">${esc(record.source_kind||'—')}</span> <span class="badge">${esc(record.validation_status||'—')}</span> ${recordStateBadge(record)}<div class="muted" style="margin-top:4px">${esc(recordAuditLabel(record))}</div></div><div class="record-actions" style="justify-content:flex-start">${recordValidated(record)&&!recordPublished(record)?`<button class="button primary" data-publish-record="${record.id}">Publicar no Jellyfin</button>`:''}<button class="button" data-details-record="${record.id}">Detalhes</button></div></div><details style="margin-top:8px"><summary>Mais ações</summary><div class="record-actions" style="justify-content:flex-start;margin-top:8px"><a class="button" href="/library/records/${record.id}/download">Baixar</a>${reviewable?`<a class="button" href="/review/${record.id}">Revisar</a>`:''}${compare}</div></details></div>`}
-async function openArchiveSeries(id){currentArchiveSeriesId=id;try{const x=await api('/library/series/'+id+'?source_status=1');$('archiveDetails').innerHTML=`<div class="note"><b>${esc(x.title)}</b> · ${esc(x.classification)}<br><small>${x.episodes.length} episódios catalogados · versões agrupadas por episódio</small></div>`+x.episodes.map(ep=>{const rs=ep.records||[],translated=rs.filter(item=>String(item.language||'').toLowerCase()!=='eng'),validated=translated.filter(recordValidated).length,problems=translated.filter(item=>{const a=item.audit||{};return a.status==='PROBLEMAS DETECTADOS'&&!(a.flags||[]).every(flag=>flag==='POSSIBLE_UNTRANSLATED_OUTPUT')}).length,possible=translated.filter(item=>(item.audit?.flags||[]).includes('POSSIBLE_UNTRANSLATED_OUTPUT')).length,published=translated.filter(recordPublished).length,summary=[`${rs.length} versões`,validated?`${validated} validada(s)`:null,problems?`${problems} com problemas (por versão)`:null,possible?`${possible} auditoria(s) com possível resíduo`:null,published?`${published} publicada(s)`:null].filter(Boolean).join(' · '),pref=rs.find(r=>String(r.id)===String(ep.preferred_record_id))||rs.find(r=>r.preferred)||rs[0],source=ep.source_status||{},sourceText=source.display||source.reason||'Fonte não encontrada',peers=translated,compare=translated.length>1?`<button class="button" data-compare-episode="${ep.id}" data-old-id="${translated[translated.length-1].id}" data-new-id="${translated[0].id}">Comparar versões</button>`:'';return `<details class="jobline" style="display:block"><summary><b>${esc(ep.season||'')}${esc(ep.episode||'')}</b> ${esc(ep.episode_title||ep.media_filename)} · <span class="badge">${esc(summary)}</span> <span class="badge" title="Estado agregado; os problemas pertencem a versões específicas">estado por versão</span> <span class="badge" title="${esc(source.reason||sourceText)}">${source.available?'✓ fonte disponível':esc(source.status||'fonte')}</span></summary><div class="record-actions" style="justify-content:flex-start;margin:8px 0"><button class="button" data-audit-episode="${ep.id}">Auditar</button>${pref&&ep.retranslation_available?`<button class="button warn" data-retranslate-episode="${ep.id}" title="${esc(sourceText)}">Retraduzir</button>`:''}${compare}</div>${!source.available?`<div class="muted" style="margin:5px 0">Fonte: ${esc(sourceText)}</div>`:''}${rs.length?rs.map(record=>versionRow(record,peers)).join(''):'<div class="muted">Sem legenda arquivada.</div>'}</details>`}).join('');$('archiveDetails').querySelectorAll('[data-audit-episode]').forEach(button=>button.onclick=async()=>{try{await api('/audit/episodes/'+button.dataset.auditEpisode,{method:'POST'});await openArchiveSeries(id)}catch(e){alert(e.message)}});$('archiveDetails').querySelectorAll('[data-retranslate-episode]').forEach(button=>button.onclick=()=>retranslate([Number(button.dataset.retranslateEpisode)],false));$('archiveDetails').querySelectorAll('[data-details-record]').forEach(button=>button.onclick=()=>showVersionDetails(Number(button.dataset.detailsRecord)));$('archiveDetails').querySelectorAll('[data-publish-record]').forEach(button=>button.onclick=()=>publishRecord(Number(button.dataset.publishRecord)));$('archiveDetails').querySelectorAll('[data-compare-episode],[data-compare-old]').forEach(button=>button.onclick=async()=>{try{const oldId=button.dataset.oldId||button.dataset.compareOld,newId=button.dataset.newId||button.dataset.compareNew;const d=await api('/library/records/compare?old_id='+oldId+'&new_id='+newId);alert(`${d.changed_count||0} evento(s) alterado(s).`)}catch(e){alert(e.message)}})}catch(e){$('archiveDetails').textContent='Detalhe indisponível';}}
-$('closeVersionDetails').onclick=()=>{$('versionDetailsDialog').close?.();$('versionDetailsDialog').removeAttribute('open')};$('versionDetailsDialog').addEventListener('click',event=>{if(event.target===$('versionDetailsDialog'))$('versionDetailsDialog').close?.()});
-</script></body></html>'''
-
-
-REVIEW_PAGE = r'''<!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2"><link rel="apple-touch-icon" href="/favicon.svg?v=2">
-<title>Revisão humana · Transass</title>
-<style>
-:root{color-scheme:dark;--bg:#0b1119;--panel:#131d28;--line:#2b3e52;--text:#edf4fb;--muted:#96a7b9;--green:#238636;--red:#8e2024;--blue:#247fdd}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 12% -8%,#193252 0,#0b1119 38%);color:var(--text);font:15px/1.48 system-ui,sans-serif;min-height:100vh}main{max-width:1320px;margin:auto;padding:22px 18px 52px}header{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:15px;padding:17px 19px;border:1px solid #304961;border-radius:16px;background:linear-gradient(120deg,#17283cef,#111b29f2);box-shadow:0 18px 44px #0004}h1{font-size:1.48rem;letter-spacing:-.025em;margin:2px 0}.back{display:inline-block;color:#80b7ff;text-decoration:none;font-size:.82rem;margin-bottom:2px}.muted{color:var(--muted)}.panel{background:linear-gradient(145deg,#151f2bf7,#101821f7);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 12px 28px #0003}.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.button,button{border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#202e3e;color:var(--text);cursor:pointer;min-height:38px;text-decoration:none}.button:hover,button:hover{border-color:#5b7898;background:#293b4f}.button.primary{background:linear-gradient(135deg,#238636,#2e9f46)}.button.approve{background:linear-gradient(135deg,#247fdd,#326de0)}.button.reject{background:var(--red)}button:disabled{opacity:.45;cursor:not-allowed}select,input,textarea{background:#0a121b;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit}input,textarea{width:100%}textarea{min-height:88px;resize:vertical}.segment{border:1px solid var(--line);border-radius:12px;padding:14px;margin:10px 0;background:#0f1924}.segment:focus-within{border-color:#4778a8;box-shadow:0 0 0 3px #3275b322}.segment-head{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}.cols{display:grid;grid-template-columns:1fr 1fr;gap:10px}.box{border:1px solid var(--line);border-radius:9px;padding:10px;white-space:pre-wrap;overflow:auto;background:#0a121b}.source{border-left:3px solid #d29922}.generated{border-left:3px solid #58a6ff}.context{font-size:.88rem;color:var(--muted);margin:8px 0}.badge{border:1px solid var(--line);border-radius:999px;padding:3px 8px;font-size:.78rem}.ok{color:#b7f5c0}.warn{color:#f2cc60}.fail{color:#ffaba8}@media(max-width:760px){.cols{grid-template-columns:1fr}main{padding:10px 9px 34px}header{padding:14px}.toolbar>*{flex:1 1 140px}}
-</style></head><body><main>
-<header><div><a class="back" href="/">← Voltar para a Central</a><h1>Revisão humana</h1><div class="muted">Você cuida do português; o robô fica proibido de corrigir a própria prova.</div></div><div id="meta" class="muted">Carregando…</div></header>
-<section class="panel"><div class="toolbar"><label>Filtro <select id="filter"><option value="">Todos</option><option>UNREVIEWED</option><option>NEEDS_CORRECTION</option><option>CORRECTED</option><option>APPROVED</option><option>REJECTED</option></select></label><input id="search" placeholder="Buscar texto ou evento" style="max-width:320px"><button id="prev">Anterior</button><button id="next">Próximo</button><button class="button primary" id="materialize" disabled>Materializar versão corrigida</button><button class="button approve" id="approveVersion" disabled>Aprovar versão</button><button class="button" id="publishVersion" disabled>Publicar versão aprovada</button></div><div id="counts" class="muted" style="margin-top:8px"></div><div id="version" style="margin-top:8px"></div></section>
-<section id="segments" class="panel"><div class="muted">Abrindo sessão…</div></section>
-</main><script>
-const RECORD_ID=Number('__RECORD_ID__');let session=null,segments=[],cursor=0,materialized=null,currentRows=[];
-const $=id=>document.getElementById(id);function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
-async function api(url,opt){const r=await fetch(url,opt);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw Error(d.error||`HTTP ${r.status}`);return d}
-function correction(s){return (s.corrections||[]).slice().reverse().find(x=>['DRAFT','REVIEWED','APPROVED'].includes(x.status))}
-function editableValue(value){return String(value||'').replace(/^(?:\{[^{}]*\})+/,'').replace(/(?:\{[^{}]*\})+$/,'')}
-function render(){const filter=$('filter').value,query=$('search').value.toLowerCase();currentRows=segments.filter(s=>(!filter||s.status===filter)&&(!query||(`${s.event_index} ${s.source_text} ${s.generated_text}`).toLowerCase().includes(query)));$('counts').textContent=`${currentRows.length} exibidos · ${segments.length} eventos totais`;$('segments').innerHTML=currentRows.map(s=>{const c=correction(s),value=editableValue(c?c.corrected_text:s.editable_text||s.generated_text),locked=!!s.editing_locked;return `<article class="segment" data-segment="${s.id}"><div class="segment-head"><b>Evento ${s.event_index} · ${esc(s.start_time||'')} → ${esc(s.end_time||'')}</b><span class="badge ${s.status==='APPROVED'?'ok':s.status==='REJECTED'?'fail':'warn'}">${esc(s.status)}</span></div><div class="context">Anterior: ${esc((s.context_before||[]).slice(-1).map(x=>x.source||x.text).join(' · ')||'—')}<br>Seguinte: ${esc((s.context_after||[]).slice(0,1).map(x=>x.source||x.text).join(' · ')||'—')}</div><div class="cols"><div class="box source"><b>ORIGINAL</b>\n${esc(s.source_text||'[fonte não arquivada]')}</div><div class="box generated"><b>GERADO</b>\n${esc(s.generated_text)}</div></div><div style="margin-top:8px"><label>CORREÇÃO (somente texto)<textarea data-edit="${s.id}" ${locked?'disabled':''}>${esc(value)}</textarea></label>${locked?`<div class="context">${esc(s.editing_lock_reason||'Edição bloqueada para preservar estrutura ASS.')}</div>`:''}</div><div class="toolbar" style="margin-top:8px"><input data-reason="${s.id}" placeholder="Motivo: naturalidade, contexto…" value="${esc(c&&c.reason||'')}"><button data-ok="${s.id}">Marcar OK</button><button data-save="${s.id}" class="button primary" ${locked?'disabled':''}>Salvar correção</button>${c&&c.status!=='APPROVED'?`<button data-approve="${c.id}" class="button approve">Aprovar correção</button>`:''}<button data-reject="${c&&c.id||''}" class="button reject" ${c?'':'disabled'}>Rejeitar</button></div></article>`}).join('')||'<div class="muted">Nenhum evento para este filtro.</div>';bind()}
-function bind(){document.querySelectorAll('[data-ok]').forEach(b=>b.onclick=async()=>{try{await api('/review/segments/'+b.dataset.ok+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'OK'})});await load()}catch(e){alert(e.message)}});document.querySelectorAll('[data-save]').forEach(b=>b.onclick=async()=>{try{const id=b.dataset.save;const c=await api('/review/segments/'+id+'/correction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({corrected_text:document.querySelector(`[data-edit="${id}"]`).value,reason:document.querySelector(`[data-reason="${id}"]`).value})});await load();alert('Draft salvo. A aprovação continua sendo uma ação separada.')}catch(e){alert(e.message)}});document.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{if(!confirm('Aprovar esta correção humana?'))return;try{await api('/review/corrections/'+b.dataset.approve+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await load()}catch(e){alert(e.message)}});document.querySelectorAll('[data-reject]').forEach(b=>b.onclick=async()=>{if(!b.dataset.reject||!confirm('Rejeitar esta correção?'))return;try{await api('/review/corrections/'+b.dataset.reject+'/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await load()}catch(e){alert(e.message)}})}
-async function load(){const d=await api('/review/sessions/'+session.id);session=d;segments=d.segments;$('meta').textContent=`registro ${RECORD_ID} · sessão ${session.id} · ${d.status}`;$('version').textContent=d.materialized_record_id?`Versão HUMAN_CORRECTED: ${d.materialized_record_id}`:'';const c=d.counts||{};$('counts').textContent=Object.entries(c).map(([k,v])=>`${k}: ${v}`).join(' · ');$('materialize').disabled=!(c.APPROVED>0)||!!d.materialized_record_id;$('approveVersion').disabled=!d.materialized_record_id;$('publishVersion').disabled=!d.materialized_record_id;render()}
-async function start(){try{session=await api('/review/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({record_id:RECORD_ID})});await load()}catch(e){$('segments').innerHTML=`<div class="fail">${esc(e.message)}</div>`}}
-$('filter').onchange=render;$('search').oninput=render;$('materialize').onclick=async()=>{try{materialized=await api('/review/sessions/'+session.id+'/materialize',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await load();alert('Nova versão HUMAN_CORRECTED criada.')}catch(e){alert(e.message)}};$('approveVersion').onclick=async()=>{try{await api('/review/versions/'+(materialized?.id||session.materialized_record_id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await load();alert('Versão aprovada.')}catch(e){alert(e.message)}};$('publishVersion').onclick=async()=>{try{const id=materialized?.id||session.materialized_record_id;await api('/review/versions/'+id+'/publish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm_replace:confirm('Se o destino tiver hash diferente, substituir explicitamente?')})});alert('Publicação registrada.')}catch(e){alert(e.message)}};
-function move(delta){if(!currentRows.length)return;const current=document.querySelector('.segment:focus-within')||document.querySelector('.segment');let index=current?currentRows.findIndex(s=>String(s.id)===current.dataset.segment):-1;index=Math.max(0,Math.min(currentRows.length-1,index+delta));const target=document.querySelector(`[data-segment="${currentRows[index].id}"]`);if(target){target.scrollIntoView({behavior:'smooth',block:'center'});target.querySelector('textarea')?.focus()}}
-$('prev').onclick=()=>move(-1);$('next').onclick=()=>move(1);start();
-</script></body></html>'''
+PAGE = (_WEB_ASSET_ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+REVIEW_PAGE = (_WEB_ASSET_ROOT / "templates" / "review.html").read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

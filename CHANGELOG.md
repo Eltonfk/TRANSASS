@@ -4,6 +4,25 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.5.0] - 2026-09-03
+
+### Adicionado
+- Descoberta de episódios com cache curto e paginação incremental, evitando
+  recarregar temporadas grandes a cada atualização da interface.
+- Preflight visual antes da tradução, com idioma, pipeline, modelo, unidades e
+  batches estimados.
+- Caixa de entrada pós-tradução para separar resultados prontos para publicar,
+  pendentes de revisão e falhos.
+- Eventos SSE para progresso em tempo real, mantendo polling espaçado como
+  fallback.
+
+### Alterado
+- Interface principal, revisão e glossário agora usam templates e assets
+  estáticos separados do módulo Python; o empacotamento Docker inclui esses
+  arquivos.
+- Sincronização da memória aprovada permanece automática após a aprovação
+  humana, removendo a ação manual redundante.
+
 ## [2.4.14] - 2026-09-02
 
 ### Corrigido
