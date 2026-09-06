@@ -32,6 +32,8 @@ def test_default_paths_are_not_container_paths(monkeypatch):
 
 
 def test_paths_honor_compose_host_aliases(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRANSLATOR_BASE_LIBRARY", raising=False)
+    monkeypatch.delenv("TRANSLATOR_WEB_STATE_DIR", raising=False)
     media = tmp_path / "Tank" / "data" / "Shows"
     state = tmp_path / "docker" / "transass" / "state"
     media.mkdir(parents=True)
@@ -45,3 +47,12 @@ def test_paths_honor_compose_host_aliases(monkeypatch, tmp_path):
     assert paths.media_root == media
     assert paths.state_dir == state
     assert paths.transport_config == state / "transport_config.json"
+
+def test_container_state_aliases_are_bypassed(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRANSLATOR_WEB_STATE_DIR", "/app/state")
+    monkeypatch.setenv("STATE_DIR", "/app/state")
+    monkeypatch.setenv("TRANSASS_DATA_DIR", str(tmp_path / "data"))
+    paths = default_paths()
+    assert os.fspath(paths.state_dir) != "/app/state"
+    assert paths.state_dir == tmp_path / "data" / "state"
+    assert paths.transport_config == tmp_path / "data" / "state" / "transport_config.json"

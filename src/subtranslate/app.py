@@ -16,6 +16,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -40,7 +41,11 @@ from failure_ledger import retain_staging
 from pipeline_registry import UnsupportedPipelineError, get_pipeline_plan, pipeline_info
 from pipeline_lineage import LineageContractError, archive_v230_records
 from queue_helpers import build_job_batch
+from runtime_config import RuntimeConfig, execution_identity, load_project_env
+from runtime_paths import configure_binary_path, resource_root
+from gpu_thermal_guard import GpuThermalGuard, ThermalGuardConfig, ThermalSnapshot
 from web_audit_retranslation import (
+    _sidecar_candidates,
     _public_source_status,
     archive_eligibility,
     audit_record,
@@ -51,24 +56,34 @@ from web_audit_retranslation import (
 )
 
 
-BASE_LIBRARY = Path(os.environ.get("TRANSLATOR_BASE_LIBRARY", "/shows")).resolve()
+if __name__ == "__main__":
+    # A direct local launch should honor the same host-side aliases used by
+    # Compose. Imported/tested app instances keep their caller-provided env.
+    load_project_env(Path(__file__).resolve().parents[2])
+
+
+RUNTIME_CONFIG = RuntimeConfig.from_environment()
+RUNTIME_CONFIG.apply_environment()
+configure_binary_path()
+BASE_LIBRARY = RUNTIME_CONFIG.media_root.resolve()
 SCRIPT_PATH = Path(__file__).resolve().with_name("anime_subtitle_translator.py")
 RUNNER_PATH = Path(__file__).resolve().with_name("web_retranslation_runner.py")
+RUNTIME_ROOT = Path(__file__).resolve().parent
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".webm"}
 TARGET_SUFFIX = "pt-BR"
 SUBTITLE_EXTENSIONS = {".ass", ".ssa", ".srt"}
 PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
 MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", "").strip()
-STATE_DIR = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state"))
+STATE_DIR = RUNTIME_CONFIG.state_dir
 STATE_FILE = STATE_DIR / "jobs.json"
 AUDIT_FILE = STATE_DIR / "audits.json"
-TRANSPORT_CONFIG_PATH = STATE_DIR / "transport_config.json"
-LIBRARY_ROOT = Path(os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", str(STATE_DIR / "anime-subtitle-library")))
+TRANSPORT_CONFIG_PATH = RUNTIME_CONFIG.transport_config
+LIBRARY_ROOT = RUNTIME_CONFIG.library_root
 _library_roots = [Path(item.strip()) for item in os.environ.get("ANIME_LIBRARY_ROOTS", str(BASE_LIBRARY)).split(os.pathsep) if item.strip()]
 subtitle_library = AnimeSubtitleLibrary(LIBRARY_ROOT, media_roots=_library_roots)
 human_feedback = HumanFeedbackService(subtitle_library)
 translation_memory = TranslationMemory(LIBRARY_ROOT)
-GLOSSARY_PATH = Path(os.environ.get("TRANSLATOR_GLOSSARY_PATH", str(STATE_DIR / "glossary_v1.json")))
+GLOSSARY_PATH = RUNTIME_CONFIG.glossary_path
 glossary_store = GlossaryStore(GLOSSARY_PATH)
 MAX_LOGS = 3000
 MAX_HISTORY = 100
@@ -80,11 +95,12 @@ EPISODE_DISCOVERY_CACHE_TTL = 8.0
 class StatePersistenceError(RuntimeError):
     """State could not be durably committed; callers must fail closed."""
 
-_WEB_ASSET_ROOT = Path(__file__).resolve().parent
+_WEB_ASSET_ROOT = resource_root()
 app = Flask(__name__, static_folder=str(_WEB_ASSET_ROOT / "static"), static_url_path="/static")
 state_lock = threading.RLock()
 state_condition = threading.Condition(state_lock)
 _episode_discovery_cache: dict[str, tuple[float, tuple[Path, ...]]] = {}
+_job_temporary_roots: dict[str, Path] = {}
 
 # Compact browser-sized adaptation of the official TransASS mark.  Keeping it
 # inline avoids another runtime file while the full illustration remains the
@@ -434,10 +450,30 @@ def _discover_episode_videos(folder: Path) -> list[Path]:
     cached = _episode_discovery_cache.get(key)
     if cached and now - cached[0] < EPISODE_DISCOVERY_CACHE_TTL:
         return list(cached[1])
-    videos = tuple(sorted(
-        path for path in folder.rglob("*")
-        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
-    ))
+    seen_files: set[tuple[str, int, int] | tuple[str, str]] = set()
+    discovered: list[Path] = []
+    for path in sorted(
+        item for item in folder.rglob("*")
+        if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS
+    ):
+        # Recursive discovery can encounter the same media more than once
+        # through symlinks or hardlinks.  Use the resolved inode as identity so
+        # the UI and queue expose one episode instead of repeated rows.
+        try:
+            resolved = path.resolve(strict=True)
+            stat = resolved.stat()
+        except OSError:
+            continue
+        identity = (
+            ("inode", int(stat.st_dev), int(stat.st_ino))
+            if int(stat.st_ino)
+            else ("path", str(resolved))
+        )
+        if identity in seen_files:
+            continue
+        seen_files.add(identity)
+        discovered.append(path)
+    videos = tuple(discovered)
     _episode_discovery_cache[key] = (now, videos)
     return list(videos)
 
@@ -727,6 +763,7 @@ def _public_job(job: dict | None) -> dict | None:
             "operation", "source_record_id", "old_record_id", "bulk_fail_fast",
             "not_started_reason", "new_record_id", "audit", "diagnostic",
             "candidate_output_name", "candidate_output_sha256", "candidate_download_url",
+            "thermal_guard",
         )
         if key in job
     }
@@ -872,11 +909,15 @@ def _load_state() -> dict:
         history = []
     recovery_needed = False
     for job in jobs:
-        if job.get("status") in {"STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING", "PAUSING"}:
+        # A restarted web process deliberately never resumes work from disk.
+        # Treat queued jobs the same way as jobs that had already entered the
+        # worker: otherwise ``/episodes`` can surface a persisted WAITING job
+        # while ``/status`` has no current session/worker to execute it.
+        if job.get("status") in {"WAITING", "STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING", "PAUSING"}:
             recovery_needed = True
             job["status"] = "FAILED"
             job["stage"] = "FAILED"
-            job["error"] = "serviço reiniciado durante o job; nenhuma retomada automática"
+            job["error"] = "serviço reiniciado antes da conclusão; nenhuma retomada automática"
             job["reason"] = "service_restarted"
             job["finished_at"] = _now()
     audits = payload.get("audits", {}) if isinstance(payload, dict) else {}
@@ -905,6 +946,9 @@ state = {
     "worker": None,
     "session_id": None,
     "finished_ok": None,
+    "cancel_requested": False,
+    "thermal_stop_requested": False,
+    "thermal_guard": None,
     "bulk_stop_reason": None,
     "bulk_failed_job_id": None,
     "queue_paused": False,
@@ -957,6 +1001,106 @@ def _summary_level(line: str) -> str:
     if "ok ->" in lowered or "conclu" in lowered or "resumo" in lowered:
         return "summary"
     return "technical"
+
+
+def _job_uses_ollama(transport_config: dict) -> bool:
+    """Return whether this job may execute a local Ollama request."""
+    engines = [transport_config.get("primary"), transport_config.get("fallback")]
+    return any(isinstance(engine, dict) and str(engine.get("provider") or "").lower() == "ollama" for engine in engines)
+
+
+def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
+    """Start the AMD thermal guard for jobs that can call local Ollama."""
+    try:
+        from transport_config_store import load_transport_config
+
+        transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
+    except Exception:
+        return None
+    if not _job_uses_ollama(transport_config):
+        return None
+    config = ThermalGuardConfig.from_environment()
+
+    def record(status: str, snapshot: ThermalSnapshot, *, error: str | None = None) -> None:
+        with state_lock:
+            info = snapshot.as_dict(config)
+            info["status"] = status
+            if error:
+                info["error"] = error
+            job["thermal_guard"] = info
+            state["thermal_guard"] = info
+            _append_log(
+                f"Proteção térmica GPU: {status.lower()} — "
+                f"{snapshot.hottest_sensor or 'sensor'}="
+                f"{snapshot.hottest_c if snapshot.hottest_c is not None else 'indisponível'}°C",
+                level="error" if status == "TRIPPED" else "summary",
+                job_id=job.get("id"),
+            )
+            _persist_locked()
+
+    def on_warning(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
+        record("WARNING", snapshot)
+
+    def on_trip(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
+        with state_lock:
+            state["thermal_stop_requested"] = True
+            state["cancel_requested"] = True
+            job["_thermal_trip"] = True
+            record("TRIPPED", snapshot, error=(
+                "GPU atingiu o limite preventivo; tradução interrompida para evitar "
+                "desligamento térmico"
+            ))
+            process = state.get("process")
+            if process is not None:
+                _send_process_group_signal(process, signal.SIGTERM)
+
+    guard = GpuThermalGuard(on_warning=on_warning, on_trip=on_trip, config=config)
+    active = guard.start()
+    snapshot = guard.latest
+    if not active and snapshot is not None:
+        with state_lock:
+            status = "TRIPPED" if guard.tripped else ("DISABLED" if not config.enabled else "UNAVAILABLE")
+            job["thermal_guard"] = {
+                **snapshot.as_dict(config),
+                "status": status,
+                "warning_c": config.warning_c,
+                "stop_c": config.stop_c,
+            }
+            state["thermal_guard"] = job["thermal_guard"]
+            if status == "UNAVAILABLE":
+                _append_log(
+                    "Proteção térmica GPU: sensor AMD indisponível; tradução liberada sem monitoramento térmico",
+                    level="error", job_id=job.get("id"),
+                )
+            _persist_locked()
+    elif active:
+        with state_lock:
+            job["thermal_guard"] = {
+                **(snapshot.as_dict(config) if snapshot else {}),
+                "status": "MONITORING",
+                "warning_c": config.warning_c,
+                "stop_c": config.stop_c,
+                "interval_s": config.interval_s,
+            }
+            state["thermal_guard"] = job["thermal_guard"]
+            _append_log(
+                f"Proteção térmica GPU ativa: alerta={config.warning_c:.0f}°C, "
+                f"parada={config.stop_c:.0f}°C",
+                level="summary", job_id=job.get("id"),
+            )
+            _persist_locked()
+    return guard
+
+
+def _mark_thermal_guard_prestart(job: dict) -> None:
+    with state_lock:
+        job["status"] = "FAILED"
+        job["stage"] = "FAILED"
+        job["reason"] = "gpu_thermal_guard"
+        job["error"] = "GPU já estava acima do limite térmico antes do início"
+        job["finished_at"] = _now()
+        _append_log(f"Falhou: {job.get('name', '')} — {job['error']}", level="error", job_id=job.get("id"))
+        _persist_locked()
 
 
 def _apply_canonical_pipeline_summary(job: dict, summary: dict) -> None:
@@ -1181,8 +1325,8 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
     Ajusta automaticamente:
     - BATCH_SIZE: mais unidades por chamada (menos chamadas totais)
     - retry_budget: menos retries (economiza quota)
-    - delay entre chamadas: respeita 15 RPM do free tier
-    - model: usa gemini-1.5-flash (mais barato e rápido)
+    - delay entre chamadas: aplica um piso conservador para limites por projeto
+    - model: permanece o modelo escolhido pelo usuário na configuração
     """
     import anime_subtitle_translator as translator
     primary = transport_cfg.get("primary") or {}
@@ -1196,30 +1340,62 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
     new_batch = max(1, int(profile.get("batch_size", 16)))
     translator.BATCH_SIZE = new_batch
 
-    # Aplica model se configurado (permite override via profile)
-    gemini_model = profile.get("model", "").strip()
-    if gemini_model:
-        primary["model"] = gemini_model
+    # O perfil controla a política de chamadas, não a identidade do modelo.
+    # Configurações antigas podem conter ``gemini-1.5-flash`` no perfil; esse
+    # valor nunca deve substituir o modelo estável escolhido na interface.
+    gemini_model = str(primary.get("model") or "").strip()
 
-    # Valida API key para gemini — sem key falha com 403/404
+    # A escolha do usuário é uma decisão de execução, não uma sugestão. Nunca
+    # troque Gemini por Ollama silenciosamente: isso mascara uma configuração
+    # incompleta e pode enviar legendas para um motor diferente do escolhido.
     keys = transport_cfg.get("keys") or {}
     if not keys.get("gemini"):
-        _append_log("AVISO: Gemini selecionado mas sem API key (keys.gemini vazio) — fallback para ollama", level="warning")
-        fallback = transport_cfg.get("fallback") or {"provider": "ollama", "model": "qwen3.5:9b"}
-        if fallback and fallback.get("provider"):
-            transport_cfg["primary"] = dict(fallback)
-            _append_log(f"Fallback ativo: {fallback.get('provider')}/{fallback.get('model')}", level="info")
-            return  # não aplica profile gemini
+        raise RuntimeError(
+            "GEMINI_API_KEY_MISSING: configure a chave do Google; "
+            "Ollama não será usado como fallback automático"
+        )
     # Garante budget mínimo para temporadas (perfis antigos tinham 8)
     retry_budget = int(profile.get("retry_budget", 32))
     if retry_budget < 16:
         retry_budget = 32
         profile["retry_budget"] = 32
     # Log das otimizações aplicadas
-    delay = float(profile.get("delay_between_calls", 0.5))
+    from transport_providers import GEMINI_MIN_DELAY_SECONDS
+    delay = max(
+        GEMINI_MIN_DELAY_SECONDS,
+        float(profile.get("delay_between_calls", GEMINI_MIN_DELAY_SECONDS) or 0.0),
+    )
+    profile["delay_between_calls"] = delay
     _append_log(
         f"Gemini Profile ativo: batch={new_batch}, retry_budget={retry_budget}, "
         f"delay={delay}s, model={gemini_model or primary.get('model', 'default')}",
+        level="info",
+    )
+
+
+def _apply_groq_profile(transport_cfg: dict) -> None:
+    """Apply conservative Groq free-plan batching and retry settings."""
+    import anime_subtitle_translator as translator
+    primary = transport_cfg.get("primary") or {}
+    if str(primary.get("provider", "")).lower() != "groq":
+        return
+    profile = transport_cfg.get("groq_profile") or {}
+    if not profile.get("enabled", True):
+        return
+    if not (transport_cfg.get("keys") or {}).get("groq"):
+        raise RuntimeError(
+            "GROQ_API_KEY_MISSING: configure a chave Groq; "
+            "nenhum outro motor será usado automaticamente"
+        )
+    from transport_providers import GROQ_MIN_DELAY_SECONDS
+    batch = min(4, max(1, int(profile.get("batch_size", 4) or 4)))
+    retry_budget = max(1, int(profile.get("retry_budget", 16) or 16))
+    delay = max(GROQ_MIN_DELAY_SECONDS, float(profile.get("delay_between_calls", GROQ_MIN_DELAY_SECONDS) or 0.0))
+    profile.update({"batch_size": batch, "retry_budget": retry_budget, "delay_between_calls": delay})
+    translator.BATCH_SIZE = batch
+    _append_log(
+        f"Groq Profile ativo: batch={batch}, retry_budget={retry_budget}, "
+        f"delay={delay}s, model={primary.get('model', 'default')}",
         level="info",
     )
 
@@ -1230,7 +1406,7 @@ def _run_episode_v238(job: dict) -> None:
     Preserva staging de temporada (glossário por série, app.py:865-873),
     output_exists_race (app.py:933-936) e cancelamento cooperativo (M4).
     """
-    from pipeline_orchestrator import execute_pipeline_plan
+    from pipeline_orchestrator import execute_pipeline_plan, gemini_operation_limits
     from web_execution_context import build_v238_execution_context
     from web_durable_provider import WebDurableResponseProvider
     from transport_config_store import load_transport_config
@@ -1238,6 +1414,7 @@ def _run_episode_v238(job: dict) -> None:
     source = Path(job["source_abs"])
     destination = source.with_suffix(f".{TARGET_SUFFIX}.ass")
     temporary_root = Path(tempfile.mkdtemp(prefix=".subtranslate-v238-", dir=str(source.parent)))
+    _job_temporary_roots[str(job.get("id") or "")] = temporary_root
     temporary_dir = temporary_root / source.parent.name
     temporary_dir.mkdir()
     linked_video = temporary_dir / source.name
@@ -1245,24 +1422,56 @@ def _run_episode_v238(job: dict) -> None:
     staged_source = linked_video
     staged_output = temporary_dir / (source.stem + f".{TARGET_SUFFIX}.ass")
 
-    # Extrair legenda do vídeo se necessário: os adapters V2.2.x só aceitam
-    # ASS/SSA (production_v2_2_5_adapter.py:401). O caminho legacy extrai via
-    # ffmpeg (anime_subtitle_translator.py:587,1117); o V2.3.8 precisa do
-    # mesmo passo antes de materializar.
+    # O V2.3.8 recebe um arquivo de legenda, não o vídeo. A faixa textual
+    # embutida tem prioridade (a seleção por idioma/conteúdo evita traduzir
+    # Signs/Songs); um sidecar só é usado como fallback quando o MKV não tem
+    # faixa textual. Mais de uma opção sem desempate seguro falha explicitamente.
     if source.suffix.lower() in VIDEO_EXTENSIONS:
-        from anime_subtitle_translator import extract_subtitle, find_subtitle_stream
+        source_language = job.get("source_language") or _global_source_language()
+        import anime_subtitle_translator as subtitle_translator
 
-        stream = find_subtitle_stream(source)
-        if stream is None:
-            raise RuntimeError("V238_NO_SUBTITLE_STREAM_FOUND")
-        stream_index, _lang, ext = stream
-        extracted = temporary_dir / (source.stem + ext)
-        extract_subtitle(source, stream_index, extracted)
-        staged_source = extracted
+        # ``anime_subtitle_translator`` is imported once by the web process,
+        # so apply the per-job language before selecting an embedded track.
+        subtitle_translator.SOURCE_LANGUAGE = source_language
+        stream = subtitle_translator.find_subtitle_stream(source)
+        if stream is not None:
+            stream_index, _lang, ext = stream
+            job["source_stream_index"] = int(stream_index)
+            job["source_stream_language"] = _lang
+            job["source_stream_extension"] = ext
+            extracted = temporary_dir / (source.stem + ext)
+            subtitle_translator.extract_subtitle(source, stream_index, extracted)
+            staged_source = extracted
+        else:
+            sidecars = [
+                path for path in _sidecar_candidates(source, source_language)
+                if path.suffix.lower() in SUBTITLE_EXTENSIONS
+                and TARGET_SUFFIX.lower() not in path.stem.lower()
+            ]
+            if not sidecars:
+                # A lone sidecar without a language marker is still safe;
+                # multiple unlabelled/language-mixed sidecars require a choice.
+                sidecars = sorted(
+                    path for path in source.parent.glob(f"{source.stem}*")
+                    if path.is_file()
+                    and path.suffix.lower() in SUBTITLE_EXTENSIONS
+                    and TARGET_SUFFIX.lower() not in path.stem.lower()
+                )
+            if len(sidecars) > 1:
+                raise RuntimeError("V238_SOURCE_AMBIGUOUS_SIDECAR")
+            if len(sidecars) == 1:
+                staged_sidecar = temporary_dir / sidecars[0].name
+                shutil.copy2(sidecars[0], staged_sidecar)
+                staged_source = staged_sidecar
+                job["source_sidecar"] = sidecars[0].name
+            else:
+                raise RuntimeError("V238_NO_SUBTITLE_STREAM_FOUND")
 
     transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
+    identity = execution_identity(transport_cfg)
     # Aplica Gemini profile quando provider=gemini (batch_size, retry, delay)
     _apply_gemini_profile(transport_cfg)
+    _apply_groq_profile(transport_cfg)
     # Roots ÚNICOS por job: checkpoints/captures compartilhados entre jobs
     # causam DURABLE_CAPTURE_DUPLICATE_CALL_ID (call_id derivado do request
     # colide com captures de jobs anteriores).
@@ -1307,30 +1516,46 @@ def _run_episode_v238(job: dict) -> None:
         operation_id=_new_operation_id(job),
         execution_mode="TEST_FAKE" if job.get("dry_run") else "LIVE_CAPTURED",
         capture_root=capture_root,
-        authorized_primary_models=transport_cfg.get("authorized_primary_models") or ["qwen", "gemini"],
+        authorized_primary_models=transport_cfg.get("authorized_primary_models") or ["qwen", "gemini", "openai", "llama", "meta"],
         glossary=glossary,
         glossary_hash=glossary_hash,
         stage_completion_root=job_root / "completions",
         checkpoint_root=job_root / "checkpoints",
         job_id=job.get("id"),
-        prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH"),
-        configuration_hash=os.environ.get("CONFIGURATION_HASH"),
-        candidate_commit=os.environ.get("CANDIDATE_COMMIT"),
-        candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID"),
+        prompt_schema_hash=identity["prompt_schema_hash"],
+        configuration_hash=identity["configuration_hash"],
+        candidate_commit=identity["candidate_commit"],
+        candidate_image_id=identity["candidate_image_id"],
         failure_ledger_root=STATE_DIR / "failure-ledger",
     )
-    # Gemini profile: aplica retry_budget como OperationCallBudget
-    # (131 é default qwen; para gemini free tier limita a 8 para respeitar 15 RPM)
+    # Gemini profile: retry_budget é o limite de retries semânticos. O teto
+    # físico precisa ser separado: as chamadas iniciais de uma temporada
+    # também ocupam o ledger (E110, por exemplo, precisa de ~30 lotes).
     primary_provider = str((transport_cfg.get("primary") or {}).get("provider", "")).lower()
     gemini_profile = transport_cfg.get("gemini_profile") or {}
+    groq_profile = transport_cfg.get("groq_profile") or {}
     if primary_provider == "gemini" and gemini_profile.get("enabled", True):
         from v238_llama_policy import OperationCallBudget
-        retry_budget = max(1, int(gemini_profile.get("retry_budget", 8)))
+        retry_budget, physical_budget = gemini_operation_limits(gemini_profile)
         # só injeta se ainda não existe (orchestrator usa setdefault)
         if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
-            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
+            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=physical_budget, llama_generation_maximum=1)
             ctx["gemini_profile"] = gemini_profile  # expõe para orchestrator/metrics
-            _append_log(f"Gemini budget ativo: qwen_physical_maximum={retry_budget} (profile)", level="info", job_id=job.get("id"))
+            _append_log(
+                f"Gemini budget ativo: semantic_retries={retry_budget}, physical_calls={physical_budget}",
+                level="info", job_id=job.get("id"),
+            )
+    elif primary_provider == "groq" and groq_profile.get("enabled", True):
+        from pipeline_orchestrator import groq_operation_limits
+        from v238_llama_policy import OperationCallBudget
+        retry_budget, physical_budget = groq_operation_limits(groq_profile)
+        if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
+            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=physical_budget, llama_generation_maximum=1)
+            ctx["groq_profile"] = groq_profile
+            _append_log(
+                f"Groq budget ativo: semantic_retries={retry_budget}, physical_calls={physical_budget}",
+                level="info", job_id=job.get("id"),
+            )
     ctx["response_provider"] = provider
     ctx["operation"] = "TRANSLATE"
     ctx["defer_intermediate_cleanup"] = False
@@ -1355,6 +1580,14 @@ def _run_episode_v238(job: dict) -> None:
             ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "")
             if ollama_url:
                 section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
+        if provider_name == "gemini":
+            section["delay_between_calls"] = float(
+                (transport_cfg.get("gemini_profile") or {}).get("delay_between_calls", 0.5)
+            )
+        elif provider_name == "groq":
+            section["delay_between_calls"] = float(
+                (transport_cfg.get("groq_profile") or {}).get("delay_between_calls", 2.5)
+            )
         ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
 
     with state_lock:
@@ -1376,8 +1609,16 @@ def _run_episode_v238(job: dict) -> None:
         result = None
         transport_error: Exception | None = None
         fallback_used = False
+        configured_fallback = transport_cfg.get("fallback")
+        primary_provider_name = str((transport_cfg.get("primary") or {}).get("provider", "")).lower()
+        if primary_provider_name in {"gemini", "groq"} and str((configured_fallback or {}).get("provider", "")).lower() == "ollama":
+            _append_log(
+                f"Fallback Ollama ignorado: {primary_provider_name.title()} está configurado como motor exclusivo.",
+                level="info", job_id=job.get("id"),
+            )
+            configured_fallback = None
         for attempt_name, section in (("primary", transport_cfg.get("primary")),
-                                      ("fallback", transport_cfg.get("fallback"))):
+                                      ("fallback", configured_fallback)):
             if not section:
                 continue
             if attempt_name == "fallback":
@@ -1392,7 +1633,16 @@ def _run_episode_v238(job: dict) -> None:
                     ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "")
                     if ollama_url:
                         section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
+                if provider_name == "gemini":
+                    section["delay_between_calls"] = float(
+                        (transport_cfg.get("gemini_profile") or {}).get("delay_between_calls", 0.5)
+                    )
+                elif provider_name == "groq":
+                    section["delay_between_calls"] = float(
+                        (transport_cfg.get("groq_profile") or {}).get("delay_between_calls", 2.5)
+                    )
                 ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
+                ctx["provider"] = provider_name
                 # Rebuild the semantic provider for each transport attempt;
                 # otherwise it keeps selecting the persisted primary engine.
                 fallback_config = dict(transport_cfg)
@@ -1443,7 +1693,12 @@ def _run_episode_v238(job: dict) -> None:
                 encoding="utf-8",
             )
         with state_lock:
-            if state.get("cancel_requested"):
+            if state.get("thermal_stop_requested"):
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "gpu_thermal_guard"
+                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            elif state.get("cancel_requested"):
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
                 job["reason"] = "stopped_by_user"
@@ -1504,16 +1759,23 @@ def _run_episode_v238(job: dict) -> None:
             _persist_locked()
     except Exception as error:
         with state_lock:
-            job["status"] = "FAILED"
-            job["stage"] = "FAILED"
-            job["reason"] = "translator_exception"
-            job["error"] = str(error) if error is not None else "exceção sem mensagem"
+            if state.get("thermal_stop_requested"):
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "gpu_thermal_guard"
+                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            else:
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "translator_exception"
+                job["error"] = str(error) if error is not None else "exceção sem mensagem"
             job["finished_at"] = _now()
             _append_log(f"Falhou: {job['name']} — {job['error']}", level="error", job_id=job["id"])
             _persist_locked()
     finally:
         import shutil
 
+        _job_temporary_roots.pop(str(job.get("id") or ""), None)
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
@@ -1578,15 +1840,16 @@ def _run_episode(job: dict) -> None:
     # component.  The engine therefore sees the same semantic names while the
     # final file is still published by same-directory rename.
     temporary_root = Path(tempfile.mkdtemp(prefix=".subtranslate-", dir=str(source.parent)))
+    _job_temporary_roots[str(job.get("id") or "")] = temporary_root
     temporary_dir = temporary_root / source.parent.name
     temporary_dir.mkdir()
     linked_video = temporary_dir / source.name
     linked_video.symlink_to(source)
-    command = ["python3", "-u", str(SCRIPT_PATH), str(temporary_dir)]
+    command = [sys.executable, "-u", str(SCRIPT_PATH), str(temporary_dir)]
     env = dict(os.environ)
     env["TRANSLATOR_SOURCE_LANGUAGE"] = job.get("source_language") or "inglês"
     # Keep legacy subprocess ledgers beside the configured web state.  The
-    # container default (/app/state) is not writable in local/system runs.
+    # Keep legacy subprocess ledgers beside the configured web state.
     env["TRANSLATOR_FAILURE_LEDGER_ROOT"] = str(STATE_DIR / "failure-ledger")
     if job.get("dry_run"):
         command.append("--dry-run")
@@ -1601,7 +1864,7 @@ def _run_episode(job: dict) -> None:
     try:
         proc = subprocess.Popen(
             command,
-            cwd="/app",
+            cwd=str(RUNTIME_ROOT),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1623,7 +1886,12 @@ def _run_episode(job: dict) -> None:
         return_code = proc.wait()
         with state_lock:
             state["process"] = None
-            if state["stop_requested"]:
+            if state.get("thermal_stop_requested"):
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "gpu_thermal_guard"
+                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            elif state["stop_requested"]:
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
                 job["reason"] = "stopped_by_user"
@@ -1671,14 +1939,21 @@ def _run_episode(job: dict) -> None:
     except Exception as error:
         with state_lock:
             state["process"] = None
-            job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
-            job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
-            job["reason"] = "backend_exception"
-            job["error"] = str(error)
+            if state.get("thermal_stop_requested"):
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "gpu_thermal_guard"
+                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            else:
+                job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
+                job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
+                job["reason"] = "backend_exception"
+                job["error"] = str(error)
             job["finished_at"] = _now()
             _append_log(f"Falhou: {job['name']} — {error}", level="error", job_id=job["id"])
             _persist_locked()
     finally:
+        _job_temporary_roots.pop(str(job.get("id") or ""), None)
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
@@ -1759,7 +2034,7 @@ def _run_retranslation_episode(job: dict) -> None:
     proc = None
     summary = None
     try:
-        proc = subprocess.Popen(command, cwd="/app", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+        proc = subprocess.Popen(command, cwd=str(RUNTIME_ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         with state_lock:
             state["process"] = proc
             job["status"] = "TRANSLATING"
@@ -1939,10 +2214,16 @@ def _run_retranslation_episode(job: dict) -> None:
             retained_staging = retain_staging(staging_root, fallback_dir)
         with state_lock:
             state["process"] = None
-            job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
-            job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
-            job["reason"] = "retranslation_failed"
-            job["error"] = str(error)
+            if state.get("thermal_stop_requested"):
+                job["status"] = "FAILED"
+                job["stage"] = "FAILED"
+                job["reason"] = "gpu_thermal_guard"
+                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            else:
+                job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
+                job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
+                job["reason"] = "retranslation_failed"
+                job["error"] = str(error)
             if ledger_dir:
                 job["failure_ledger_dir"] = str(ledger_dir)
             if snapshot:
@@ -1995,8 +2276,8 @@ def _finish_session_locked() -> None:
         "finished_at": _now(), "requested": counts["total"], "completed": counts["completed"],
         "failed": counts["failed"], "cancelled": counts["cancelled"], "skipped": counts["skipped"],
         "not_started_after_failure": counts.get("not_started_after_failure", 0),
-        "interrupted": bool(state.get("bulk_stop_reason")),
-        "stop_reason": state.get("bulk_stop_reason"),
+        "interrupted": bool(state.get("bulk_stop_reason") or state.get("thermal_stop_requested")),
+        "stop_reason": state.get("bulk_stop_reason") or ("GPU_THERMAL_GUARD" if state.get("thermal_stop_requested") else None),
     }
     state["history"].append(session)
     state["finished_ok"] = counts["failed"] == 0 and counts["cancelled"] == 0
@@ -2005,9 +2286,53 @@ def _finish_session_locked() -> None:
     _persist_locked()
 
 
+def _mark_unhandled_worker_failure(job: dict, error: BaseException) -> None:
+    """Convert a worker-level exception into a durable terminal job state.
+
+    Preparation can fail before an episode enters ``STARTING`` (for example,
+    when an MKV has no supported subtitle stream).  Letting that exception
+    escape the queue thread leaves the job looking ``WAITING`` forever and
+    silently kills the worker.  Record the failure while preserving a terminal
+    state that may already have been set by a concurrent stop request.
+    """
+    with state_lock:
+        if job.get("status") in {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED", "SKIPPED_CURRENT_VALIDATED", "ALREADY_TRANSLATED", "NOT_STARTED_AFTER_FAILURE"}:
+            return
+        detail = str(error).strip() or error.__class__.__name__
+        job["status"] = "FAILED"
+        job["stage"] = "FAILED"
+        job["reason"] = "worker_exception"
+        job["error"] = detail
+        job["finished_at"] = _now()
+        _append_log(
+            f"Falhou: {job.get('name') or job.get('episode') or job.get('id')} — {detail}",
+            level="error",
+            job_id=job.get("id"),
+        )
+        _persist_locked()
+
+
+def _cleanup_job_temporary_root(job: dict) -> None:
+    """Remove a per-job staging directory even when preparation fails early."""
+    root = _job_temporary_roots.pop(str(job.get("id") or ""), None)
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def _worker_loop() -> None:
     while True:
         with state_lock:
+            if state.get("thermal_stop_requested"):
+                for item in state["jobs"]:
+                    if item.get("session_id") == state.get("session_id") and item.get("status") == "WAITING":
+                        item["status"] = "CANCELLED"
+                        item["reason"] = "gpu_thermal_guard"
+                        item["error"] = "Fila interrompida pela proteção térmica da GPU"
+                        item["finished_at"] = _now()
+                state["running"] = False
+                _finish_session_locked()
+                state["worker"] = None
+                return
             if state["stop_requested"]:
                 for job in state["jobs"]:
                     if job.get("session_id") == state.get("session_id") and job.get("status") == "WAITING":
@@ -2034,10 +2359,22 @@ def _worker_loop() -> None:
                 return
             state["current_job_id"] = job["id"]
             state["running"] = True
-        if job.get("operation") == "RETRANSLATE":
-            _run_retranslation_episode(job)
-        else:
-            _run_episode(job)
+        thermal_guard = _thermal_guard_for_job(job)
+        try:
+            if thermal_guard is not None and thermal_guard.tripped:
+                _mark_thermal_guard_prestart(job)
+            elif job.get("operation") == "RETRANSLATE":
+                _run_retranslation_episode(job)
+            else:
+                _run_episode(job)
+        except Exception as error:
+            # Never allow a preparation/worker exception to kill the queue
+            # thread while leaving its job in the non-terminal WAITING state.
+            _cleanup_job_temporary_root(job)
+            _mark_unhandled_worker_failure(job, error)
+        finally:
+            if thermal_guard is not None:
+                thermal_guard.stop()
         with state_lock:
             # A bulk retranslation is serial *and* fail-fast.  The old worker
             # only guaranteed one process at a time, then immediately picked
@@ -2421,6 +2758,227 @@ def transport_config_post():
         return jsonify({"error": str(error)}), 400
 
 
+def _onboarding_file() -> Path:
+    return STATE_DIR / "onboarding.json"
+
+
+def _onboarding_completed() -> bool:
+    try:
+        value = json.loads(_onboarding_file().read_text(encoding="utf-8"))
+        return bool(value.get("completed")) if isinstance(value, dict) else False
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _onboarding_media_status() -> dict[str, object]:
+    try:
+        available = BASE_LIBRARY.is_dir() and os.access(BASE_LIBRARY, os.R_OK)
+        folders = sum(1 for item in BASE_LIBRARY.iterdir() if item.is_dir() and not item.name.startswith(".")) if available else 0
+    except OSError:
+        available, folders = False, 0
+    return {
+        "available": bool(available),
+        "folders": folders,
+        "label": BASE_LIBRARY.name or str(BASE_LIBRARY.anchor),
+    }
+
+
+@app.route("/onboarding/status")
+def onboarding_status():
+    """Return first-run readiness without exposing host filesystem paths."""
+    from transport_config_store import TransportConfigError, load_transport_config
+
+    media = _onboarding_media_status()
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        primary = config.get("primary") or {}
+        provider = str(primary.get("provider") or "").strip().lower()
+        model = str(primary.get("model") or "").strip()
+        provider_configured = bool(provider and model)
+    except TransportConfigError:
+        provider, model, provider_configured = "", "", False
+    return jsonify({
+        "completed": _onboarding_completed(),
+        "media": media,
+        "provider": provider,
+        "model": model,
+        "provider_configured": provider_configured,
+        "ollama_candidate": provider == "ollama",
+    })
+
+
+@app.route("/onboarding/provider-test", methods=["POST"])
+def onboarding_provider_test():
+    """Probe a provider's metadata endpoint without making a model call."""
+    from transport_config_store import TransportConfigError, load_transport_config
+    from transport_providers import api_key_from_env
+
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        primary = config.get("primary") or {}
+        provider = str(primary.get("provider") or "").strip().lower()
+        base_url = str(primary.get("base_url") or "").strip().rstrip("/")
+        model = str(primary.get("model") or "").strip()
+        key = str((config.get("keys") or {}).get(provider) or api_key_from_env(provider) or "").strip()
+    except (TransportConfigError, TypeError, ValueError) as error:
+        return jsonify({"ok": False, "message": f"Configuração inválida: {error}"}), 400
+    if not provider or not model:
+        return jsonify({"ok": False, "message": "Escolha um motor e um modelo antes de testar."}), 400
+    if provider == "ollama":
+        endpoint = f"{base_url or 'http://127.0.0.1:11434'}/api/tags"
+    elif provider == "openai_compat":
+        endpoint = f"{base_url}/models"
+    elif provider == "gemini":
+        endpoint = f"{base_url or 'https://generativelanguage.googleapis.com/v1beta'}/models"
+    elif provider == "nvidia":
+        endpoint = f"{base_url or 'https://integrate.api.nvidia.com/v1'}/models"
+    elif provider == "groq":
+        endpoint = f"{base_url or 'https://api.groq.com/openai/v1'}/models"
+    else:
+        return jsonify({"ok": False, "message": "Motor não reconhecido."}), 400
+    if not endpoint.startswith(("http://", "https://")):
+        return jsonify({"ok": False, "message": "O endereço do motor precisa começar com http:// ou https://."}), 400
+    headers = {"Accept": "application/json"}
+    if key and provider in {"openai_compat", "groq", "nvidia"}:
+        headers["Authorization"] = f"Bearer {key}"
+    if key and provider == "gemini":
+        headers["x-goog-api-key"] = key
+    # Use the same HTTP stack as the translation workers.  The Desktop
+    # bundle includes Requests' certifi CA store, while urllib may resolve to
+    # a host CA path that does not exist on a different Linux distribution.
+    # This keeps the onboarding probe representative of the real runtime.
+    try:
+        import requests
+
+        response = requests.get(endpoint, headers=headers, timeout=4)
+        status = int(response.status_code)
+        response.close()
+    except requests.exceptions.SSLError:
+        return jsonify({"ok": False, "provider": provider, "message": "Falha TLS ao conectar ao motor. Verifique os certificados do sistema."}), 200
+    except requests.exceptions.ProxyError:
+        return jsonify({"ok": False, "provider": provider, "message": "O proxy configurado recusou a conexão com o motor."}), 200
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "provider": provider, "message": "Tempo limite ao conectar ao motor. Verifique a rede ou o proxy."}), 200
+    except requests.exceptions.ConnectionError:
+        return jsonify({"ok": False, "provider": provider, "message": "Não foi possível conectar ao motor. Verifique se ele está aberto e acessível."}), 200
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "provider": provider, "message": "Não foi possível conectar ao motor. Verifique se ele está aberto e acessível."}), 200
+    if status in {401, 403} and not key:
+        return jsonify({"ok": False, "provider": provider, "message": "O motor respondeu, mas uma API key é necessária."}), 200
+    if status >= 400:
+        return jsonify({"ok": False, "provider": provider, "message": f"O motor respondeu HTTP {status}. Verifique endereço e credencial."}), 200
+    return jsonify({"ok": 200 <= status < 300, "provider": provider, "message": "Motor acessível. Nenhuma tradução foi executada."})
+
+
+@app.route("/onboarding/provider-models")
+def onboarding_provider_models():
+    """List Gemini or Groq text-generation models available to the key.
+
+    The endpoint returns only model metadata; credentials are read locally and
+    never included in the response.  A small stable catalogue is returned as
+    a useful fallback when the key is not configured or the online catalogue
+    is temporarily unavailable.
+    """
+    from transport_config_store import TransportConfigError, load_transport_config
+    from transport_providers import (
+        api_key_from_env,
+        gemini_model_catalog,
+        gemini_models_from_api,
+        groq_model_catalog,
+        groq_models_from_api,
+    )
+
+    requested = str(request.args.get("provider") or "gemini").strip().lower()
+    if requested not in {"gemini", "groq"}:
+        return jsonify({"ok": False, "provider": requested, "models": [], "message": "A lista online está disponível para Gemini e Groq."}), 400
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        primary = config.get("primary") or {}
+        base_url = str(primary.get("base_url") or "").strip().rstrip("/") if str(primary.get("provider") or "").lower() == requested else ""
+        key = str((config.get("keys") or {}).get(requested) or api_key_from_env(requested) or "").strip()
+    except (TransportConfigError, TypeError, ValueError) as error:
+        fallback = gemini_model_catalog() if requested == "gemini" else groq_model_catalog()
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": f"Configuração inválida: {error}"}), 200
+
+    fallback = gemini_model_catalog() if requested == "gemini" else groq_model_catalog()
+    if not key:
+        return jsonify({
+            "ok": False,
+            "provider": requested,
+            "models": fallback,
+            "source": "catalog",
+            "message": "Configure a API key para atualizar a lista de modelos disponíveis.",
+        }), 200
+
+    default_base = "https://generativelanguage.googleapis.com/v1beta" if requested == "gemini" else "https://api.groq.com/openai/v1"
+    endpoint = f"{base_url or default_base}/models"
+    try:
+        import requests
+
+        headers = {"Accept": "application/json"}
+        headers["x-goog-api-key" if requested == "gemini" else "Authorization"] = key if requested == "gemini" else f"Bearer {key}"
+        response = requests.get(endpoint, headers=headers, timeout=6)
+        status = int(response.status_code)
+        payload = response.json() if 200 <= status < 300 else {}
+        response.close()
+    except requests.exceptions.SSLError:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "Falha TLS ao atualizar modelos; mostrando opções estáveis conhecidas."}), 200
+    except requests.exceptions.ProxyError:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "O proxy recusou a lista online; mostrando opções estáveis conhecidas."}), 200
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "Tempo limite da lista online; mostrando opções estáveis conhecidas."}), 200
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "Lista online indisponível; mostrando opções estáveis conhecidas."}), 200
+    if status in {401, 403}:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "A API key não permitiu listar os modelos; confira a credencial."}), 200
+    if status >= 400:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": f"A lista de modelos respondeu HTTP {status}; mostrando opções estáveis conhecidas."}), 200
+    models = gemini_models_from_api(payload) if requested == "gemini" else groq_models_from_api(payload)
+    if not models:
+        return jsonify({"ok": False, "provider": requested, "models": fallback, "source": "catalog", "message": "Nenhum modelo de texto compatível foi retornado; mostrando opções estáveis conhecidas."}), 200
+    return jsonify({"ok": True, "provider": requested, "models": models, "source": f"{requested}-api", "message": "Modelos disponíveis para esta API key."}), 200
+
+
+@app.route("/onboarding/complete", methods=["POST"])
+def onboarding_complete():
+    """Persist completion only after the user has seen the readiness checks."""
+    if not _state_dir_ready():
+        return jsonify({"ok": False, "message": "O diretório de estado não permite gravação."}), 500
+    target = _onboarding_file()
+    temp_path = target.with_name(f".{target.name}.tmp")
+    try:
+        temp_path.write_text(json.dumps({"completed": True, "completed_at": _now()}), encoding="utf-8")
+        os.replace(temp_path, target)
+    except OSError as error:
+        temp_path.unlink(missing_ok=True)
+        return jsonify({"ok": False, "message": f"Não foi possível salvar a configuração inicial: {error}"}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/diagnostics/export")
+def diagnostics_export():
+    """Download a support report with secrets and host paths removed."""
+    from _version import __version__
+    from diagnostics import report_json, sanitized_report
+    from transport_config_store import public_transport_config
+
+    try:
+        provider = public_transport_config(TRANSPORT_CONFIG_PATH)
+    except Exception:
+        provider = {"primary": {}, "fallback": None, "keys_configured": {}, "pipeline": "unknown"}
+    report = sanitized_report(
+        version=__version__,
+        media=_onboarding_media_status(),
+        provider=provider,
+        onboarding_completed=_onboarding_completed(),
+    )
+    return Response(
+        report_json(report),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=transass-diagnostico.json"},
+    )
+
+
 @app.route("/source-options")
 def source_options_route():
     """List every translatable subtitle source (any language) for an episode.
@@ -2596,6 +3154,9 @@ def start():
         state["pause_requested"] = False
         state["queue_paused"] = False
         state["stop_requested"] = False
+        state["cancel_requested"] = False
+        state["thermal_stop_requested"] = False
+        state["thermal_guard"] = None
         state["stopped_by_user"] = False
         state["finished_ok"] = None
         state["bulk_stop_reason"] = None
@@ -2632,6 +3193,8 @@ def resume():
         state["queue_paused"] = False
         state["stop_requested"] = False
         state["cancel_requested"] = False  # M4
+        state["thermal_stop_requested"] = False
+        state["thermal_guard"] = None
         state["running"] = True
         _append_log("Fila retomada", level="summary")
         _persist_locked()
@@ -2676,6 +3239,9 @@ def retry_failed():
         state["session_created_at"] = _now()
         state["running"] = True
         state["stop_requested"] = False
+        state["cancel_requested"] = False
+        state["thermal_stop_requested"] = False
+        state["thermal_guard"] = None
         state["pause_requested"] = False
         state["paused"] = False
         state["bulk_stop_reason"] = None
@@ -2773,6 +3339,8 @@ def _status_payload_locked(after: int = 0) -> dict:
         "current_job": _public_job(current), "jobs": [_public_job(job) for job in session_jobs],
         "queue": _queue_counts(), "queue_paused": state["queue_paused"],
         "bulk_stop_reason": state.get("bulk_stop_reason"), "bulk_failed_job_id": state.get("bulk_failed_job_id"),
+        "thermal_stop_requested": bool(state.get("thermal_stop_requested")),
+        "thermal_guard": state.get("thermal_guard"),
         "pipeline": _pipeline_info(),
     }
 
@@ -2956,7 +3524,14 @@ def _retranslation_preflight(
             item = {"episode_id": episode_id, "episode": episode.get("episode"), "status": "SOURCE_NOT_FOUND", "reason": "episódio sem versão para retraduzir"}
             results.append(item); blocked.append(item); continue
         source_language = selected_languages.get(int(episode_id)) or _global_source_language()
-        source = resolve_episode_source(subtitle_library, episode_id, int(old["id"]), materialize=False, source_language=source_language)
+        source = resolve_episode_source(
+            subtitle_library,
+            episode_id,
+            int(old["id"]),
+            materialize=False,
+            source_language=source_language,
+            refresh_from_media=True,
+        )
         state.setdefault("source_status", {})[str(int(episode_id))] = _public_source_status(source)
         if not source.get("available"):
             item = {
@@ -3014,8 +3589,13 @@ def _queue_retranslation(
             episode, old = item["episode"], item["old"]
             job_source_language = selected_languages.get(int(episode["id"])) or _global_source_language()
             source = resolve_episode_source(
-                subtitle_library, int(episode["id"]), int(old["id"]), materialize=True, job_id=source_job_id,
+                subtitle_library,
+                int(episode["id"]),
+                int(old["id"]),
+                materialize=True,
+                job_id=source_job_id,
                 source_language=job_source_language,
+                refresh_from_media=True,
             )
             if not source.get("available"):
                 raise LibraryError(f"{episode.get('media_filename')}: fonte deixou de estar disponível após o pré-flight")
@@ -3030,6 +3610,9 @@ def _queue_retranslation(
         state["pause_requested"] = False
         state["queue_paused"] = False
         state["stop_requested"] = False
+        state["cancel_requested"] = False
+        state["thermal_stop_requested"] = False
+        state["thermal_guard"] = None
         state["stopped_by_user"] = False
         state["finished_ok"] = None
         state["bulk_stop_reason"] = None

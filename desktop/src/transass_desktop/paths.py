@@ -44,11 +44,11 @@ class DesktopPaths:
         if self.state_root is not None:
             return Path(self.state_root).expanduser()
         configured = os.environ.get("TRANSLATOR_WEB_STATE_DIR")
-        if configured and configured not in {"/app/state", "/app/state/"}:
-            return Path(configured).expanduser()
-        configured = os.environ.get("STATE_DIR") or configured
         if configured and configured not in _CONTAINER_STATE_ALIASES:
             return Path(configured).expanduser()
+        state_dir = os.environ.get("STATE_DIR")
+        if state_dir and state_dir not in _CONTAINER_STATE_ALIASES:
+            return Path(state_dir).expanduser()
         return self.data_root / "state"
 
     @property
@@ -69,11 +69,11 @@ class DesktopPaths:
             except (OSError, ValueError):
                 pass
         configured = os.environ.get("TRANSLATOR_BASE_LIBRARY")
-        if configured and configured not in {"/shows", "/app/shows"}:
-            return Path(configured).expanduser()
-        configured = os.environ.get("MEDIA_ROOT") or configured
         if configured and configured not in _CONTAINER_MEDIA_ALIASES:
             return Path(configured).expanduser()
+        media_root = os.environ.get("MEDIA_ROOT")
+        if media_root and media_root not in _CONTAINER_MEDIA_ALIASES:
+            return Path(media_root).expanduser()
         return self.data_root / "media"
 
     @property
