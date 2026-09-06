@@ -18,10 +18,10 @@ import pysubs2
 import requests
 
 from ollama_runtime import ollama_keep_alive
-from production_v2_2_6_adapter import APPROVED_MODEL as V226_MODEL
+from runtime_config import default_glossary_path
 
 APPROVED_PIPELINE = "v2_3_0"
-APPROVED_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", V226_MODEL)
+APPROVED_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", "qwen3.5:9b")
 KARAOKE_TRANSLATION_TIMING_UNSUPPORTED = "KARAOKE_TRANSLATION_TIMING_UNSUPPORTED"
 KARAOKE_TRANSLATION_RETRY = "KARAOKE_TRANSLATION"
 
@@ -41,7 +41,7 @@ def _glossary_hints(text: str) -> list[dict[str, str]]:
     This is deliberately contextual: it never replaces subtitle text after
     the model and an empty/missing glossary is neutral.
     """
-    path = Path(os.environ.get("TRANSLATOR_GLOSSARY_PATH", "/app/state/glossary_v1.json"))
+    path = default_glossary_path()
     if not path.is_file():
         return []
     try:
