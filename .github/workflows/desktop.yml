@@ -1,0 +1,60 @@
+name: Desktop bundles
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  bundle:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: transass-linux-x86_64
+          - os: windows-latest
+            artifact: transass-windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Desktop build dependencies
+        run: |
+          python -m pip install -r requirements.lock
+          python -m pip install -r desktop/packaging/requirements-desktop.txt
+      - name: Generate Windows icon
+        if: runner.os == 'Windows'
+        run: python desktop/packaging/make_icon.py build/transass.ico
+      - name: Build onedir bundle
+        run: python desktop/packaging/build_bundle.py --dist build/desktop
+      - name: Generate checksums and SBOM
+        run: |
+          python desktop/packaging/checksums.py build/desktop
+          python desktop/packaging/generate_sbom.py build/desktop
+      - name: Build Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -L --fail --retry 3 -o "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
+            desktop/packaging/linux/build_appimage.sh
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: iscc desktop/packaging/windows/installer.iss
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            build/desktop
+            build/desktop/**/*.exe
+            build/Transass-x86_64.AppImage
+            build/release
+            Output/*.exe

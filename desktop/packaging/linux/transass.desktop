@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Transass
+Comment=Tradução de legendas de anime
+Exec=Transass
+Icon=transass
+Terminal=false
+Categories=AudioVideo;Utility;
