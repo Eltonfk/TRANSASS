@@ -12,7 +12,7 @@ decision.
 Validate the file with a safe environment before any future deployment:
 
 ```sh
-docker compose -f deploy/compose.yaml config
+docker compose --env-file .env -f deploy/compose.yaml config
 ```
 
 The `.env` file and persistent state are host-local operational data and must

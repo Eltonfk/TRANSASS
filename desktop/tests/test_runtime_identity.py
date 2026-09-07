@@ -12,6 +12,13 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src" / "subtranslate"))
 from transass_desktop.paths import DesktopPaths
 
 
+def test_desktop_public_version_matches_core_version():
+    from _version import __version__ as core_version
+    import transass_desktop
+
+    assert transass_desktop.__version__ == core_version
+
+
 def test_user_paths_accept_spaces_and_unicode(tmp_path, monkeypatch):
     data = tmp_path / "Dados do Transass — usuário"
     config = tmp_path / "Configuração local"

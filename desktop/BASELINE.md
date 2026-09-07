@@ -8,16 +8,17 @@ Esta pasta inicia a linha Desktop a partir do snapshot web `v2.5.0`.
 | Commit | `b5166b937d284f38edf1f43a9ec3c9c9261bd2ba` |
 | Branch de origem | `candidate/v2.3.8` |
 | Tag de origem | `v2.5.0` |
-| Versão Desktop inicial | `3.0.0-alpha.1` |
+| Versão Desktop inicial | `2.5.0` |
 
 O congelamento é lógico e documental nesta etapa. Nenhuma tag, branch,
 artefato de release ou estado de produção foi alterado.
 
-## Divergência conhecida
+## Política de versão
 
-O arquivo raiz `pyproject.toml` ainda informa `2.4.9`, embora o módulo
-`src/subtranslate/_version.py` informe `2.5.0`. Essa correção pertence à linha
-Desktop e não deve modificar o snapshot histórico.
+`pyproject.toml`, `src/subtranslate/_version.py` e o shell Desktop usam
+`2.5.0` como versão pública do produto. O identificador `v2_3_8` permanece
+somente para o pipeline canônico e para a branch de origem; a tag histórica
+`v2.5.0` não é reescrita.
 
 ## Regras
 

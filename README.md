@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-216%20offline%20passing-brightgreen.svg)](tests/offline)
+[![Tests](https://img.shields.io/badge/tests-882%20offline%20passing-brightgreen.svg)](tests/offline)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](deploy/Dockerfile)
 
 **Transass** traduz legendas de anime para português do Brasil.
@@ -18,24 +18,29 @@ Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
 - Traduz episódios inteiros de `.ass`/`.ssa` com **durabilidade forense**:
   cada lote tem ledger, tentativa física e cobertura derivada — **zero retries
   silenciosos** (se falhou, você vai saber).
-- **Motor de tradução escolhível**: Ollama local (GPU ou CPU), Gemini (grátis)
-  ou qualquer API OpenAI-compatível (Groq, OpenRouter, LM Studio...).
-- **Fallback automático**: se o motor principal falhar um lote, o alternativo
-  tenta sozinho — como um plano B, mas sem drama.
+- **Motor de tradução escolhível**: Ollama local (GPU ou CPU), Gemini (grátis),
+  Groq, DeepSeek ou qualquer API OpenAI-compatível (OpenRouter, LM Studio...).
+- **Fallback automático**: se o motor principal ficar indisponível por falha de
+  transporte, o alternativo tenta sozinho — como um plano B, mas sem drama.
 - **Interface web** com fila segura, Biblioteca com lineage, revisão humana e
   publicação direta no Jellyfin (`.pt-BR.ass` ao lado dos vídeos).
 
 > Antes chamado de *Subtranslate*, o projeto foi renomeado para **Transass**.
 
+> **Versão:** o produto está alinhado em `2.5.0`. O identificador `v2_3_8`
+> mantido na configuração nomeia o pipeline canônico e não a versão do
+> aplicativo.
+
 ## ✨ Funcionalidades
 
 - **Tradução integral de temporadas** — pipeline V238 com lotes determinísticos
   e evidência forense por chamada (exactly-once, zero retry silencioso).
-- **Motor de tradução escolhível** — `ollama` (local/GPU), `openai_compat`
-  (Groq, OpenRouter, LM Studio, vLLM, llama.cpp) ou `gemini` (Google).
-- **Fallback automático** — se o motor principal falhar um lote, o motor
-  alternativo configurado tenta automaticamente (evidência própria por
-  tentativa).
+- **Motor de tradução escolhível** — `ollama` (local/GPU), `gemini` (Google),
+  `groq`, `deepseek`, `nvidia` ou `openai_compat` (OpenRouter, LM Studio,
+  vLLM, llama.cpp).
+- **Fallback automático** — se o motor principal ficar indisponível por falha
+  de transporte, o motor alternativo configurado tenta automaticamente
+  (evidência própria por tentativa).
 - **Interface web** — fila segura de episódios, auditoria, Biblioteca com
   lineage, revisão humana, glossário versionado e memória de tradução.
 - **Publicação no Jellyfin** — legendas `.pt-BR.ass` ao lado dos vídeos com a
@@ -64,8 +69,8 @@ Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
 git clone https://github.com/Eltonfk/TRANSASS.git
 cd TRANSASS
 cp .env.example .env          # ajuste MEDIA_ROOT, STATE_DIR e GEMINI_API_KEY se usar Gemini
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.3.8 .
-docker compose -f deploy/compose.yaml up -d
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.0 .
+docker compose --env-file .env -f deploy/compose.yaml up -d
 # UI em http://localhost:5050 (ou http://<IP>:5050 na rede local)
 ```
 
@@ -93,7 +98,7 @@ Equivalente em arquivo (`transport_config.json` no state dir):
 ```json
 {
   "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
-  "fallback": {"provider": "gemini", "model": "gemini-3.6-flash"},
+  "fallback": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
   "keys": {"gemini": "SUA_API_KEY"}
 }
 ```
@@ -101,8 +106,11 @@ Equivalente em arquivo (`transport_config.json` no state dir):
 | Provider | Exemplo de modelo | Key (env ou arquivo) |
 |---|---|---|
 | `ollama` | `qwen3.5:9b` | — |
-| `openai_compat` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` / `OPENROUTER_API_KEY` |
-| `gemini` | `gemini-3.6-flash` | `GEMINI_API_KEY` |
+| `openai_compat` | `meta-llama/llama-3.1-8b-instruct` | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` |
+| `groq` | `openai/gpt-oss-20b` | `GROQ_API_KEY` |
+| `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
+| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| `nvidia` | `meta/llama-3.1-8b-instruct` | `NVIDIA_API_KEY` |
 
 > 🔒 **Nunca** coloque keys em arquivos versionados. O `.gitignore` bloqueia
 > `*api_key*`, `.env` e `secrets/`.
@@ -114,11 +122,11 @@ src/subtranslate/        # núcleo do pipeline (imports planos, PYTHONPATH)
   app.py                 # interface web (Flask)
   pipeline_v2_1_3.py     # pipeline canônico + Client durável
   pipeline_registry.py   # registro de pipelines (legacy, v2_3_8)
-  transport_providers.py # motores plugáveis (ollama/openai_compat/gemini)
+  transport_providers.py # motores plugáveis (ollama/openai_compat/gemini/groq/deepseek)
   transport_config_store.py # persistência segura da config de motor
   v238_*.py              # módulos do pipeline V238 (materializador, stages)
   anime_subtitle_library.py # biblioteca com lineage e dedupe SHA-256
-tests/offline/           # suítes offline determinísticas (216 testes)
+tests/offline/           # suítes offline determinísticas (882 testes)
 deploy/                  # Dockerfile + compose.yaml + ffmpeg estático
 resources/glossaries/    # glossários PT-BR por série
 docs/                    # instalação, arquitetura, pipelines, testes

@@ -5,7 +5,7 @@ Este pacote será responsável por:
 - caminhos por plataforma;
 - configuração e migração de estado;
 - inicialização controlada do servidor local;
-- janela PySide6/Qt WebEngine;
+- janela PySide6 leve integrada ao runtime web local;
 - ciclo de vida e prevenção de instâncias duplicadas.
 
 O launcher PySide6 e o runtime Flask local fazem parte da Fase 2. O servidor

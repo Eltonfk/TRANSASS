@@ -17,10 +17,10 @@ própria e não exigir Python, Docker, Git ou comandos no terminal.
 - Tag existente: `v2.5.0`
 - Snapshot: somente leitura; a linha Desktop nasce a partir dele.
 
-O snapshot contém uma divergência conhecida: `src/subtranslate/_version.py`
-declara `2.5.0`, enquanto o `pyproject.toml` ainda declara `2.4.9`. A nova
-linha deve corrigir isso de forma aditiva; a tag congelada não deve ser
-reescrita.
+O snapshot histórico registrava uma divergência entre `_version.py` e
+`pyproject.toml`; a candidata agora mantém ambos, além do shell Desktop, em
+`2.5.0`. A tag congelada não foi reescrita. `v2_3_8` continua reservado ao
+identificador do pipeline e da branch de origem.
 
 ## Status da implementação
 
@@ -29,7 +29,7 @@ históricos E07 e stress separados. Fase 1 concluída: o núcleo já não depend
 defaults de `/shows`, a configuração e paths são centralizados, os módulos
 entram no Docker allowlist, o projeto gera wheel `2.5.0` e os binários
 empacotados podem ser priorizados pelo `PATH`. Fase 2 concluída: launcher
-PySide6/Qt WebEngine, Flask em `127.0.0.1` com porta validada, bloqueio
+launcher PySide6 leve, Flask em `127.0.0.1` com porta validada, bloqueio
 single-instance e diálogo nativo de pasta. Fase 3 concluída: onboarding,
 checagem de provider sem chamada de modelo e mensagens orientadas ao usuário.
 Fase 4 concluída: credenciais usam cofre do sistema quando disponível, estado
@@ -57,7 +57,7 @@ pois o Inno Setup não roda neste ambiente Linux.
 - Instalador Windows por usuário (Inno Setup), sem apagar estado ou mídia na
   desinstalação.
 - Workflow CI com matriz Ubuntu/Windows, SBOM CycloneDX e SHA-256.
-- Testes de empacotamento/Desktop: `24 passed`.
+- Testes de empacotamento/Desktop: `27 passed`.
 - Bundle Linux local validado: o executável iniciou o servidor Flask local e
   carregou a interface web; o timeout do teste foi intencional para encerrar a
   janela sem interação.
@@ -69,8 +69,8 @@ Fase 6 em andamento: o checklist beta e o smoke test end-to-end foram criados.
 O smoke cobre caminhos com Unicode/espaços, aliases de Compose, provider
 indisponível, onboarding, diagnóstico e migração repetida. Após a correção do
 renderer ASS, do agrupamento de falas quebradas e da auditoria de
-delimitadores, Desktop tests: `24 passed`; suíte offline: `916 passed`, `38
-deselected`, `198 subtests`. Ainda falta a evidência
+delimitadores, Desktop tests: `27 passed`; suíte offline: `882 passed`, `38
+deselected`, `66 subtests`. Ainda falta a evidência
 manual em máquinas limpas (Ubuntu Desktop e Windows), incluindo instalação,
 atualização, interrupção e desinstalação.
 
@@ -108,7 +108,7 @@ atualização, interrupção e desinstalação.
 ## Direção técnica
 
 ```text
-PySide6/Qt WebEngine
+launcher PySide6 leve + navegador padrão
         ↓
 servidor Flask local em 127.0.0.1
         ↓

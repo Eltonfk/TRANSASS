@@ -19,11 +19,11 @@ desktop/
 └── tests/
 ```
 
-O launcher PySide6/Qt WebEngine e o runtime Flask local foram implementados na
-Fase 2. O onboarding, a migração segura e o diagnóstico foram concluídos nas
-fases seguintes. O bundle Linux `onedir` e o AppImage já podem ser gerados com
-as ferramentas isoladas descritas em `packaging/`; o instalador Windows é
-gerado pelo workflow em um runner Windows.
+O launcher PySide6 leve e o runtime Flask local foram implementados na Fase 2;
+a interface web é aberta no navegador padrão. O onboarding, a migração segura
+e o diagnóstico foram concluídos nas fases seguintes. O bundle Linux `onedir`
+e o AppImage podem ser gerados com as ferramentas isoladas descritas em
+`packaging/`; o instalador Windows é gerado pelo workflow em um runner Windows.
 
 Na Fase 4, o runtime migra arquivos ausentes do antigo `deploy/state` sem
 sobrescrever a Library existente, mantém um backup com manifestos SHA-256 e

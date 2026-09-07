@@ -81,7 +81,7 @@ TRANSPORT_MODEL=qwen3.5:9b
 
 ```sh
 docker build --pull=false -f deploy/Dockerfile -t transass:latest .
-docker compose -f deploy/compose.yaml up -d
+docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 
 Acesse a interface em **http://localhost:5050**.
@@ -91,12 +91,59 @@ Acesse a interface em **http://localhost:5050**.
 Clique em **⚙ Motor** e escolha:
 
 - **Ollama local**: provider `ollama`, modelo `qwen3.5:9b` (sem key).
-- **Gemini (grátis)**: provider `gemini`, modelo `gemini-3.6-flash`, cole sua
-  API key (obtenha em [aistudio.google.com](https://aistudio.google.com)).
-- **Groq/OpenRouter**: provider `openai_compat` + base_url + key.
+- **Gemini**: provider `gemini`, escolha um dos modelos de texto exibidos na
+  lista (o padrão recomendado é `gemini-3.5-flash-lite`) e cole sua API key
+  (obtenha em [aistudio.google.com](https://aistudio.google.com)). Ao abrir a
+  configuração, o Transass consulta os modelos disponíveis para a chave e
+  filtra variantes de áudio, imagem, TTS e embedding, que não servem para
+  tradução de legendas. Sem conexão com a API, três modelos estáveis seguros
+  permanecem disponíveis localmente.
 
-O **fallback** é opcional: se o motor principal falhar um lote, o alternativo
-tenta automaticamente.
+O **perfil API otimizado** é ativado automaticamente quando Gemini é usado:
+ele controla o tamanho dos lotes, orçamento de retries e intervalo entre
+chamadas, sem alterar o modelo escolhido pelo usuário.
+- **Groq**: provider `groq`, modelo de texto exibido e key Groq.
+- **OpenRouter/LM Studio**: provider `openai_compat` + base_url + key opcional.
+- **DeepSeek**: provider `deepseek`, modelo `deepseek-chat` ou `deepseek-reasoner` e key DeepSeek.
+- **NVIDIA NIM**: provider `nvidia`, modelo com namespace (por exemplo
+  `meta/llama-3.1-8b-instruct`) e key NVIDIA.
+
+Sem `transport_config.json`, a seleção não secreta de `TRANSPORT_PROVIDER`,
+`TRANSPORT_MODEL` e seus equivalentes `TRANSPORT_FALLBACK_*` no `.env` é usada
+como configuração inicial. Depois que a configuração é salva pela UI, ela
+passa a ter precedência; as API keys continuam sendo resolvidas do keyring,
+arquivo local ou ambiente e nunca entram no execution context.
+
+O **fallback** é opcional: se o motor principal ficar indisponível por falha de
+transporte, o alternativo tenta automaticamente. Falhas de validação linguística
+ou estrutural não trocam silenciosamente de motor; exigem revisão/retry
+seletivo.
+
+### Proteção térmica para Ollama em GPUs AMD
+
+Quando o motor principal ou o fallback usa Ollama, o Transass monitora o
+sensor `amdgpu` do Linux enquanto a fila está executando. Por padrão, ele
+emite um alerta a **90 °C** e interrompe preventivamente a fila a **100 °C**,
+antes do limite crítico do hardware. A interrupção é registrada no histórico
+como `GPU_THERMAL_GUARD`; episódios ainda não iniciados são cancelados e o
+processo local recebe um encerramento controlado.
+
+O mecanismo não altera o modelo nem desativa o Ollama. Ele apenas evita que
+uma tradução em lote mantenha a GPU aquecendo até o desligamento de proteção
+do kernel. Se o sensor AMD não estiver disponível, o app informa isso no log e
+mantém o comportamento normal. Os limites podem ser ajustados no ambiente:
+
+```env
+TRANSASS_GPU_THERMAL_GUARD=1
+TRANSASS_GPU_THERMAL_WARN_C=90
+TRANSASS_GPU_THERMAL_STOP_C=100
+TRANSASS_GPU_THERMAL_INTERVAL_S=2
+```
+
+Depois de uma parada térmica, aguarde a GPU esfriar e inicie uma nova fila.
+Também é recomendável manter o driver, ventilação e curva de fan em boas
+condições: a proteção do aplicativo é uma camada preventiva, não substitui a
+proteção térmica do firmware/kernel.
 
 **Idioma de origem**: no mesmo diálogo ⚙ Motor, o campo **"Idioma de origem da
 legenda"** define o idioma padrão da legenda fonte (destino sempre português do
@@ -136,6 +183,12 @@ python3 src/subtranslate/app.py
 
 Acesse **http://localhost:5050**.
 
+Ao iniciar diretamente pelo arquivo `app.py`, o Transass também lê o `.env`
+local. `MEDIA_ROOT` e `STATE_DIR` são os caminhos do computador hospedeiro;
+os valores internos `/shows` e `/app/state` usados pelo Compose não são usados
+fora do container. Assim, uma biblioteca como `/Tank/data/Shows` continua
+visível no modo local e a configuração do motor é lida do mesmo `STATE_DIR`.
+
 ---
 
 ## 4. Como usar (primeira tradução)
@@ -155,7 +208,7 @@ Acesse **http://localhost:5050**.
 ### Parar e remover o container (Docker)
 
 ```sh
-docker compose -f deploy/compose.yaml down
+docker compose --env-file .env -f deploy/compose.yaml down
 ```
 
 ### Remover a imagem
