@@ -241,7 +241,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         v230_started = time.perf_counter()
         v230_result = v230(intermediate, output, **karaoke_kwargs)
         v230_elapsed = time.perf_counter() - v230_started
-        v230_result = _validate_v230_result(v230_result)
+        v230_result = _validate_v230_result(v230_result, plan_id=plan.id)
         stage_results.append({"id": "KARAOKE_AUGMENTATION_V230", "result": v230_result})
         if not output.is_file():
             raise RuntimeError("v2_3_0 augmentation completed without final candidate")

@@ -361,15 +361,15 @@ Sem essa projeção, o job fica preso em `VALIDATING` com progresso 0/0.
 | Camada | Garantia | Como |
 |--------|----------|------|
 | **Provider (FULL_TRANSLATION_V238)** | ≤131 calls Qwen + ≤1 call Llama por `operation_id` | `OperationCallBudget.reserve()` (`v238_llama_policy.py:55-82`) |
-| **Karaoke V230 (etapa separada)** | Fora do OperationCallBudget; POST direto ao Ollama local | `pipeline_orchestrator.py:152-164`; `production_v2_3_0_adapter.py:176,210` |
+| **Karaoke V230 (etapa separada)** | Usa o provider selecionado, com captura/budget duráveis; chamadas diretas ao Ollama ficam apenas no adapter legado | `pipeline_orchestrator.py:152-164`; `app.py`; `web_durable_provider.py` |
 | **Orchestrator** | Não re-executa stage se `output.exists()` | `pipeline_orchestrator.py:129-130` (FileExistsError) |
 | **Web Layer** | Não submete job duplicado | `_existing_output` (`app.py:1634`) + fila ativa (`:1632`) |
 
 ### 7.1.1 Nota sobre o karaoke V230 (R4)
 
-O pipeline v2_3_8 completo no orchestrator **sempre** executa `augment_karaoke_candidate_v2_3_0` (`pipeline_orchestrator.py:152-164`), que faz POST direto ao Ollama local (`production_v2_3_0_adapter.py:176,210`) **fora do OperationCallBudget** e **fora da seleção de transporte** (sempre Ollama local, ignora Gemini/Qwen). `_validate_v230_result` (`pipeline_orchestrator.py:87-104`) exige `translated_units == song_units` e `failures == []`.
+O pipeline v2_3_8 completo no orchestrator **sempre** executa `augment_karaoke_candidate_v2_3_0` (`pipeline_orchestrator.py:152-164`). Na execução web, o adapter recebe o provider selecionado pelo app, registra a chamada no mecanismo durável e mantém a política de transporte escolhida (DeepSeek, Gemini, Groq ou Ollama). O adapter ainda suporta chamada direta ao Ollama apenas para callers legados que não injetam `translator`. Uma resposta que repete a fonte ou viola a estrutura pode receber uma única nova tentativa no mesmo provider; se continuar inválida, `_validate_v230_result` exige `translated_units == song_units` e `failures == []` e o job falha fechado.
 
-**Decisão**: o contrato P2/C6 aplica-se ao stage `FULL_TRANSLATION_V238`. O karaoke V230 é uma etapa separada com transporte fixo (Ollama local) e validação própria. O custo de modelo do karaoke é contabilizado separadamente (`v230_calls`, `pipeline_orchestrator.py:173-179`). Se o karaoke falhar, o episódio falha (fail-closed) — documentado, não silencioso.
+**Decisão**: o contrato P2/C6 aplica-se ao stage `FULL_TRANSLATION_V238`; o karaoke V230 é uma etapa separada, com provider selecionado, métricas próprias e validação estrutural independente. O custo de modelo do karaoke é contabilizado separadamente (`v230_calls`, `pipeline_orchestrator.py:173-179`). Se o karaoke falhar mesmo após a tentativa corretiva, o episódio falha (fail-closed) — documentado, não silencioso.
 
 ### 7.2 Regras de Ouro
 

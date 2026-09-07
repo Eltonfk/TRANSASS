@@ -121,49 +121,107 @@ def _has_syllabic_tags(text: str) -> bool:
     return bool(re.search(r"\\(?:k|K|kf|ko)\d+", text or ""))
 
 
-def _replace_payload(source: str, translated: str) -> str | None:
-    """Replace lexical payload while retaining source-owned ASS tags/\\N."""
-    source_parts = source.split(r"\N")
-    target_parts = translated.split(r"\N")
-    if len(source_parts) != len(target_parts):
-        # A common ASS karaoke envelope has a tag-only leading segment before
-        # the first visible segment (``{tags}\\Ntext``).  A model correctly
-        # returns one linguistic segment in that case.  Map it to the sole
-        # lexical source segment and preserve all empty/tag-only boundaries.
-        lexical_source_indices = [i for i, part in enumerate(source_parts)
-                                  if _TAG_RE.sub("", part).strip()]
-        if len(lexical_source_indices) == 1 and len(target_parts) == 1:
-            target_parts = [source_parts[i] for i in range(len(source_parts))]
-            target_parts[lexical_source_indices[0]] = translated
+def _allocate_words(words: list[str], weights: list[int]) -> list[str]:
+    """Distribute a model line over source-owned lexical segments."""
+    if not weights:
+        return []
+    if len(words) < len(weights):
+        # Never lose translated content merely because the target is shorter
+        # than the number of source lines. Keep the sentence order and leave
+        # only the trailing source segments empty.
+        return [word if index < len(words) else "" for index, word in enumerate(weights)]
+    total = max(1, sum(weights))
+    chunks: list[str] = []
+    start = 0
+    cumulative = 0
+    for position, weight in enumerate(weights):
+        cumulative += max(1, weight)
+        if position == len(weights) - 1:
+            end = len(words)
         else:
-            return None
+            remaining_segments = len(weights) - position - 1
+            ideal = round(len(words) * cumulative / total)
+            end = min(
+                len(words) - remaining_segments,
+                max(start + 1, ideal),
+            )
+        chunks.append(" ".join(words[start:end]))
+        start = end
+    return chunks
+
+
+def _replace_lexical_payload(source: str, translated: str) -> str | None:
+    """Replace one source segment while retaining its exact ASS tags."""
+    # ASS tags belong to the source envelope. If a model emits them anyway,
+    # discard only those model-owned tags before reinjection.
+    target_words = re.findall(r"\S+", _TAG_RE.sub("", translated or "").strip())
+    tokens = re.split(r"(\{[^}]*\})", source)
+    lexical_indices = [
+        index for index, token in enumerate(tokens)
+        if token and not _TAG_RE.fullmatch(token)
+    ]
+    if not lexical_indices:
+        return source
+    source_word_counts = [
+        max(1, len(re.findall(r"[\wÀ-ÿ]+", tokens[index], re.UNICODE)))
+        for index in lexical_indices
+    ]
+    replacements = dict(zip(lexical_indices, _allocate_words(target_words, source_word_counts)))
+    return "".join(replacements.get(index, token) for index, token in enumerate(tokens))
+
+
+def _replace_payload(source: str, translated: str) -> str | None:
+    """Replace lexical payload while retaining the source ASS envelope.
+
+    The model is not authoritative for line breaks. It may return one line,
+    more lines, or accidentally include ASS tags; all such presentation is
+    normalized back onto the source's exact envelope.
+    """
+    source_parts = source.split(r"\N")
+    source_lexical_indices = [
+        index for index, part in enumerate(source_parts)
+        if _TAG_RE.sub("", part).strip()
+    ]
+    if not source_lexical_indices:
+        return source
+    target_parts = [
+        _TAG_RE.sub("", part).strip()
+        for part in re.split(r"(?:\\N|\r?\n)", str(translated or ""))
+    ]
+    if not any(target_parts):
+        return None
+
+    if len(target_parts) == len(source_parts):
+        target_by_source = {
+            index: target_parts[index] for index in source_lexical_indices
+        }
+    elif len(target_parts) == len(source_lexical_indices):
+        # Common case: source has tag-only prefix/suffix segments around the
+        # visible text and the model returns only the linguistic segments.
+        target_by_source = dict(zip(source_lexical_indices, target_parts))
+    else:
+        target_words = re.findall(r"\S+", " ".join(target_parts))
+        source_word_counts = [
+            max(1, len(re.findall(r"[\wÀ-ÿ]+", source_parts[index], re.UNICODE)))
+            for index in source_lexical_indices
+        ]
+        target_by_source = dict(zip(
+            source_lexical_indices,
+            _allocate_words(target_words, source_word_counts),
+        ))
+
     out = []
-    for src, tgt in zip(source_parts, target_parts):
-        # Keep the delimiters as tokens so their exact order/content survives.
-        tokens = re.split(r"(\{[^}]*\})", src)
-        lexical_indices = [i for i, token in enumerate(tokens)
-                           if token and not _TAG_RE.fullmatch(token)]
-        if not lexical_indices:
-            out.append(src)
+    for index, source_part in enumerate(source_parts):
+        if index not in target_by_source:
+            out.append(source_part)
             continue
-        target_words = re.findall(r"\S+", tgt.strip())
-        source_word_counts = [len(re.findall(r"[\wÀ-ÿ]+", tokens[i], re.UNICODE))
-                              for i in lexical_indices]
-        total = max(1, sum(source_word_counts))
-        replacements: dict[int, str] = {}
-        start = 0
-        for pos, index in enumerate(lexical_indices):
-            if pos == len(lexical_indices) - 1:
-                end = len(target_words)
-            else:
-                end = min(len(target_words), max(start + 1,
-                    round(len(target_words) * source_word_counts[pos] / total)))
-            replacements[index] = " ".join(target_words[start:end])
-            start = end
-        out.append("".join(replacements.get(i, token) for i, token in enumerate(tokens)))
-    result = r"\N".join(out)
-    # Structural tags are validated against the source after reinjection.
-    return result
+        rendered = _replace_lexical_payload(source_part, target_by_source[index])
+        if rendered is None:
+            return None
+        out.append(rendered)
+    # The source owns the delimiters; the final result always has identical
+    # line-break count and exact source tag sequence.
+    return r"\N".join(out)
 
 
 def _event_fields(line: pysubs2.SSAEvent) -> dict[str, Any]:
@@ -237,23 +295,46 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
             failures.append({"style": style, "source": canonical, "event_indices": indices,
                              "reason": KARAOKE_TRANSLATION_TIMING_UNSUPPORTED})
             continue
+        retry_translator = getattr(translator, "retry", None) if translator else None
         if translator:
             value = translator(canonical, "", "")
             provider_calls += 1
         else:
             value = _ollama_translate(canonical, model=model, url=ollama_url)
             calls += 1
-        if visible(value).casefold() == canonical.casefold():
+
+        source_copy = visible(value).casefold() == canonical.casefold()
+        if source_copy and callable(retry_translator):
+            value = retry_translator(canonical, "", "")
+            provider_calls += 1
+            source_copy = visible(value).casefold() == canonical.casefold()
+        rendered_by_index = {}
+        if not source_copy:
+            rendered_by_index = {
+                index: _replace_payload(subs[index].text, value)
+                for index in indices
+            }
+            if any(rendered is None for rendered in rendered_by_index.values()) and callable(retry_translator):
+                value = retry_translator(canonical, "", "")
+                provider_calls += 1
+                source_copy = visible(value).casefold() == canonical.casefold()
+                if not source_copy:
+                    rendered_by_index = {
+                        index: _replace_payload(subs[index].text, value)
+                        for index in indices
+                    }
+        if source_copy:
             failures.append({"style": style, "source": canonical, "event_indices": indices,
                              "reason": "KARAOKE_TRANSLATION_SOURCE_COPY"})
             continue
+        invalid_indices = [index for index, restored in rendered_by_index.items() if restored is None]
+        if invalid_indices:
+            failures.extend({"style": style, "source": canonical, "event_indices": [index],
+                             "reason": "STRUCTURAL_SEGMENT_COUNT_MISMATCH"}
+                            for index in invalid_indices)
+            continue
         translated_units += 1
-        for index in indices:
-            restored = _replace_payload(subs[index].text, value)
-            if restored is None:
-                failures.append({"style": style, "source": canonical, "event_indices": [index],
-                                 "reason": "STRUCTURAL_SEGMENT_COUNT_MISMATCH"})
-                continue
+        for index, restored in rendered_by_index.items():
             subs[index].text = restored
             translated_events += 1
     final_signatures = [_structural_signature(line) for line in subs]

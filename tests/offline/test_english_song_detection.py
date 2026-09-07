@@ -100,6 +100,47 @@ def test_v230_translates_english_bottom_lines_and_preserves_ass_envelope(tmp_pat
     assert before == [karaoke._structural_signature(line) for line in translated]
 
 
+def test_v230_rebuilds_source_linebreaks_when_model_returns_one_line():
+    source = r"{\an8}First lyric\N{\an8}second lyric"
+    rendered = karaoke._replace_payload(source, "Primeira letra segunda letra")
+
+    assert rendered == r"{\an8}Primeira letra\N{\an8}segunda letra"
+    assert rendered.count(r"\N") == source.count(r"\N")
+
+
+def test_v230_retries_source_copy_on_the_selected_provider(tmp_path):
+    source = tmp_path / "episode.ass"
+    output = tmp_path / "episode.pt-BR.ass"
+    subs = pysubs2.SSAFile()
+    subs.events = [pysubs2.SSAEvent(style="OP Bottom", text=r"{\be2}Moonlight signpost")]
+    subs.save(str(source), encoding="utf-8")
+
+    attempts = []
+
+    def fake_translator(text, _before, _after):
+        attempts.append(("initial", text))
+        return text
+
+    def retry_translator(text, _before, _after):
+        attempts.append(("retry", text))
+        return "Poste de luz lunar"
+
+    fake_translator.retry = retry_translator
+    result = karaoke.augment_karaoke_candidate_v2_3_0(
+        source, output, translator=fake_translator
+    )
+    translated = pysubs2.load(str(output))
+
+    assert attempts == [
+        ("initial", "Moonlight signpost"),
+        ("retry", "Moonlight signpost"),
+    ]
+    assert result["provider_calls"] == 2
+    assert result["translated_units"] == 1
+    assert result["failures"] == []
+    assert translated[0].text == r"{\be2}Poste de luz lunar"
+
+
 def test_music_english_copy_is_high_confidence_untranslated_residue():
     event = SimpleNamespace(
         classification="MUSIC_OR_KARAOKE",

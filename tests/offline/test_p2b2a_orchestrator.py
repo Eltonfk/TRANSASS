@@ -23,7 +23,7 @@ def _v230(*, unsupported=0, failures=None, structural=None, song=0, translated=N
 
 
 class V230DurableStageOrchestratorTests(unittest.TestCase):
-    def _run(self, result, *, defer=True):
+    def _run(self, result, *, defer=True, plan_id="v2_3_0"):
         def full(_plan, _source, output, _context):
             Path(output).write_text("V226", encoding="utf-8")
             return {"events": 2, "resolved": 2, "calls": 2, "retry_calls": 1}
@@ -41,7 +41,7 @@ class V230DurableStageOrchestratorTests(unittest.TestCase):
         self._last_output = output
         source.write_text("source", encoding="utf-8")
         with patch.object(orchestrator, "_call_full_adapter", side_effect=full), patch.object(orchestrator.importlib, "import_module", side_effect=importer):
-            return orchestrator.execute_pipeline_plan("v2_3_0", source, output, {"defer_intermediate_cleanup": defer}), output
+            return orchestrator.execute_pipeline_plan(plan_id, source, output, {"defer_intermediate_cleanup": defer}), output
 
     def test_success_retains_stage_for_persistence_and_public_summary_hides_path(self):
         result, output = self._run(_v230(song=2))
@@ -66,6 +66,13 @@ class V230DurableStageOrchestratorTests(unittest.TestCase):
         result, output = self._run(_v230(song=0))
         self.assertTrue(output.exists())
         Path(result["_internal"]["stage_artifact_path"]).unlink()
+
+    def test_v238_validation_error_reports_the_active_plan(self):
+        with self.assertRaises(PipelineStageValidationError) as raised:
+            self._run(_v230(song=1, translated=0), plan_id="v2_3_8")
+
+        self.assertEqual(raised.exception.details["plan_id"], "v2_3_8")
+        self.assertEqual(raised.exception.details["stage_id"], "KARAOKE_AUGMENTATION_V230")
 
 
 if __name__ == "__main__":

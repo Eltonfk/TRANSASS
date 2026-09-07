@@ -1625,7 +1625,9 @@ def _run_episode_v238(job: dict) -> None:
     # um Ollama por conta própria: quando o primário é DeepSeek (ou outro
     # provider hospedado), a abertura/encerramento deve passar pelo mesmo
     # provider durável e pela mesma política de transporte.
-    def translate_karaoke(text: str, context_before: str, context_after: str) -> str:
+    def _call_karaoke_provider(
+        text: str, context_before: str, context_after: str, *, attempt: int
+    ) -> str:
         active_provider = ctx.get("response_provider")
         if active_provider is None or not callable(getattr(active_provider, "translate", None)):
             raise RuntimeError("V238_KARAOKE_PROVIDER_REQUIRED")
@@ -1635,6 +1637,7 @@ def _run_episode_v238(job: dict) -> None:
             "context_before": context_before,
             "context_after": context_after,
             "model": ctx.get("model") or ctx.get("model_override"),
+            "attempt": attempt,
         }
         # O callback permanece válido durante uma reexecução com fallback:
         # ele lê ctx["response_provider"] a cada chamada, em vez de capturar
@@ -1646,6 +1649,7 @@ def _run_episode_v238(job: dict) -> None:
                 "context_before": context_before,
                 "context_after": context_after,
                 "operation_id": ctx.get("operation_id"),
+                "attempt": attempt,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1657,6 +1661,16 @@ def _run_episode_v238(job: dict) -> None:
             raise RuntimeError("V238_KARAOKE_TRANSLATION_EMPTY")
         return value.strip()
 
+    def translate_karaoke(text: str, context_before: str, context_after: str) -> str:
+        return _call_karaoke_provider(text, context_before, context_after, attempt=1)
+
+    def retry_karaoke(text: str, context_before: str, context_after: str) -> str:
+        return _call_karaoke_provider(text, context_before, context_after, attempt=2)
+
+    # V230 invokes this optional hook only after a source-copy or structural
+    # rejection. It remains on the same selected provider and never becomes
+    # an implicit Ollama fallback.
+    translate_karaoke.retry = retry_karaoke
     ctx["karaoke_translator"] = translate_karaoke
     # O pipeline V2.3.8 roda in-process; fornece uma consulta cooperativa para
     # parar antes da próxima chamada/retry sem matar o processo do servidor.

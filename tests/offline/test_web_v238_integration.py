@@ -141,6 +141,24 @@ def test_c2_projects_karaoke_request_with_context_and_target_delimiters():
     assert "<CONTEXTO_POSTERIOR>linha posterior</CONTEXTO_POSTERIOR>" in content
 
 
+def test_c2_karaoke_retry_prompt_rejects_source_copy_and_model_structure():
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "deepseek", "model": "deepseek-chat"}},
+        mode="TEST_FAKE",
+        capture_root=Path("/tmp/captures"),
+    )
+    chat = provider._project_request({
+        "operation": "v230_karaoke_translation",
+        "text": "Moonlight signpost",
+        "attempt": 2,
+    })
+    system = chat["messages"][0]["content"]
+
+    assert "nunca repita literalmente a linha inglesa" in system
+    assert "Não inclua tags ASS" in system
+    assert "A tentativa anterior repetiu a fonte" in system
+
+
 def test_c2_deepseek_karaoke_uses_selected_network_endpoint(monkeypatch, tmp_path):
     calls = []
 

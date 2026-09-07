@@ -170,10 +170,12 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 "think": False,
                 "keep_alive": ollama_keep_alive(),
             }
-        # Prompt de tradução explícito para pt-BR, incluindo contexto de anime
-        # e instrução para NÃO preservar letras de música em inglês (OP/ED English).
+        # Prompt de tradução explícito para pt-BR, incluindo contexto de anime.
+        # Karaoke tem contrato próprio: o programa é a autoridade pela
+        # estrutura ASS, enquanto o modelo fornece somente a tradução lexical.
+        is_karaoke = payload.get("operation") == "v230_karaoke_translation"
         user_content = text
-        if payload.get("operation") == "v230_karaoke_translation":
+        if is_karaoke:
             # A abertura/encerramento passa pelo provider selecionado, mas
             # mantém o contexto da unidade separado do alvo para que o modelo
             # traduza somente a linha canônica.
@@ -185,18 +187,33 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 f"<ALVO>{text}</ALVO>\n"
                 f"<CONTEXTO_POSTERIOR>{payload.get('context_after') or ''}</CONTEXTO_POSTERIOR>"
             )
+        system_content = (
+            "Você é um tradutor profissional de legendas de anime para português do Brasil (pt-BR). "
+            "Traduza o texto fornecido mantendo o sentido natural e adequado para legendas. "
+            "NÃO preserve trechos em inglês que sejam traduções de abertura/encerramento (OP/ED English) — "
+            "esses devem ser traduzidos para pt-BR. "
+            "Mantenha tags ASS e quebras de linha intactas no texto traduzido. "
+            "Retorne APENAS o texto traduzido, sem explicações, sem formatação JSON, sem comentários."
+        )
+        if is_karaoke:
+            system_content = (
+                "Você traduz letras de abertura e encerramento de anime do inglês para português do Brasil (pt-BR). "
+                "É obrigatório produzir uma tradução natural; nunca repita literalmente a linha inglesa. "
+                "Traduza também frases curtas, interjeições e palavras isoladas quando forem conteúdo da letra. "
+                "Não inclua tags ASS, quebras de linha, aspas, explicações ou o texto original: "
+                "a estrutura ASS será reinstalada pelo programa. "
+                "Retorne somente a tradução da linha-alvo."
+            )
+            if int(payload.get("attempt", 1) or 1) > 1:
+                system_content += (
+                    " A tentativa anterior repetiu a fonte ou violou a estrutura; "
+                    "gere agora outra tradução em pt-BR."
+                )
         return {
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "Você é um tradutor profissional de legendas de anime para português do Brasil (pt-BR). "
-                        "Traduza o texto fornecido mantendo o sentido natural e adequado para legendas. "
-                        "NÃO preserve trechos em inglês que sejam traduções de abertura/encerramento (OP/ED English) — "
-                        "esses devem ser traduzidos para pt-BR. "
-                        "Mantenha tags ASS ({\\...}) e quebras de linha (\\N) intactas no texto traduzido. "
-                        "Retorne APENAS o texto traduzido, sem explicações, sem formatação JSON, sem comentários."
-                    ),
+                    "content": system_content,
                 },
                 {"role": "user", "content": user_content},
             ],
