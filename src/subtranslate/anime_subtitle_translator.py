@@ -152,6 +152,98 @@ ENGLISH_RESIDUAL_WORDS = frozenset({
     "were", "what", "when", "where", "which", "who", "why", "will", "with", "without",
     "wait", "would", "you", "your",
 })
+# Content preflight is intentionally dependency-free.  Some releases carry a
+# wrong Matroska language tag (for example ``jpn`` on an English dialogue
+# track), so metadata alone cannot be the final authority.  These markers are
+# conservative: short/common words shared with Portuguese or romaji are
+# omitted and the detector requires both a minimum sample and a meaningful
+# signal ratio before it can override metadata.
+CONTENT_SAMPLE_MAX_CHARS = 12000
+CONTENT_WORD_PATTERN = re.compile(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)*", re.UNICODE)
+ENGLISH_CONTENT_MARKERS = frozenset(
+    (
+        set(ENGLISH_RESIDUAL_WORDS)
+        | {
+            "ah", "huh", "shooting", "star", "wish", "three", "times",
+            "superstition", "japan", "japanese", "disappear", "disappears",
+            "someone", "something", "maybe", "thanks", "thank", "sorry",
+            "looks", "because", "couldn't", "doesn't", "wouldn't", "shouldn't",
+            "yeah", "gonna", "gotta",
+        }
+    )
+    - {
+        "a", "an", "as", "at", "be", "can", "do", "for", "from", "in",
+        "me", "of", "on", "or", "so", "to", "we",
+    }
+)
+# The English case is the important one for the current media set.  The
+# script-based entries make the same helper safe for the non-Latin configured
+# languages without adding a third-party language-detection dependency.
+CONTENT_SCRIPT_PATTERNS = {
+    "japonês": re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]"),
+    "coreano": re.compile(r"[\uac00-\ud7af]"),
+    "chinês": re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]"),
+    "russo": re.compile(r"[\u0400-\u04ff]"),
+}
+
+
+def _canonical_source_language(source_language: str | None) -> str:
+    """Normalize a display name or common track code to our display key."""
+    raw = str(source_language or SOURCE_LANGUAGE or "inglês").strip().casefold()
+    for display_name, codes in SOURCE_LANGUAGE_CODES.items():
+        if raw == display_name or raw in {str(code).casefold() for code in codes}:
+            return display_name
+    return raw or "inglês"
+
+
+def _content_language_evidence(text: str, source_language: str | None = None) -> dict:
+    """Return conservative evidence that a subtitle sample matches its source.
+
+    This is a routing signal, not a full NLP classifier.  It exists to catch a
+    mislabeled embedded track before extraction; a weak/short sample never
+    overrides an explicit metadata match.
+    """
+    cleaned = re.sub(r"\{[^}]*\}|<[^>]*>", " ", str(text or ""))
+    cleaned = cleaned.replace(r"\N", " ").replace("’", "'")
+    words = [word.casefold() for word in CONTENT_WORD_PATTERN.findall(cleaned)]
+    language = _canonical_source_language(source_language)
+
+    if language == "inglês":
+        marker_hits = sum(word in ENGLISH_CONTENT_MARKERS for word in words)
+        marker_ratio = marker_hits / max(1, len(words))
+        strong = len(words) >= 8 and marker_hits >= 3 and marker_ratio >= 0.05
+        return {
+            "language": language,
+            "word_count": len(words),
+            "marker_hits": marker_hits,
+            "marker_ratio": marker_ratio,
+            "script_hits": 0,
+            "strong": strong,
+        }
+
+    script_pattern = CONTENT_SCRIPT_PATTERNS.get(language)
+    if script_pattern is not None:
+        script_hits = len(script_pattern.findall(cleaned))
+        letter_count = len(re.findall(r"[^\W\d_]", cleaned, re.UNICODE))
+        marker_ratio = script_hits / max(1, letter_count)
+        strong = script_hits >= 3 and marker_ratio >= 0.10
+        return {
+            "language": language,
+            "word_count": len(words),
+            "marker_hits": script_hits,
+            "marker_ratio": marker_ratio,
+            "script_hits": script_hits,
+            "strong": strong,
+        }
+
+    return {
+        "language": language,
+        "word_count": len(words),
+        "marker_hits": 0,
+        "marker_ratio": 0.0,
+        "script_hits": 0,
+        "strong": False,
+    }
 
 
 class TranslationIncompleteError(RuntimeError):
@@ -670,52 +762,97 @@ def find_subtitle_stream(video_path: Path, source_language: str | None = None):
 
     # Metadata alone cannot distinguish two tracks both labelled "English"
     # when one is a tiny signs/forced sample and the other contains the full
-    # dialogue.  For real video files, inspect candidates from the best
-    # language tier before committing to extraction.  Tests and callers that
-    # only provide an ffprobe payload keep the deterministic metadata path.
-    content_stats = {}
+    # dialogue.  It also cannot handle a bad muxer tag (for example ``jpn`` on
+    # an English full-dialogue track).  For real video files, inspect every
+    # non-sign dialogue candidate whenever the metadata winner is ambiguous or
+    # unsafe.  Tests and callers that only provide an ffprobe payload keep the
+    # deterministic metadata path.
+    content_stats: dict[int, dict] = {}
     best_language_rank = score(best)[0]
-    content_candidates = [stream for stream in supported_streams if score(stream)[0] == best_language_rank]
-    non_sign_candidates = [stream for stream in content_candidates if score(stream)[1] == 0]
-    if not non_sign_candidates:
+    metadata_candidates = [
+        stream for stream in supported_streams
+        if score(stream)[0] == best_language_rank and score(stream)[1] == 0
+    ]
+    # Keep the explicit protection for tracks named Signs, Songs, Lyrics or
+    # Forced.  Content analysis resolves ambiguity among dialogue candidates;
+    # it must not let a large signs-only track win merely because it contains
+    # many visual-text cards.
+    dialogue_candidates = [stream for stream in supported_streams if score(stream)[1] == 0]
+    content_matches = []
+    should_probe_content = bool(
+        video_path.is_file()
+        and dialogue_candidates
+        and (len(dialogue_candidates) > 1 or not metadata_candidates)
+    )
+    if should_probe_content:
+        for stream in dialogue_candidates:
+            stats = _subtitle_stream_content_stats(video_path, stream)
+            if stats is None:
+                continue
+            stats["content_language"] = _content_language_evidence(
+                stats.get("sample_text", ""), configured_language,
+            )
+            content_stats[stream["index"]] = stats
+        content_matches = [
+            stream for stream in dialogue_candidates
+            if content_stats.get(stream["index"], {}).get("content_language", {}).get("strong")
+        ]
+
+    def content_score(stream):
+        stats = content_stats.get(stream["index"], {})
+        evidence = stats.get("content_language", {})
+        # Dialogue size dominates among tracks that have passed the language
+        # signal.  Metadata match and default flag remain deterministic tie
+        # breakers, not authorities over the actual sampled text.
+        return (
+            int(bool(evidence.get("strong"))),
+            stats.get("dialogue_events", -1),
+            stats.get("dialogue_chars", -1),
+            stats.get("non_empty_events", -1),
+            stats.get("coverage_ms", -1),
+            evidence.get("marker_hits", -1),
+            int(_source_lang_matches(
+                (stream.get("tags", {}) or {}).get("language", ""),
+                configured_language,
+            )),
+            -score(stream)[1],
+            -score(stream)[2],
+            -stream.get("index", 0),
+        )
+
+    selected_by_content = False
+    if content_matches:
+        previous_index = best.get("index")
+        best = max(content_matches, key=content_score)
+        selected_by_content = best.get("index") != previous_index
+        if selected_by_content:
+            detected = content_stats[best["index"]]["content_language"]
+            print(
+                f"   Verificação de conteúdo: faixa {best['index']} foi detectada como "
+                f"'{detected['language']}' apesar do rótulo "
+                f"'{(best.get('tags', {}) or {}).get('language', 'und')}'."
+            )
+    elif metadata_candidates:
+        # If sampling was possible but no candidate reached the conservative
+        # language threshold, retain the established metadata choice.  This
+        # avoids rejecting short/atypical dialogue while still failing closed
+        # when the configured language exists only as Signs/Forced.
+        if content_stats:
+            best = max(metadata_candidates, key=content_score)
+        else:
+            best = metadata_candidates[0]
+    else:
         # A configured language may exist only as a Titles/Signs or Forced
         # companion track while the real dialogue is labelled in another
-        # language (for example ``eng Titles/Signs`` + ``jpn Full``).  Do not
-        # silently translate the short companion and call the episode
-        # complete.  The operator must choose the actual source language.
+        # language (for example ``eng Titles/Signs`` + ``jpn Full``).  Only a
+        # strong content match may authorize that cross-label selection.
         title = best.get("tags", {}).get("title", "(sem título)")
         print(
             f"   Nenhuma faixa de diálogo segura para a origem configurada "
             f"'{configured_language}'; faixa disponível '{title}' é apenas "
-            "Signs/Songs ou Forced."
+            "Signs/Songs ou Forced, ou não confirmou o idioma pelo conteúdo."
         )
         return None
-    # Keep the existing explicit protection for tracks named Signs, Songs,
-    # Lyrics or Forced.  Content analysis resolves ambiguity among dialogue
-    # candidates; it must not let a large signs-only track win merely because
-    # it contains many visual-text cards.
-    content_candidates = non_sign_candidates
-    if video_path.is_file() and len(content_candidates) > 1:
-        for stream in content_candidates:
-            stats = _subtitle_stream_content_stats(video_path, stream)
-            if stats is not None:
-                content_stats[stream["index"]] = stats
-        if content_stats:
-            def content_score(stream):
-                stats = content_stats.get(stream["index"])
-                if stats is None:
-                    return (-1, -1, -1, -1, -1, -score(stream)[1], -score(stream)[2], -stream.get("index", 0))
-                # Dialogue events and visible text dominate.  Coverage and
-                # metadata only break close ties, so a larger full-dialogue
-                # track wins over a nearly empty companion track.
-                return (
-                    stats["dialogue_events"], stats["dialogue_chars"],
-                    stats["non_empty_events"], stats["coverage_ms"],
-                    -score(stream)[1], score(stream)[2] * -1,
-                    -stream.get("index", 0),
-                )
-
-            best = max(content_candidates, key=content_score)
 
     title = best.get("tags", {}).get("title", "(sem título)")
     lang = best.get("tags", {}).get("language", "und")
@@ -770,6 +907,8 @@ def _subtitle_stream_content_stats(video_path: Path, stream: dict) -> dict | Non
             dialogue_chars = 0
             first_start = None
             last_end = None
+            sample_parts = []
+            sample_chars = 0
             for line in subtitles:
                 raw_text = str(getattr(line, "text", "") or "")
                 visible = re.sub(r"\{[^}]*\}", "", raw_text)
@@ -786,12 +925,18 @@ def _subtitle_stream_content_stats(video_path: Path, stream: dict) -> dict | Non
                     continue
                 dialogue_events += 1
                 dialogue_chars += len(visible)
+                if sample_chars < CONTENT_SAMPLE_MAX_CHARS:
+                    remaining = CONTENT_SAMPLE_MAX_CHARS - sample_chars
+                    sample = visible[:remaining]
+                    sample_parts.append(sample)
+                    sample_chars += len(sample)
             coverage_ms = max(0, (last_end or 0) - (first_start or 0))
             return {
                 "dialogue_events": dialogue_events,
                 "dialogue_chars": dialogue_chars,
                 "non_empty_events": non_empty_events,
                 "coverage_ms": coverage_ms,
+                "sample_text": " ".join(sample_parts),
             }
     except Exception as exc:
         print(f"   Pré-análise da faixa {stream.get('index', '?')} indisponível: {exc}")

@@ -104,6 +104,29 @@ def test_select_track_for_language_refreshes_media_and_picks_content_choice(tmp_
     assert reason is None
 
 
+def test_select_track_for_language_accepts_content_match_with_wrong_metadata(tmp_path, monkeypatch):
+    """The web resolver must follow the media preflight across a bad language tag."""
+    video = tmp_path / "ep01.mkv"
+    video.write_bytes(b"video")
+    tracks = [
+        _track("eng", title="Titles/Signs", index=3, default=True),
+        _track("jpn", title="Full", index=4),
+    ]
+
+    import anime_subtitle_translator as translator
+
+    monkeypatch.setattr(
+        translator,
+        "find_subtitle_stream",
+        lambda path, source_language=None: (4, "jpn", ".ass"),
+    )
+    selected, reason, _ = _select_track_for_language(
+        tracks, "inglês", video_path=video,
+    )
+    assert selected is not None and selected["index"] == 4
+    assert reason is None
+
+
 def test_resolve_episode_source_refresh_bypasses_archived_parent(tmp_path, monkeypatch):
     """A fresh retranslation source comes from the current MKV, not old lineage."""
     video = tmp_path / "ep01.mkv"

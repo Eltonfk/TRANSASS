@@ -258,6 +258,62 @@ def test_track_selection_rejects_signs_only_configured_language(monkeypatch, tmp
     assert at.find_subtitle_stream(tmp_path / "ep01.mkv") is None
 
 
+def test_content_language_evidence_recognizes_english_text_with_wrong_label():
+    evidence = at._content_language_evidence(
+        "Ah, a shooting star! Huh? Where? That's a superstition they have in Japan.",
+        "inglês",
+    )
+    assert evidence["language"] == "inglês"
+    assert evidence["strong"] is True
+    assert evidence["marker_hits"] >= 3
+
+
+def test_track_selection_overrides_wrong_japanese_label_when_content_is_english(monkeypatch, tmp_path):
+    """A jpn-labelled Full track must win over eng Titles/Signs when its text is English."""
+    video = tmp_path / "ep01.mkv"
+    video.write_bytes(b"placeholder")
+    streams = [
+        _stream(3, "Titles/Signs", default=1),
+        _stream(4, "Full"),
+    ]
+    streams[0]["tags"]["language"] = "eng"
+    streams[1]["tags"]["language"] = "jpn"
+
+    header = (
+        "[Script Info]\nScriptType: v4.00+\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+        "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    def run(command, *args, **kwargs):
+        if command[0] == "ffprobe":
+            return _ffprobe_result(streams)
+        stream_index = int(command[command.index("-map") + 1].split(":", 1)[1])
+        output = Path(command[-1])
+        if stream_index == 3:
+            output.write_text(header, encoding="utf-8")
+        else:
+            output.write_text(
+                header
+                + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Ah, a shooting star!\n"
+                + "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Huh? Where? Where?\n"
+                + "Dialogue: 0,0:00:05.00,0:00:07.00,Default,,0,0,0,,That's a superstition they have in Japan.\n"
+                + "Dialogue: 0,0:00:08.00,0:00:10.00,Default,,0,0,0,,Don't worry, everything will be fine.\n",
+                encoding="utf-8",
+            )
+        return _ffprobe_result([])
+
+    monkeypatch.setattr(at, "SOURCE_LANGUAGE", "inglês")
+    monkeypatch.setattr(at.subprocess, "run", run)
+
+    idx, lang, ext = at.find_subtitle_stream(video)
+
+    assert (idx, lang, ext) == (4, "jpn", ".ass")
+
+
 def test_track_selection_tiebreaks_by_default_flag(monkeypatch, tmp_path):
     """Two untitled same-language tracks: the default-flagged one wins."""
     streams = [_stream(5, ""), _stream(6, "", default=1)]

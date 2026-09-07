@@ -588,14 +588,26 @@ def _select_track_for_language(
     # previously archived (and possibly wrong) embedded track.  The helper is
     # imported lazily so read-only metadata tests and installations without the
     # translation runner keep the deterministic metadata path.
-    if video_path is not None and video_path.is_file() and len(dialogue) > 1:
+    # The embedded metadata can be wrong: a release may label an English
+    # full-dialogue track as ``jpn`` while its English Signs companion is the
+    # only explicit ``eng`` match.  Ask the media preflight whenever the
+    # actual video is available, then look up the selected index among every
+    # textual non-sign track rather than only metadata matches.
+    if video_path is not None and video_path.is_file():
         try:
             from anime_subtitle_translator import find_subtitle_stream
 
             selected = find_subtitle_stream(video_path, source_language=source_language)
             selected_index = int(selected[0]) if selected is not None else None
             if selected_index is not None:
-                chosen = next((item for item in dialogue if int(item.get("index")) == selected_index), None)
+                all_dialogue = [
+                    track for track in tracks
+                    if track.get("textual") and not _track_is_signs_or_songs(track)
+                ]
+                chosen = next(
+                    (item for item in all_dialogue if int(item.get("index")) == selected_index),
+                    None,
+                )
                 if chosen is not None:
                     return chosen, None, bitmap
         except (OSError, TypeError, ValueError, ImportError):
