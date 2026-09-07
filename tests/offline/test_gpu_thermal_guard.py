@@ -70,9 +70,58 @@ def test_guard_trips_at_conservative_threshold_without_pipeline_call():
 
     guard._evaluate(snapshot)
 
-    assert guard.tripped is True
+    assert guard.tripped is False
     assert warnings == []
+    guard._evaluate(snapshot)
+
+    assert guard.tripped is True
     assert trips == [snapshot]
+
+
+def test_guard_trips_immediately_when_matching_hardware_limit_is_breached():
+    trips = []
+    snapshot = ThermalSnapshot(
+        available=True,
+        temperatures_c={"junction": 111.0, "mem": 64.0},
+        critical_c={"junction": 110.0, "mem": 105.0},
+        emergency_c={"junction": 115.0, "mem": 110.0},
+    )
+    guard = GpuThermalGuard(
+        config=ThermalGuardConfig(trip_confirmations=3),
+        reader=lambda: snapshot,
+        on_warning=lambda value, config: None,
+        on_trip=lambda value, config: trips.append(value),
+    )
+
+    guard._evaluate(snapshot)
+
+    assert guard.tripped is True
+    assert trips == [snapshot]
+
+
+def test_guard_resets_soft_trip_confirmation_after_temperature_falls():
+    trips = []
+    hot = ThermalSnapshot(available=True, temperatures_c={"junction": 101.0})
+    cool = ThermalSnapshot(available=True, temperatures_c={"junction": 95.0})
+    guard = GpuThermalGuard(
+        config=ThermalGuardConfig(trip_confirmations=2),
+        reader=lambda: hot,
+        on_warning=lambda value, config: None,
+        on_trip=lambda value, config: trips.append(value),
+    )
+
+    guard._evaluate(hot)
+    guard._evaluate(cool)
+    guard._evaluate(hot)
+
+    assert guard.tripped is False
+    assert trips == []
+
+
+def test_config_reads_thermal_trip_confirmations_from_environment():
+    config = ThermalGuardConfig.from_environment({"TRANSASS_GPU_THERMAL_CONFIRMATIONS": "3"})
+
+    assert config.trip_confirmations == 3
 
 
 def test_guard_warning_precedes_trip():
@@ -90,4 +139,3 @@ def test_guard_warning_precedes_trip():
     assert guard.tripped is False
     assert warnings == [warning]
     assert trips == []
-

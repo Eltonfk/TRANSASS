@@ -19,11 +19,20 @@ from typing import Callable, Mapping
 DEFAULT_WARNING_C = 90.0
 DEFAULT_STOP_C = 100.0
 DEFAULT_INTERVAL_S = 2.0
+DEFAULT_TRIP_CONFIRMATIONS = 2
 
 
 def _float_env(environ: Mapping[str, str], name: str, default: float, *, minimum: float) -> float:
     try:
         value = float(environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _int_env(environ: Mapping[str, str], name: str, default: int, *, minimum: int) -> int:
+    try:
+        value = int(environ.get(name, str(default)))
     except (TypeError, ValueError):
         value = default
     return max(minimum, value)
@@ -42,6 +51,7 @@ class ThermalGuardConfig:
     warning_c: float = DEFAULT_WARNING_C
     stop_c: float = DEFAULT_STOP_C
     interval_s: float = DEFAULT_INTERVAL_S
+    trip_confirmations: int = DEFAULT_TRIP_CONFIRMATIONS
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "ThermalGuardConfig":
@@ -55,6 +65,12 @@ class ThermalGuardConfig:
             warning_c=warning,
             stop_c=stop,
             interval_s=_float_env(env, "TRANSASS_GPU_THERMAL_INTERVAL_S", DEFAULT_INTERVAL_S, minimum=0.25),
+            trip_confirmations=_int_env(
+                env,
+                "TRANSASS_GPU_THERMAL_CONFIRMATIONS",
+                DEFAULT_TRIP_CONFIRMATIONS,
+                minimum=1,
+            ),
         )
 
 
@@ -86,6 +102,23 @@ class ThermalSnapshot:
         limits = [*self.critical_c.values(), *self.emergency_c.values()]
         return min(limits) if limits else None
 
+    def hardware_breach(self) -> tuple[str, float, float, str] | None:
+        """Return a per-sensor hardware breach without mixing sensor limits.
+
+        The previous global ``hardware_limit_c`` value is useful for selecting
+        a conservative software threshold, but it must not be compared with a
+        different sensor's temperature.  A memory critical limit, for example,
+        cannot be treated as the junction critical limit.
+        """
+        for sensor, temperature in self.temperatures_c.items():
+            emergency = self.emergency_c.get(sensor)
+            if emergency is not None and temperature >= emergency:
+                return sensor, temperature, emergency, "emergency"
+            critical = self.critical_c.get(sensor)
+            if critical is not None and temperature >= critical:
+                return sensor, temperature, critical, "critical"
+        return None
+
     def effective_stop_c(self, configured_stop_c: float) -> float:
         """Stay below the first hardware critical/emergency threshold."""
         limit = self.hardware_limit_c
@@ -107,6 +140,16 @@ class ThermalSnapshot:
             "fan_rpm": self.fan_rpm,
             "power_w": self.power_w,
             "effective_stop_c": self.effective_stop_c(configured) if self.available else configured,
+            "hardware_breach": (
+                {
+                    "sensor": breach[0],
+                    "temperature_c": breach[1],
+                    "limit_c": breach[2],
+                    "limit_type": breach[3],
+                }
+                if (breach := self.hardware_breach()) is not None
+                else None
+            ),
             "error": self.error,
         }
 
@@ -189,20 +232,26 @@ class GpuThermalGuard:
         self.latest: ThermalSnapshot | None = None
         self.tripped = False
         self.warning_sent = False
+        self.consecutive_over_stop = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def _evaluate(self, snapshot: ThermalSnapshot) -> None:
         self.latest = snapshot
         if not snapshot.available or snapshot.hottest_c is None:
+            self.consecutive_over_stop = 0
             return
         stop_c = snapshot.effective_stop_c(self.config.stop_c)
         warning_c = min(self.config.warning_c, max(1.0, stop_c - 5.0))
         if snapshot.hottest_c >= stop_c:
-            if not self.tripped:
+            self.consecutive_over_stop += 1
+            hardware_breach = snapshot.hardware_breach()
+            confirmed = self.consecutive_over_stop >= self.config.trip_confirmations
+            if not self.tripped and (hardware_breach is not None or confirmed):
                 self.tripped = True
                 self.on_trip(snapshot, self.config)
             return
+        self.consecutive_over_stop = 0
         if snapshot.hottest_c >= warning_c and not self.warning_sent:
             self.warning_sent = True
             self.on_warning(snapshot, self.config)
@@ -232,4 +281,3 @@ class GpuThermalGuard:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=max(1.0, self.config.interval_s + 0.5))
-

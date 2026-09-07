@@ -138,7 +138,13 @@ TRANSASS_GPU_THERMAL_GUARD=1
 TRANSASS_GPU_THERMAL_WARN_C=90
 TRANSASS_GPU_THERMAL_STOP_C=100
 TRANSASS_GPU_THERMAL_INTERVAL_S=2
+# Leituras consecutivas acima do limite preventivo; padrão: 2.
+TRANSASS_GPU_THERMAL_CONFIRMATIONS=2
 ```
+
+O limite preventivo exige duas leituras consecutivas por padrão para evitar
+que um pico isolado interrompa o episódio. Se uma leitura ultrapassar o limite
+crítico/emergencial informado pelo próprio sensor, a parada continua imediata.
 
 Depois de uma parada térmica, aguarde a GPU esfriar e inicie uma nova fila.
 Também é recomendável manter o driver, ventilação e curva de fan em boas

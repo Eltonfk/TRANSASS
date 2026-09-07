@@ -1037,6 +1037,9 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
         with state_lock:
             info = snapshot.as_dict(config)
             info["status"] = status
+            info["warning_c"] = config.warning_c
+            info["stop_c"] = config.stop_c
+            info["trip_confirmations"] = config.trip_confirmations
             if error:
                 info["error"] = error
             job["thermal_guard"] = info
@@ -1092,17 +1095,30 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             _persist_locked()
     elif active:
         with state_lock:
+            initial_reading = (
+                f"{snapshot.hottest_sensor or 'sensor'}={snapshot.hottest_c:.1f}°C"
+                if snapshot is not None and snapshot.hottest_c is not None
+                else "indisponível"
+            )
+            effective_stop = (
+                snapshot.effective_stop_c(config.stop_c)
+                if snapshot is not None
+                else config.stop_c
+            )
             job["thermal_guard"] = {
                 **(snapshot.as_dict(config) if snapshot else {}),
                 "status": "MONITORING",
                 "warning_c": config.warning_c,
                 "stop_c": config.stop_c,
                 "interval_s": config.interval_s,
+                "trip_confirmations": config.trip_confirmations,
             }
             state["thermal_guard"] = job["thermal_guard"]
             _append_log(
                 f"Proteção térmica GPU ativa: alerta={config.warning_c:.0f}°C, "
-                f"parada={config.stop_c:.0f}°C",
+                f"parada={config.stop_c:.0f}°C, limite efetivo={effective_stop:.1f}°C, "
+                f"leitura inicial={initial_reading}, "
+                f"confirmação={config.trip_confirmations} leitura(s)",
                 level="summary",
                 job_id=job.get("id"),
             )
