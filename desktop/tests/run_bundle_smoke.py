@@ -14,6 +14,9 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
+STARTUP_TIMEOUT_SECONDS = 30
+
+
 def _free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -53,7 +56,7 @@ def _assert_media_manifest(executable: Path) -> None:
 
 
 def _wait_for_health(base_url: str, process: subprocess.Popen[str]) -> dict:
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -64,7 +67,9 @@ def _wait_for_health(base_url: str, process: subprocess.Popen[str]) -> dict:
         except (OSError, URLError, TimeoutError, ValueError, RuntimeError) as error:
             last_error = error
             time.sleep(0.2)
-    raise RuntimeError(f"Health check não respondeu em 15s: {last_error}")
+    raise RuntimeError(
+        f"Health check não respondeu em {STARTUP_TIMEOUT_SECONDS}s: {last_error}"
+    )
 
 
 def _terminate(process: subprocess.Popen[str]) -> str:

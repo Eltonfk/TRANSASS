@@ -13,6 +13,7 @@ from media_tools import MediaToolsError, resolve_media_tools, write_manifest
 _REQUIRED_BUILD_MODULES = {
     "PyInstaller": "PyInstaller",
     "PySide6": "PySide6",
+    "QtWebEngine": "PySide6.QtWebEngineWidgets",
     "keyring": "keyring",
     "Flask": "flask",
     "Werkzeug": "werkzeug",
@@ -90,6 +91,8 @@ def main() -> int:
     for module in sorted((root / "src/subtranslate").glob("*.py")):
         if module.name != "__init__.py":
             args_list.extend(["--hidden-import", module.stem])
+    for module in ("PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore"):
+        args_list.extend(["--hidden-import", module])
     args_list.append(str(root / "desktop/packaging/launcher_entry.py"))
     from PyInstaller.__main__ import run
 

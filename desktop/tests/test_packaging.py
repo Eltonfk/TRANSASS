@@ -79,6 +79,10 @@ def test_desktop_launcher_exposes_menu_visibility_and_help_links():
     assert 'https://docs.ollama.com/quickstart' in launcher
     assert 'https://ollama.com/library/qwen3.5' in launcher
     assert 'https://github.com/Eltonfk/TRANSASS' in launcher
+    assert "QWebEngineView" in launcher
+    assert "web_view.loadFinished.connect(handle_page_loaded)" in launcher
+    assert "web_view.setUrl(QUrl(url))" in launcher
+    assert 'webbrowser.open(url, new=2)' not in launcher
     assert 'interface/menu_bar_visible' in launcher
     assert 'QMenuBar {' in launcher
     assert 'background: #0e1722' in launcher
@@ -117,6 +121,8 @@ def test_bundle_checks_runtime_dependencies_before_pyinstaller():
     builder = (ROOT / "desktop/packaging/build_bundle.py").read_text(encoding="utf-8")
     assert "missing_build_dependencies" in builder
     assert '"Werkzeug": "werkzeug"' in builder
+    assert '"QtWebEngine": "PySide6.QtWebEngineWidgets"' in builder
+    assert '"PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore"' in builder
     assert 'requirements.lock e desktop/packaging/requirements-desktop.txt' in builder
 
 

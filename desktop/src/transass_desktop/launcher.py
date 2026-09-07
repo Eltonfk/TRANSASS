@@ -31,6 +31,7 @@ def main() -> int:
     try:
         from PySide6.QtCore import QSettings, QUrl, Qt
         from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence
+        from PySide6.QtWebEngineWidgets import QWebEngineView
         from PySide6.QtWidgets import (
             QApplication,
             QDialog,
@@ -41,10 +42,12 @@ def main() -> int:
             QMessageBox,
             QPushButton,
             QVBoxLayout,
-            QWidget,
         )
     except ImportError as error:
-        print("Dependência Desktop ausente: instale PySide6 para executar o Transass.", file=sys.stderr)
+        print(
+            "Dependência Desktop ausente: instale PySide6 com QtWebEngine para executar o Transass.",
+            file=sys.stderr,
+        )
         print(f"Detalhe: {error}", file=sys.stderr)
         return 2
 
@@ -152,43 +155,27 @@ def main() -> int:
     window.setWindowTitle("Transass")
     if app_icon is not None:
         window.setWindowIcon(QIcon(str(app_icon)))
-    window.resize(600, 400)
-    
-    central = QWidget()
-    layout = QVBoxLayout(central)
-    layout.setAlignment(Qt.AlignCenter)
-    
-    title = QLabel("Transass")
-    title.setStyleSheet("font-size: 28px; font-weight: 700; color: #f4f8fc;")
-    
-    status = QLabel(f"Servidor local rodando em {url}")
-    status.setStyleSheet("color: #84b8ff; font-size: 14px; margin-bottom: 24px;")
-    
-    btn_open = QPushButton("Abrir no Navegador")
-    btn_open.setCursor(Qt.PointingHandCursor)
-    btn_open.setStyleSheet(
-        """
-        QPushButton {
-            background: #247fdd;
-            color: white;
-            border-radius: 8px;
-            padding: 12px 24px;
-            font-size: 14px;
-            font-weight: bold;
-            border: none;
-        }
-        QPushButton:hover {
-            background: #559bff;
-        }
-        """
-    )
-    btn_open.clicked.connect(lambda: webbrowser.open(url, new=2))
-    
-    layout.addWidget(title, 0, Qt.AlignCenter)
-    layout.addWidget(status, 0, Qt.AlignCenter)
-    layout.addWidget(btn_open, 0, Qt.AlignCenter)
-    
-    window.setCentralWidget(central)
+    window.resize(1280, 820)
+    window.setMinimumSize(980, 620)
+
+    # Keep the web interface inside the Desktop window. The local Flask
+    # server remains the application backend, but startup must not delegate
+    # the user experience to an external browser.
+    web_view = QWebEngineView(window)
+    web_view.setObjectName("transassWebView")
+
+    def handle_page_loaded(loaded: bool) -> None:
+        if loaded:
+            window.statusBar().showMessage(f"Transass · interface carregada em {url}")
+        else:
+            window.statusBar().showMessage(
+                "Transass · não foi possível carregar a interface local"
+            )
+
+    web_view.loadFinished.connect(handle_page_loaded)
+    web_view.setUrl(QUrl(url))
+    window.setCentralWidget(web_view)
+    window.statusBar().showMessage(f"Transass · servidor local em {url}")
 
     menu_bar = window.menuBar()
     file_menu = menu_bar.addMenu("Arquivo")
@@ -409,9 +396,6 @@ def main() -> int:
         original_close_event(event)
 
     window.closeEvent = close_event  # type: ignore[method-assign]
-    
-    # Auto-open browser on startup
-    webbrowser.open(url, new=2)
     
     window.show()
     result = application.exec()

@@ -59,3 +59,10 @@ def test_dynamic_workspace_containers_are_not_overwritten_by_localization_observ
         match = re.search(rf'<[^>]+id="{element_id}"[^>]*>', page)
         assert match, element_id
         assert "data-i18n=" not in match.group(0), element_id
+
+
+def test_status_without_active_job_uses_the_translation_function():
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert ":uiI18n.t('progress.none')" in app
+    assert ":t('progress.none')" not in app

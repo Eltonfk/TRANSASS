@@ -29,8 +29,8 @@ históricos E07 e stress separados. Fase 1 concluída: o núcleo já não depend
 defaults de `/shows`, a configuração e paths são centralizados, os módulos
 entram no Docker allowlist, o projeto gera wheel `2.5.0` e os binários
 empacotados podem ser priorizados pelo `PATH`. Fase 2 concluída: launcher
-launcher PySide6 leve, Flask em `127.0.0.1` com porta validada, bloqueio
-single-instance e diálogo nativo de pasta. Fase 3 concluída: onboarding,
+PySide6 com QtWebEngine incorporado, Flask em `127.0.0.1` com porta validada,
+bloqueio single-instance e diálogo nativo de pasta. Fase 3 concluída: onboarding,
 checagem de provider sem chamada de modelo e mensagens orientadas ao usuário.
 Fase 4 concluída: credenciais usam cofre do sistema quando disponível, estado
 antigo é migrado sem sobrescrita, backups têm manifesto e o diagnóstico é
@@ -57,7 +57,7 @@ pois o Inno Setup não roda neste ambiente Linux.
 - Instalador Windows por usuário (Inno Setup), sem apagar estado ou mídia na
   desinstalação.
 - Workflow CI com matriz Ubuntu/Windows, SBOM CycloneDX e SHA-256.
-- Testes de empacotamento/Desktop: `27 passed`.
+- Testes de empacotamento/Desktop: `31 passed`.
 - Bundle Linux local validado: o executável iniciou o servidor Flask local e
   carregou a interface web; o timeout do teste foi intencional para encerrar a
   janela sem interação.
@@ -69,7 +69,7 @@ Fase 6 em andamento: o checklist beta e o smoke test end-to-end foram criados.
 O smoke cobre caminhos com Unicode/espaços, aliases de Compose, provider
 indisponível, onboarding, diagnóstico e migração repetida. Após a correção do
 renderer ASS, do agrupamento de falas quebradas e da auditoria de
-delimitadores, Desktop tests: `27 passed`; suíte offline: `882 passed`, `38
+delimitadores, Desktop tests: `31 passed`; suíte offline: `882 passed`, `38
 deselected`, `66 subtests`. Ainda falta a evidência
 manual em máquinas limpas (Ubuntu Desktop e Windows), incluindo instalação,
 atualização, interrupção e desinstalação.
@@ -102,13 +102,13 @@ atualização, interrupção e desinstalação.
   completo com hashes SHA-256.
 - Diagnóstico exportado não contém API keys, conteúdo de mídia ou caminhos
   absolutos.
-- O navegador expõe **Baixar diagnóstico** na área Diagnóstico.
+- A interface expõe **Baixar diagnóstico** na área Diagnóstico.
 - Imagem Docker reconstruída e serviço `transass` saudável.
 
 ## Direção técnica
 
 ```text
-launcher PySide6 leve + navegador padrão
+launcher PySide6 + QtWebEngine incorporado
         ↓
 servidor Flask local em 127.0.0.1
         ↓
