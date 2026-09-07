@@ -1047,7 +1047,11 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             _append_log(
                 f"Proteção térmica GPU: {status.lower()} — "
                 f"{snapshot.hottest_sensor or 'sensor'}="
-                f"{snapshot.hottest_c if snapshot.hottest_c is not None else 'indisponível'}°C",
+                f"{snapshot.hottest_c if snapshot.hottest_c is not None else 'indisponível'}°C"
+                + (
+                    f" · resfriamento cooperativo iniciado por até {config.cooling_window_s:.0f}s"
+                    if status == "WARNING" else ""
+                ),
                 level="error" if status == "TRIPPED" else "summary",
                 job_id=job.get("id"),
             )
@@ -1060,20 +1064,23 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
         """Expose live temperature/fan telemetry without persisting every sample."""
         with state_condition:
             info = snapshot.as_dict(guard_config)
-            effective_stop = snapshot.effective_stop_c(guard_config.stop_c) if snapshot.available else guard_config.stop_c
-            observing = snapshot.hottest_c is not None and snapshot.hottest_c >= effective_stop
             previous = job.get("thermal_guard") if isinstance(job.get("thermal_guard"), dict) else {}
+            observing = bool(thermal_guard.cooling_active)
+            status = "TRIPPED" if thermal_guard.tripped else ("COOLING_OBSERVATION" if observing else "MONITORING")
             info.update({
-                "status": "TRIPPED" if thermal_guard.tripped else ("COOLING_OBSERVATION" if observing else "MONITORING"),
+                "status": status,
                 "warning_c": guard_config.warning_c,
                 "stop_c": guard_config.stop_c,
+                "cooling_resume_c": thermal_guard.cooling_resume_c(guard_config),
                 "interval_s": guard_config.interval_s,
                 "trip_confirmations": guard_config.trip_confirmations,
                 "cooling_window_s": guard_config.cooling_window_s,
-                "cooling_elapsed_s": round(thermal_guard.over_stop_elapsed_s, 1),
+                "cooling_elapsed_s": round(thermal_guard.cooling_elapsed_s, 1),
                 "consecutive_over_stop": thermal_guard.consecutive_over_stop,
+                "trip_reason": thermal_guard.trip_reason,
                 "fan_control": "hardware_driver",
             })
+            info["cooling_over_stop_elapsed_s"] = round(thermal_guard.over_stop_elapsed_s, 1)
             if thermal_guard.tripped and previous.get("error"):
                 info["error"] = previous["error"]
             job["thermal_guard"] = info
@@ -1085,9 +1092,16 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             fan = f"ventoinha={snapshot.fan_rpm:.0f} RPM" if snapshot.fan_rpm is not None else "ventoinha=indisponível"
             power = f"potência={snapshot.power_w:.1f} W" if snapshot.power_w is not None else "potência=indisponível"
             window = (
-                f" · janela={thermal_guard.over_stop_elapsed_s:.1f}/{guard_config.cooling_window_s:.0f}s"
+                f" · resfriamento={thermal_guard.cooling_elapsed_s:.1f}/{guard_config.cooling_window_s:.0f}s"
                 if observing else ""
             )
+            if previous.get("status") == "COOLING_OBSERVATION" and status == "MONITORING":
+                _append_log(
+                    f"Proteção térmica GPU: resfriamento concluído — temperatura abaixo de "
+                    f"{thermal_guard.cooling_resume_c(guard_config):.0f}°C; retomando chamadas",
+                    level="summary",
+                    job_id=job.get("id"),
+                )
             _append_log(
                 f"Telemetria GPU: {temperature} · {fan} · {power}{window}",
                 level="technical",
@@ -1100,13 +1114,20 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             state["thermal_stop_requested"] = True
             state["cancel_requested"] = True
             job["_thermal_trip"] = True
+            if thermal_guard.trip_reason == "hardware_critical":
+                thermal_error = "GPU atingiu o limite crítico de hardware; job interrompido imediatamente"
+            elif thermal_guard.trip_reason == "cooling_window_expired":
+                thermal_error = (
+                    f"GPU não resfriou em {guard_config.cooling_window_s:.0f}s após o alerta térmico; "
+                    "job interrompido preventivamente"
+                )
+            else:
+                thermal_error = "GPU atingiu o limite térmico; job interrompido preventivamente"
+            job["thermal_error"] = thermal_error
             record(
                 "TRIPPED",
                 snapshot,
-                error=(
-                    "GPU atingiu o limite preventivo; tradução interrompida para evitar "
-                    "desligamento térmico"
-                ),
+                error=thermal_error,
             )
             process = state.get("process")
             if process is not None:
@@ -1123,6 +1144,9 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 "status": status,
                 "warning_c": config.warning_c,
                 "stop_c": config.stop_c,
+                "cooling_resume_c": guard.cooling_resume_c(config),
+                "trip_reason": guard.trip_reason,
+                "error": job.get("thermal_error"),
             }
             state["thermal_guard"] = job["thermal_guard"]
             if status == "UNAVAILABLE":
@@ -1146,12 +1170,14 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             )
             job["thermal_guard"] = {
                 **(snapshot.as_dict(config) if snapshot else {}),
-                "status": "MONITORING",
+                "status": "COOLING_OBSERVATION" if guard.cooling_active else "MONITORING",
                 "warning_c": config.warning_c,
                 "stop_c": config.stop_c,
+                "cooling_resume_c": guard.cooling_resume_c(config),
                 "interval_s": config.interval_s,
                 "trip_confirmations": config.trip_confirmations,
                 "cooling_window_s": config.cooling_window_s,
+                "cooling_elapsed_s": round(guard.cooling_elapsed_s, 1),
                 "fan_control": "hardware_driver",
             }
             state["thermal_guard"] = job["thermal_guard"]
@@ -1159,7 +1185,9 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 f"Proteção térmica GPU ativa: alerta={config.warning_c:.0f}°C, "
                 f"parada={config.stop_c:.0f}°C, limite efetivo={effective_stop:.1f}°C, "
                 f"leitura inicial={initial_reading}, "
+                f"resfriamento cooperativo a partir de={config.warning_c:.0f}°C, "
                 f"janela de resfriamento={config.cooling_window_s:.0f}s, "
+                f"retomada abaixo de={guard.cooling_resume_c(config):.0f}°C, "
                 f"intervalo={config.interval_s:.1f}s, confirmação={config.trip_confirmations} leitura(s)",
                 level="summary",
                 job_id=job.get("id"),
@@ -1173,7 +1201,7 @@ def _mark_thermal_guard_prestart(job: dict) -> None:
         job["status"] = "FAILED"
         job["stage"] = "FAILED"
         job["reason"] = "gpu_thermal_guard"
-        job["error"] = "GPU já estava acima do limite térmico antes do início"
+        job["error"] = job.get("thermal_error") or "GPU já estava acima do limite térmico antes do início"
         job["finished_at"] = _now()
         _append_log(
             f"Falhou: {job.get('name', '')} — {job['error']}",
@@ -1519,7 +1547,7 @@ def _apply_deepseek_profile(transport_cfg: dict) -> None:
     )
 
 
-def _run_episode_v238(job: dict) -> None:
+def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -> None:
     """C5: caminho in-process V2.3.8 para _run_episode.
 
     Preserva staging de temporada (glossário por série, app.py:865-873),
@@ -1603,6 +1631,16 @@ def _run_episode_v238(job: dict) -> None:
         mode="LIVE_CAPTURED",
         capture_root=capture_root,
     )
+
+    def thermal_gate() -> bool:
+        """Block the next model request while the GPU fan curve cools it."""
+        if state.get("cancel_requested"):
+            return True
+        if thermal_guard is not None and not thermal_guard.wait_for_cooling():
+            return True
+        return bool(state.get("cancel_requested"))
+
+    provider.attach_before_call(thermal_gate)
     # Campos de identidade LIVE_CAPTURED (v238_base_materializer.py:217):
     # prompt_schema_hash, configuration_hash, candidate_commit,
     # candidate_image_id vêm de build metadata (env); glossary_hash é
@@ -1714,9 +1752,10 @@ def _run_episode_v238(job: dict) -> None:
     # an implicit Ollama fallback.
     translate_karaoke.retry = retry_karaoke
     ctx["karaoke_translator"] = translate_karaoke
-    # O pipeline V2.3.8 roda in-process; fornece uma consulta cooperativa para
-    # parar antes da próxima chamada/retry sem matar o processo do servidor.
-    ctx["cancel_check"] = lambda: bool(state.get("cancel_requested"))
+    # O pipeline V2.3.8 roda in-process; a consulta cooperativa pausa antes da
+    # próxima chamada/retry para que o driver/firmware tenha tempo de resfriar.
+    ctx["cancel_check"] = thermal_gate
+    ctx["thermal_gate"] = thermal_gate
     # Transport do provider primário para o V226 (config.transport):
     # o Client.call (pipeline_v2_1_3.py:1440-1463) usa config.transport se
     # presente; sem ele, cai no default Ollama (qwen3.5:9b do env).
@@ -1817,6 +1856,7 @@ def _run_episode_v238(job: dict) -> None:
                 ctx["response_provider"] = WebDurableResponseProvider(
                     fallback_config, mode="LIVE_CAPTURED", capture_root=capture_root,
                 )
+                ctx["response_provider"].attach_before_call(thermal_gate)
                 ctx["model"] = str(section.get("model") or "")
                 # A digest pertence ao modelo, não à tentativa. Nunca herdar
                 # a digest do primary para o fallback; sem digest próprio,
@@ -1864,7 +1904,7 @@ def _run_episode_v238(job: dict) -> None:
                 job["status"] = "FAILED"
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
-                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
             elif state.get("cancel_requested"):
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
@@ -1930,7 +1970,7 @@ def _run_episode_v238(job: dict) -> None:
                 job["status"] = "FAILED"
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
-                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
             else:
                 job["status"] = "FAILED"
                 job["stage"] = "FAILED"
@@ -1994,11 +2034,11 @@ def _consume_worker_output_line(job: dict, line: str) -> None:
     _persist_locked()
 
 
-def _run_episode(job: dict) -> None:
+def _run_episode(job: dict, thermal_guard: GpuThermalGuard | None = None) -> None:
     # C5: roteia para o caminho in-process V2.3.8 quando o pipeline efetivo
     # for v2_3_8 (seleção persistida no transport_config, C4).
     if _effective_pipeline() == "v2_3_8":
-        _run_episode_v238(job)
+        _run_episode_v238(job, thermal_guard=thermal_guard)
         return
     source = Path(job["source_abs"])
     # Keep the original season directory name in the staged path.  The
@@ -2056,7 +2096,7 @@ def _run_episode(job: dict) -> None:
                 job["status"] = "FAILED"
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
-                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
             elif state["stop_requested"]:
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
@@ -2466,7 +2506,11 @@ def _mark_unhandled_worker_failure(job: dict, error: BaseException) -> None:
     with state_lock:
         if job.get("status") in {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED", "SKIPPED_CURRENT_VALIDATED", "ALREADY_TRANSLATED", "NOT_STARTED_AFTER_FAILURE"}:
             return
-        detail = str(error).strip() or error.__class__.__name__
+        detail = (
+            job.get("thermal_error")
+            if state.get("thermal_stop_requested") and job.get("thermal_error")
+            else str(error).strip() or error.__class__.__name__
+        )
         job["status"] = "FAILED"
         job["stage"] = "FAILED"
         job["reason"] = "worker_exception"
@@ -2534,7 +2578,7 @@ def _worker_loop() -> None:
             elif job.get("operation") == "RETRANSLATE":
                 _run_retranslation_episode(job)
             else:
-                _run_episode(job)
+                _run_episode(job, thermal_guard=thermal_guard)
         except Exception as error:
             # Never allow a preparation/worker exception to kill the queue
             # thread while leaving its job in the non-terminal WAITING state.

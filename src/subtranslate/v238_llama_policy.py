@@ -98,7 +98,8 @@ class CanonicalLlamaProvider:
     def __init__(self, provider: Any, *, model_tag: str, model_digest: str,
                  budget: OperationCallBudget | None = None,
                  load: Callable[[], Any] | None = None,
-                 unload: Callable[[], Any] | None = None) -> None:
+                 unload: Callable[[], Any] | None = None,
+                 before_call: Callable[[], bool] | None = None) -> None:
         if str(model_tag) != LLAMA_MODEL_TAG or str(model_digest) != LLAMA_MODEL_DIGEST:
             raise LlamaPolicyError("V238_LLAMA_MODEL_AUTHORITY_MISMATCH")
         if not callable(provider) and not callable(getattr(provider, "respond", None)):
@@ -109,13 +110,18 @@ class CanonicalLlamaProvider:
         self.budget = budget
         self.load_callback = load or getattr(provider, "load", None)
         self.unload_callback = unload or getattr(provider, "unload", None)
+        self.before_call = before_call
 
     def load(self) -> Any:
+        if self.before_call is not None and self.before_call():
+            raise LlamaPolicyError("V238_STOP_REQUESTED")
         if callable(self.load_callback):
             return self.load_callback()
         return None
 
     def __call__(self, request: dict[str, Any]) -> Any:
+        if self.before_call is not None and self.before_call():
+            raise LlamaPolicyError("V238_STOP_REQUESTED")
         if self.budget is not None:
             self.budget.reserve(model_tag=self.model_tag, model_digest=self.model_digest, phase="LLAMA_GROUPED")
         if callable(getattr(self.provider, "respond", None)):

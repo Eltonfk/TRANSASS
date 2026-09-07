@@ -1831,6 +1831,9 @@ class Client:
 
     def call(self, units: list[Unit], events: dict[int, Event], contexts: dict[int, dict[str, Any]], simplified: bool = False, phase: str = "main") -> tuple[dict[int, dict[str, Any]], list[str], dict[str, Any]]:
         ids = [event.id for unit in units for event in unit.events]
+        cancel_check = getattr(self.config, "cancel_check", None)
+        if callable(cancel_check) and cancel_check():
+            raise RuntimeError("STOP_REQUESTED")
         durable_context = getattr(self.config, "durable_context", None)
         # Preserve the legacy reservation order exactly.  V2.3.8 opts into
         # per-call durability below, where the persistent ledger reserves

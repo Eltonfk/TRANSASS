@@ -55,6 +55,7 @@ class ThermalGuardConfig:
     interval_s: float = DEFAULT_INTERVAL_S
     trip_confirmations: int = DEFAULT_TRIP_CONFIRMATIONS
     cooling_window_s: float = DEFAULT_COOLING_WINDOW_S
+    resume_c: float | None = None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "ThermalGuardConfig":
@@ -63,10 +64,20 @@ class ThermalGuardConfig:
         stop = _float_env(env, "TRANSASS_GPU_THERMAL_STOP_C", DEFAULT_STOP_C, minimum=2.0)
         if stop <= warning:
             warning = max(1.0, stop - 5.0)
+        resume_raw = str(env.get("TRANSASS_GPU_THERMAL_RESUME_C", "")).strip()
+        resume: float | None = None
+        if resume_raw:
+            try:
+                resume = max(1.0, float(resume_raw))
+            except ValueError:
+                resume = None
+        if resume is not None and resume >= warning:
+            resume = max(1.0, warning - 1.0)
         return cls(
             enabled=_bool_env(env, "TRANSASS_GPU_THERMAL_GUARD", True),
             warning_c=warning,
             stop_c=stop,
+            resume_c=resume,
             interval_s=_float_env(env, "TRANSASS_GPU_THERMAL_INTERVAL_S", DEFAULT_INTERVAL_S, minimum=0.25),
             trip_confirmations=_int_env(
                 env,
@@ -138,6 +149,8 @@ class ThermalSnapshot:
 
     def as_dict(self, config: ThermalGuardConfig | None = None) -> dict[str, object]:
         configured = config.stop_c if config else DEFAULT_STOP_C
+        warning = config.warning_c if config else DEFAULT_WARNING_C
+        configured_resume = config.resume_c if config else None
         return {
             "available": self.available,
             "device": self.device,
@@ -149,6 +162,11 @@ class ThermalSnapshot:
             "fan_rpm": self.fan_rpm,
             "power_w": self.power_w,
             "effective_stop_c": self.effective_stop_c(configured) if self.available else configured,
+            "cooling_resume_c": (
+                max(1.0, min(warning - 1.0, configured_resume))
+                if configured_resume is not None
+                else max(1.0, warning - 5.0)
+            ),
             "cooling_window_s": config.cooling_window_s if config else DEFAULT_COOLING_WINDOW_S,
             "hardware_breach": (
                 {
@@ -225,7 +243,13 @@ def read_amdgpu_snapshot(sysfs_root: Path | str = "/sys") -> ThermalSnapshot:
 
 
 class GpuThermalGuard:
-    """Poll AMD temperatures and invoke callbacks on warning/trip."""
+    """Poll AMD temperatures and coordinate a cooperative cooling gate.
+
+    The guard never changes the GPU fan curve and never delays a hardware
+    critical/emergency trip.  Once the software warning is reached, callers
+    can use :meth:`wait_for_cooling` before starting another model request.
+    This removes new GPU work while the driver/firmware fan curve responds.
+    """
 
     def __init__(
         self,
@@ -246,7 +270,12 @@ class GpuThermalGuard:
         self.warning_sent = False
         self.consecutive_over_stop = 0
         self.over_stop_since: float | None = None
+        self.cooling_active = False
+        self.cooling_since: float | None = None
+        self.trip_reason: str | None = None
         self._stop = threading.Event()
+        self._sample_event = threading.Event()
+        self._trip_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     @property
@@ -255,25 +284,98 @@ class GpuThermalGuard:
             return 0.0
         return max(0.0, time.monotonic() - self.over_stop_since)
 
+    @property
+    def cooling_elapsed_s(self) -> float:
+        if self.cooling_since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self.cooling_since)
+
+    def cooling_resume_c(self, config: ThermalGuardConfig | None = None) -> float:
+        """Return the hysteresis point at which new model work may resume."""
+        active_config = config or self.config
+        configured = active_config.resume_c
+        if configured is not None:
+            return max(1.0, min(active_config.warning_c - 1.0, configured))
+        return max(1.0, active_config.warning_c - 5.0)
+
     def _emit_sample(self, snapshot: ThermalSnapshot) -> None:
-        if self.on_sample is None:
-            return
         try:
-            self.on_sample(snapshot, self.config)
+            if self.on_sample is not None:
+                self.on_sample(snapshot, self.config)
         except Exception:
             # Telemetry must never change the safety decision or kill the
             # translation worker when a UI/state sink is unavailable.
             return
+        finally:
+            # Wake a translation thread waiting for the next sensor sample.
+            self._sample_event.set()
+
+    def _trip(self, snapshot: ThermalSnapshot, reason: str) -> bool:
+        """Trip once and identify why, without weakening hardware safety."""
+        with self._trip_lock:
+            if self.tripped:
+                return False
+            self.tripped = True
+            self.trip_reason = reason
+        self.on_trip(snapshot, self.config)
+        return True
+
+    def wait_for_cooling(self) -> bool:
+        """Wait until the GPU cools enough for one more model request.
+
+        ``True`` means work may continue.  ``False`` means the guard has
+        tripped (hardware breach or cooling timeout) and the caller must stop.
+        A missing sensor keeps the historical best-effort behavior: the guard
+        cannot gate on a reading it does not have.
+        """
+        if not self.config.enabled:
+            return True
+        while True:
+            if self.tripped:
+                return False
+            snapshot = self.latest
+            if snapshot is None or not snapshot.available or snapshot.hottest_c is None:
+                return True
+            if not self.cooling_active:
+                return True
+            if snapshot.hottest_c < self.cooling_resume_c():
+                return True
+            cooling_since = self.cooling_since
+            if cooling_since is None:
+                cooling_since = time.monotonic()
+            deadline = cooling_since + self.config.cooling_window_s
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._trip(snapshot, "cooling_window_expired")
+                return False
+            self._sample_event.wait(min(max(self.config.interval_s, 0.25), remaining))
+            self._sample_event.clear()
 
     def _evaluate(self, snapshot: ThermalSnapshot) -> None:
         self.latest = snapshot
         if not snapshot.available or snapshot.hottest_c is None:
             self.consecutive_over_stop = 0
             self.over_stop_since = None
+            self.cooling_active = False
+            self.cooling_since = None
+            self.warning_sent = False
             self._emit_sample(snapshot)
             return
         stop_c = snapshot.effective_stop_c(self.config.stop_c)
         warning_c = min(self.config.warning_c, max(1.0, stop_c - 5.0))
+
+        # Cooling starts at the warning threshold, not at the softer stop
+        # threshold.  At this point the current request may still finish, but
+        # no subsequent request should add another burst of GPU work.
+        if snapshot.hottest_c >= warning_c:
+            if not self.cooling_active:
+                self.cooling_since = time.monotonic()
+            self.cooling_active = True
+        elif self.cooling_active and snapshot.hottest_c < self.cooling_resume_c():
+            self.cooling_active = False
+            self.cooling_since = None
+            self.warning_sent = False
+
         if snapshot.hottest_c >= stop_c:
             if self.over_stop_since is None:
                 self.over_stop_since = time.monotonic()
@@ -284,8 +386,10 @@ class GpuThermalGuard:
                 and self.over_stop_elapsed_s >= self.config.cooling_window_s
             )
             if not self.tripped and (hardware_breach is not None or confirmed):
-                self.tripped = True
-                self.on_trip(snapshot, self.config)
+                self._trip(
+                    snapshot,
+                    "hardware_critical" if hardware_breach is not None else "cooling_window_expired",
+                )
             self._emit_sample(snapshot)
             return
         self.consecutive_over_stop = 0
@@ -318,5 +422,6 @@ class GpuThermalGuard:
 
     def stop(self) -> None:
         self._stop.set()
+        self._sample_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=max(1.0, self.config.interval_s + 0.5))

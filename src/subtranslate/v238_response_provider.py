@@ -107,12 +107,17 @@ class DurableResponseProvider:
         }
         self.operation_budget: Any = None
         self.operation_budget_phase = "V238_SEMANTIC"
+        self.before_call: Callable[[], bool] | None = None
         if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
             raise ValueError(f"{self.mode} requires an explicit capture_root")
 
     def attach_operation_budget(self, budget: Any, *, phase: str = "V238_SEMANTIC") -> None:
         self.operation_budget = budget
         self.operation_budget_phase = str(phase)
+
+    def attach_before_call(self, callback: Callable[[], bool] | None) -> None:
+        """Install a cooperative gate checked before every provider call."""
+        self.before_call = callback
 
     def _capture_dir(self, request: Mapping[str, Any], capture_id: str | None) -> tuple[str, Path]:
         raw_id = capture_id or str(request.get("capture_id") or "")
@@ -160,6 +165,8 @@ class DurableResponseProvider:
             raise
 
     def respond(self, request: Mapping[str, Any], *, capture_id: str | None = None) -> dict[str, Any]:
+        if self.before_call is not None and self.before_call():
+            raise ResponseProviderError("V238_STOP_REQUESTED")
         payload = dict(request)
         call_id, call_dir = self._capture_dir(payload, capture_id)
         payload.setdefault("capture_id", call_id)

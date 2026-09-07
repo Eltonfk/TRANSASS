@@ -129,6 +129,55 @@ def test_guard_waits_for_cooling_window_before_soft_trip(monkeypatch):
     assert trips == [hot]
 
 
+def test_guard_starts_cooling_at_warning_and_resumes_after_hysteresis():
+    warning = ThermalSnapshot(
+        available=True,
+        temperatures_c={"junction": 97.0},
+        critical_c={"junction": 110.0},
+    )
+    cool = ThermalSnapshot(
+        available=True,
+        temperatures_c={"junction": 84.0},
+        critical_c={"junction": 110.0},
+    )
+    guard = GpuThermalGuard(
+        config=ThermalGuardConfig(warning_c=90.0, stop_c=100.0),
+        reader=lambda: warning,
+        on_warning=lambda value, config: None,
+        on_trip=lambda value, config: None,
+    )
+
+    guard._evaluate(warning)
+    assert guard.cooling_active is True
+    assert guard.cooling_resume_c() == 85.0
+
+    guard._evaluate(cool)
+    assert guard.cooling_active is False
+    assert guard.wait_for_cooling() is True
+
+
+def test_guard_trips_when_warning_cooling_window_expires_without_hardware_breach():
+    trips = []
+    hot = ThermalSnapshot(
+        available=True,
+        temperatures_c={"junction": 95.0},
+        critical_c={"junction": 110.0},
+    )
+    guard = GpuThermalGuard(
+        config=ThermalGuardConfig(cooling_window_s=0.0),
+        reader=lambda: hot,
+        on_warning=lambda value, config: None,
+        on_trip=lambda value, config: trips.append(value),
+    )
+
+    guard._evaluate(hot)
+
+    assert guard.cooling_active is True
+    assert guard.wait_for_cooling() is False
+    assert guard.trip_reason == "cooling_window_expired"
+    assert trips == [hot]
+
+
 def test_guard_resets_soft_trip_confirmation_after_temperature_falls():
     trips = []
     hot = ThermalSnapshot(available=True, temperatures_c={"junction": 101.0})

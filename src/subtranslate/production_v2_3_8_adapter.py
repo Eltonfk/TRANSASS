@@ -156,6 +156,7 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
                 budget=budget,
                 load=execution_context.get("llama_load"),
                 unload=execution_context.get("llama_unload"),
+                before_call=execution_context.get("thermal_gate"),
             )
             llama_phase = run_single_fallback_phase(
                 primary_ledger,

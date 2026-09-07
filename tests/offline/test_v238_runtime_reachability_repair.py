@@ -102,6 +102,22 @@ class V238RuntimeReachabilityRepairTests(unittest.TestCase):
             self.assertEqual(provider.metrics["physical_client_calls"], 1)
             self.assertEqual(provider.metrics["model_generation_calls"], 1)
 
+    def test_provider_gate_blocks_before_any_capture_or_client_call(self):
+        with tempfile.TemporaryDirectory(prefix="v238-gate-") as raw:
+            root = Path(raw)
+            calls = []
+            provider = DurableResponseProvider(
+                "LIVE_CAPTURED",
+                capture_root=root,
+                client=lambda request: calls.append(request) or {"translation": "unused"},
+            )
+            provider.attach_before_call(lambda: True)
+            with self.assertRaises(ResponseProviderError) as raised:
+                provider.respond({"operation": "gated", "text": "source"}, capture_id="gated-1")
+            self.assertEqual(str(raised.exception), "V238_STOP_REQUESTED")
+            self.assertEqual(calls, [])
+            self.assertFalse((root / "gated-1").exists())
+
     def test_invalid_json_retains_raw_and_records_failure(self):
         with tempfile.TemporaryDirectory(prefix="v238-invalid-json-") as raw:
             root = Path(raw)
