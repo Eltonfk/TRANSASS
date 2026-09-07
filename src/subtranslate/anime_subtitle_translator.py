@@ -677,12 +677,24 @@ def find_subtitle_stream(video_path: Path, source_language: str | None = None):
     best_language_rank = score(best)[0]
     content_candidates = [stream for stream in supported_streams if score(stream)[0] == best_language_rank]
     non_sign_candidates = [stream for stream in content_candidates if score(stream)[1] == 0]
-    if non_sign_candidates:
-        # Keep the existing explicit protection for tracks named Signs,
-        # Songs, Lyrics or Forced.  Content analysis resolves ambiguity among
-        # dialogue candidates; it must not let a large signs-only track win
-        # merely because it contains many visual-text cards.
-        content_candidates = non_sign_candidates
+    if not non_sign_candidates:
+        # A configured language may exist only as a Titles/Signs or Forced
+        # companion track while the real dialogue is labelled in another
+        # language (for example ``eng Titles/Signs`` + ``jpn Full``).  Do not
+        # silently translate the short companion and call the episode
+        # complete.  The operator must choose the actual source language.
+        title = best.get("tags", {}).get("title", "(sem título)")
+        print(
+            f"   Nenhuma faixa de diálogo segura para a origem configurada "
+            f"'{configured_language}'; faixa disponível '{title}' é apenas "
+            "Signs/Songs ou Forced."
+        )
+        return None
+    # Keep the existing explicit protection for tracks named Signs, Songs,
+    # Lyrics or Forced.  Content analysis resolves ambiguity among dialogue
+    # candidates; it must not let a large signs-only track win merely because
+    # it contains many visual-text cards.
+    content_candidates = non_sign_candidates
     if video_path.is_file() and len(content_candidates) > 1:
         for stream in content_candidates:
             stats = _subtitle_stream_content_stats(video_path, stream)

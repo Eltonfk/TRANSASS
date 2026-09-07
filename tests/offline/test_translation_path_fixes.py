@@ -244,6 +244,20 @@ def test_track_selection_still_demotes_signs_songs(monkeypatch, tmp_path):
     assert idx == 3
 
 
+def test_track_selection_rejects_signs_only_configured_language(monkeypatch, tmp_path):
+    """Do not treat an English Titles/Signs track as a full episode source."""
+    streams = [
+        _stream(3, "Titles/Signs", default=1),
+        _stream(4, "Full"),
+    ]
+    streams[0]["tags"]["language"] = "eng"
+    streams[1]["tags"]["language"] = "jpn"
+    monkeypatch.setattr(at, "SOURCE_LANGUAGE", "inglês")
+    monkeypatch.setattr(at.subprocess, "run", lambda *a, **k: _ffprobe_result(streams))
+
+    assert at.find_subtitle_stream(tmp_path / "ep01.mkv") is None
+
+
 def test_track_selection_tiebreaks_by_default_flag(monkeypatch, tmp_path):
     """Two untitled same-language tracks: the default-flagged one wins."""
     streams = [_stream(5, ""), _stream(6, "", default=1)]
