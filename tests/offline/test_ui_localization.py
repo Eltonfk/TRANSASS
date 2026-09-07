@@ -1,5 +1,6 @@
 """Small contract tests for the presentation-only QI 83 locale."""
 
+import re
 from pathlib import Path
 
 
@@ -40,3 +41,20 @@ def test_qi83_is_ui_only_and_does_not_touch_pipeline_modules():
     assert "target_locale" not in catalog
     assert "production_v2" not in catalog
     assert "TRANSLATOR_SOURCE_LANGUAGE" not in app
+
+
+def test_dynamic_workspace_containers_are_not_overwritten_by_localization_observer():
+    page = TEMPLATE.read_text(encoding="utf-8")
+
+    for element_id in (
+        "inboxReady",
+        "inboxReview",
+        "inboxFailed",
+        "libraryStats",
+        "archiveSeries",
+        "memoryStats",
+        "memoryItems",
+    ):
+        match = re.search(rf'<[^>]+id="{element_id}"[^>]*>', page)
+        assert match, element_id
+        assert "data-i18n=" not in match.group(0), element_id
