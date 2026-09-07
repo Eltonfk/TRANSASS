@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transass"
-version = "2.4.9"
+version = "2.5.0"
 description = "Serviço de tradução de legendas de anime com pipeline canônico, durabilidade forense e motor de tradução escolhível."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,57 @@ Repository = "https://github.com/Eltonfk/TRANSASS"
 Documentation = "https://github.com/Eltonfk/TRANSASS#readme"
 
 [tool.setuptools]
-# The core package uses flat imports under src/subtranslate and is executed
-# with PYTHONPATH=src/subtranslate or inside the Docker image.  This project
-# metadata exists for tooling/CI; runtime packaging is Docker-first.
-packages = []
+# The current core uses deliberate flat imports.  Listing the modules makes
+# ``pip install .`` and frozen-build tools collect the same import closure
+# without forcing a risky all-at-once relative-import migration.
+package-dir = {"" = "src/subtranslate"}
+py-modules = [
+    "_version", "anime_library_hooks", "anime_subtitle_library",
+    "anime_subtitle_translator", "app", "failure_ledger", "glossary",
+    "human_feedback", "ollama_runtime", "pipeline_lineage",
+    "pipeline_orchestrator", "pipeline_registry", "pipeline_v2_1_2",
+    "pipeline_v2_1_3", "pipeline_v2_3_0", "production_v2_1_2_adapter",
+    "production_v2_1_3_adapter", "production_v2_2_0_adapter",
+    "production_v2_2_1_adapter", "production_v2_2_2_adapter",
+    "production_v2_2_3_adapter", "production_v2_2_4_adapter",
+    "production_v2_2_5_adapter", "production_v2_2_6_adapter",
+    "production_v2_3_0_adapter", "production_v2_3_8_adapter",
+    "queue_helpers", "runtime_config", "runtime_paths", "credential_store",
+    "state_migration", "diagnostics", "translation_memory",
+    "transport_config_store", "transport_providers", "v233_styled_spans",
+    "v235_visual_glyph_program", "v236_durable_response_capture",
+    "v237_temporal_transform", "v238_base_materializer",
+    "v238_full_translation_stage", "v238_llama_policy",
+    "v238_per_call_durability", "v238_rc10_anchor_solver",
+    "v238_rc3_atom_owner_vector", "v238_rc4_sparse_visual_eligibility",
+    "v238_rc5_contiguous_semantic_runs", "v238_rc6_finite_selector",
+    "v238_rc7_factorized_selector", "v238_rc7a_prompt_contract",
+    "v238_rc7b1_prompt_contract", "v238_rc7b_prompt_contract",
+    "v238_rc8_pairwise_boundary", "v238_rc9_independent_span",
+    "v238_response_normalization", "v238_response_provider",
+    "v238_semantic_style_ownership", "v238_source_payload",
+    "web_audit_retranslation", "web_durable_provider", "web_execution_context",
+    "web_retranslation_runner",
+]
+
+[tool.setuptools.data-files]
+"share/transass/templates" = [
+    "src/subtranslate/templates/glossary.html",
+    "src/subtranslate/templates/index.html",
+    "src/subtranslate/templates/review.html",
+]
+"share/transass/static" = [
+    "src/subtranslate/static/app.css",
+    "src/subtranslate/static/app.js",
+    "src/subtranslate/static/glossary.css",
+    "src/subtranslate/static/glossary.js",
+    "src/subtranslate/static/onboarding.css",
+    "src/subtranslate/static/onboarding.js",
+    "src/subtranslate/static/review.css",
+    "src/subtranslate/static/review.js",
+]
+"share/transass" = ["src/subtranslate/transass_logo.png"]
+"share/transass/glossaries" = [
+    "resources/glossaries/glossary.json",
+    "resources/glossaries/v2_1_2_glossary.json",
+]

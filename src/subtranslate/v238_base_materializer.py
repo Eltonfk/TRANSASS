@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -21,6 +22,20 @@ from production_v2_2_6_adapter import translate_subtitle_file_v2_2_6
 
 _OPERATION_ID_LOCK = threading.Lock()
 _LAST_OPERATION_SECOND: datetime | None = None
+
+
+def _safe_exception_detail(error: BaseException) -> str:
+    """Return a short cause string without copying credentials into logs."""
+    detail = " ".join(str(error).split())[:500]
+    detail = re.sub(
+        r"(?i)([?&](?:api[_-]?key|key|access[_-]?token|token)=)[^&\s]+",
+        r"\1<redacted>", detail,
+    )
+    detail = re.sub(
+        r"(?i)(authorization\s*[:= ]+bearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"\1<redacted>", detail,
+    )
+    return detail[:400]
 
 
 def new_operation_id(prefix: str = "V238_OPERATION") -> str:
@@ -121,6 +136,39 @@ def _normal_metrics(summary: Mapping[str, Any] | None) -> dict[str, int | float]
                 break
         result[key] = float(value) if key == "elapsed_seconds" else int(value)
     return result
+
+
+def _v226_batch_target_size(context: Mapping[str, Any]) -> int:
+    """Choose a safe V226 batch while honoring the active API profile.
+
+    The frozen V2.2.x adapter is kept conservative for local Ollama (four
+    events avoids truncating long ASS envelopes).  Gemini already receives a
+    larger JSON output allowance and its profile deliberately batches more
+    units to stay within API call quotas.  The old unconditional value of 4
+    made a 400+ event episode require more physical calls than the Gemini
+    budget, leaving most events unresolved before structural validation.
+    """
+    explicit = context.get("v238_batch_target_size")
+    if explicit is not None:
+        return max(1, int(explicit))
+    provider = str(
+        context.get("provider")
+        or getattr(context.get("transport"), "name", "")
+        or ""
+    ).casefold()
+    if provider == "gemini":
+        profile = context.get("gemini_profile")
+        profile = profile if isinstance(profile, Mapping) else {}
+        return max(1, int(profile.get("batch_size", 16) or 16))
+    if provider == "groq":
+        profile = context.get("groq_profile")
+        profile = profile if isinstance(profile, Mapping) else {}
+        return max(1, int(profile.get("batch_size", 8) or 8))
+    if provider == "deepseek":
+        profile = context.get("deepseek_profile")
+        profile = profile if isinstance(profile, Mapping) else {}
+        return max(1, int(profile.get("batch_size", 16) or 16))
+    return 4
 
 
 def build_primary_ledger(summary: Mapping[str, Any], *, context: Mapping[str, Any], source_sha256: str) -> list[dict[str, Any]]:
@@ -349,13 +397,17 @@ class CanonicalV226LiveMaterializer:
         # Direct callers (including offline seam tests) often provide an
         # isolated checkpoint root but no process-wide ledger environment.
         # Keep the ledger inside that same isolated state boundary instead of
-        # falling back to the container-only ``/app/state`` path.
+        # falling back to the configured runtime state path.
         if "failure_ledger_root" not in base_kwargs and context.get("checkpoint_root"):
             base_kwargs["failure_ledger_root"] = Path(context["checkpoint_root"]).parent / "failure-ledger"
         if memory_db_root is not None:
             base_kwargs["memory_db_root"] = memory_db_root
         call_context = dict(context)
         call_context.setdefault("source_sha256", identity["source_sha256"])
+        # Keep the frozen V2.2.x entrypoint unchanged for its direct callers.
+        # Local Ollama retains the conservative batch of four; Gemini uses
+        # the active API profile instead of being silently forced back to 4.
+        call_context.setdefault("v238_batch_target_size", _v226_batch_target_size(context))
         if not call_context.get("model"):
             call_context["model"] = identity.get("model_tag")
         if not call_context.get("model_digest"):
@@ -380,7 +432,8 @@ class CanonicalV226LiveMaterializer:
                 raise RuntimeError("V238_FAULT_AFTER_V226_RETURN")
             primary_calls = summary.get("calls", []) if isinstance(summary, Mapping) and isinstance(summary.get("calls", []), list) else []
             primary_model = str(context.get("model") or context.get("model_override") or summary.get("model") or "")
-            if any(str(call.get("model", "")).casefold().startswith("llama") for call in primary_calls if isinstance(call, Mapping)):
+            active_provider = str(getattr(context.get("transport"), "name", "") or "").casefold()
+            if active_provider != "groq" and any(str(call.get("model", "")).casefold().startswith("llama") for call in primary_calls if isinstance(call, Mapping)):
                 raise BaseTranslationMaterializerError("V238_LEGACY_LLAMA_REACHABLE_DURING_PRIMARY_QWEN")
             if str(context.get("execution_mode") or "").upper() == "LIVE_CAPTURED" and primary_model:
                 # M1 (gate canonico): autoridade de modelo generalizada.
@@ -426,7 +479,14 @@ class CanonicalV226LiveMaterializer:
         except BaseTranslationMaterializerError:
             raise
         except Exception as exc:
-            raise BaseTranslationMaterializerError("V238_V226_CHECKPOINT_CREATION_FAILED") from exc
+            # Keep the stable machine-readable prefix while exposing the
+            # bounded underlying cause.  Without it, provider/permission/
+            # parser failures were indistinguishable and the UI could only
+            # report a generic checkpoint error.
+            detail = _safe_exception_detail(exc)
+            raise BaseTranslationMaterializerError(
+                f"V238_V226_CHECKPOINT_CREATION_FAILED:{type(exc).__name__}:{detail}"
+            ) from exc
         finally:
             if configured_budget is not None:
                 if saved_budget is None:

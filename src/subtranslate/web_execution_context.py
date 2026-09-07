@@ -58,6 +58,17 @@ class TestFixtureMaterializer:
         }
 
 
+def _safe_profile(value: Any) -> dict[str, Any]:
+    """Keep provider policy fields while excluding credentials/unknown data."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in ("enabled", "batch_size", "retry_budget", "delay_between_calls")
+        if key in value
+    }
+
+
 def build_v238_execution_context(
     *,
     job: dict,
@@ -83,18 +94,24 @@ def build_v238_execution_context(
     """Constrói o execution_context completo exigido por production_v2_3_8_adapter.
 
     ``operation_budget`` e ``base_materializer`` NÃO são criados aqui: o
-    orchestrator auto-cria o budget (pipeline_orchestrator.py:126) e o adapter
-    auto-cria o materializer em LIVE_CAPTURED
-    (production_v2_3_8_adapter.py:45-48).
+    orchestrator auto-cria o budget e o adapter auto-cria o materializer em
+    LIVE_CAPTURED. Os perfis são copiados sem credenciais para que o
+    orchestrator e o materializer usem a mesma autoridade de configuração.
     """
     primary = transport_config.get("primary") or {}
     model = str(primary.get("model") or "")
+    provider = str(primary.get("provider") or "").strip().lower()
     ctx: dict[str, Any] = {
         "operation_id": operation_id,
         "execution_mode": execution_mode,
         "source_language": source_language,
+        "provider": provider,
         "model": model,
         "model_digest": transport_config.get("model_digest"),
+        "primary_model_digest": transport_config.get("primary_model_digest"),
+        "gemini_profile": _safe_profile(transport_config.get("gemini_profile")),
+        "groq_profile": _safe_profile(transport_config.get("groq_profile")),
+        "deepseek_profile": _safe_profile(transport_config.get("deepseek_profile")),
         "episode_id": job.get("episode_id"),
         "anime_series_id": job.get("anime_series_id"),
         "job_id": job_id or job.get("id"),
@@ -109,6 +126,20 @@ def build_v238_execution_context(
         "llama_model_tag": llama_model_tag,
         "llama_model_digest": llama_model_digest,
     }
+    profile = {
+        "gemini": ctx["gemini_profile"],
+        "groq": ctx["groq_profile"],
+        "deepseek": ctx["deepseek_profile"],
+    }.get(provider)
+    if isinstance(profile, dict) and profile.get("enabled", True):
+        ctx["retry_budget_calls"] = max(0, int(profile.get("retry_budget", 32) or 32))
+        batch_defaults = {"gemini": 16, "groq": 4, "deepseek": 16}
+        batch_limits = {"gemini": 64, "groq": 4, "deepseek": 30}
+        raw_batch = int(profile.get("batch_size", batch_defaults.get(provider, 6)) or batch_defaults.get(provider, 6))
+        ctx["v238_batch_target_size"] = min(
+            batch_limits.get(provider, 64),
+            max(1, raw_batch),
+        )
     if capture_root is not None:
         ctx["capture_root"] = capture_root
     if stage_completion_root is not None:

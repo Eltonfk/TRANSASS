@@ -13,14 +13,21 @@ from pathlib import Path
 from typing import Any, Callable
 
 from v238_response_provider import DurableResponseProvider
-from transport_providers import TransportBlocked, transport_from_config
+from transport_providers import (
+    DEEPSEEK_MIN_DELAY_SECONDS,
+    GEMINI_MIN_DELAY_SECONDS,
+    GROQ_MIN_DELAY_SECONDS,
+    TransportBlocked,
+    api_key_from_env,
+    transport_from_config,
+)
 from ollama_runtime import ollama_keep_alive
 
 
 def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay: float = 0.0) -> bytes:
     """EXACTLY ONE HTTP POST.  Imported lazily so offline tests never load
     the requests dependency graph unless a live call is actually made.
-    delay: seconds to wait before the request (rate limiting for Gemini)."""
+    delay: seconds to wait before the request (hosted-provider rate limiting)."""
     import time
     import requests
 
@@ -74,9 +81,22 @@ class WebDurableResponseProvider(DurableResponseProvider):
         )
 
     def _build_client(self) -> Callable[[dict[str, Any]], dict[str, Any]]:
-        # Gemini profile: delay entre chamadas para respeitar 15 RPM
+        # Gemini profile: piso conservador para limites por projeto.
         gemini_profile = self._transport_config.get("gemini_profile") or {}
-        gemini_delay = float(gemini_profile.get("delay_between_calls", 0.5)) if gemini_profile.get("enabled", True) else 0.0
+        gemini_delay = max(
+            GEMINI_MIN_DELAY_SECONDS,
+            float(gemini_profile.get("delay_between_calls", GEMINI_MIN_DELAY_SECONDS) or 0.0),
+        ) if gemini_profile.get("enabled", True) else 0.0
+        groq_profile = self._transport_config.get("groq_profile") or {}
+        groq_delay = max(
+            GROQ_MIN_DELAY_SECONDS,
+            float(groq_profile.get("delay_between_calls", GROQ_MIN_DELAY_SECONDS) or 0.0),
+        ) if groq_profile.get("enabled", True) else 0.0
+        deepseek_profile = self._transport_config.get("deepseek_profile") or {}
+        deepseek_delay = max(
+            DEEPSEEK_MIN_DELAY_SECONDS,
+            float(deepseek_profile.get("delay_between_calls", DEEPSEEK_MIN_DELAY_SECONDS) or 0.0),
+        ) if deepseek_profile.get("enabled", True) else 0.0
 
         def client(payload: dict) -> dict:
             section = self._select_section(payload)
@@ -89,8 +109,13 @@ class WebDurableResponseProvider(DurableResponseProvider):
             transport = transport_from_config(section, payload)
             chat_payload = self._project_request(payload)
             request = transport.build_request(chat_payload)
-            # Aplica delay apenas para Gemini (rate limiting)
-            delay = gemini_delay if provider_name == "gemini" else 0.0
+            # Aplica o perfil de limite do provedor selecionado.
+            delay = (
+                gemini_delay if provider_name == "gemini"
+                else groq_delay if provider_name == "groq"
+                else deepseek_delay if provider_name == "deepseek"
+                else 0.0
+            )
             body = _http_post(transport.endpoint(), transport.headers(), request, delay=delay)
             content = transport.extract_content(body)
             parsed = _decode_model_content(content)
@@ -173,6 +198,11 @@ class WebDurableResponseProvider(DurableResponseProvider):
         if not section.get("api_key") and provider in keys and keys[provider]:
             section = dict(section)
             section["api_key"] = keys[provider]
+        if not section.get("api_key"):
+            env_key = api_key_from_env(provider)
+            if env_key:
+                section = dict(section)
+                section["api_key"] = env_key
         return section
 
     def _select_section(self, payload: dict) -> dict:

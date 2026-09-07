@@ -19,14 +19,15 @@ from pathlib import Path
 
 from pipeline_orchestrator import execute_pipeline_plan
 from pipeline_lineage import public_summary
-from transport_providers import transport_from_config
+from runtime_config import default_failure_ledger_root, default_state_dir, default_transport_config, execution_identity
+from transport_providers import API_KEY_PROVIDERS, DEEPSEEK_MIN_DELAY_SECONDS, api_key_from_env, transport_from_config
 from transport_config_store import load_transport_config
 
 TRANSPORT_CONFIG_PATH = Path(os.environ.get(
-    "TRANSPORT_CONFIG_PATH", "/app/state/transport_config.json"))
+    "TRANSPORT_CONFIG_PATH", str(default_transport_config())))
 
 
-def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str]) -> Any | None:
+def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str], gemini_profile: dict[str, Any] | None = None, groq_profile: dict[str, Any] | None = None, deepseek_profile: dict[str, Any] | None = None) -> Any | None:
     if not engine:
         return None
     section = dict(engine)
@@ -39,10 +40,21 @@ def _provider_for(engine: dict[str, Any] | None, keys: dict[str, str]) -> Any | 
             section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
     if not section.get("api_key") and provider in keys and keys[provider]:
         section["api_key"] = keys[provider]
-    try:
-        return transport_from_config(section, {"model": section.get("model")})
-    except Exception:
-        return None
+    if not section.get("api_key"):
+        section["api_key"] = api_key_from_env(provider)
+    if provider in API_KEY_PROVIDERS and not str(section.get("api_key") or "").strip():
+        raise RuntimeError(f"{provider.upper()}_API_KEY_MISSING: configure a credencial antes de retraduzir")
+    n = provider
+    if n == "gemini" and gemini_profile and gemini_profile.get("enabled", True):
+        section["delay_between_calls"] = float((gemini_profile or {}).get("delay_between_calls", 4.0))
+    elif n == "groq" and groq_profile and groq_profile.get("enabled", True):
+        section["delay_between_calls"] = float((groq_profile or {}).get("delay_between_calls", 2.5))
+    elif n == "deepseek" and deepseek_profile and deepseek_profile.get("enabled", True):
+        section["delay_between_calls"] = float((deepseek_profile or {}).get("delay_between_calls", DEEPSEEK_MIN_DELAY_SECONDS))
+    # A configured engine is part of the execution contract. Swallowing a
+    # malformed URL, missing model or invalid provider here turns a concrete
+    # configuration error into a later, misleading Ollama/transport failure.
+    return transport_from_config(section, {"model": section.get("model")})
 
 
 def _project_v238_summary(result: dict) -> dict:
@@ -128,6 +140,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
             from web_durable_provider import WebDurableResponseProvider
 
             transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
+            identity = execution_identity(transport_config)
             if transport is not None:
                 transport_provider = getattr(transport, "name", "ollama")
                 transport_model = getattr(transport, "model", None)
@@ -154,7 +167,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 transport_config = dict(transport_config)
                 transport_config["primary"] = active
                 transport_config["model_digest"] = active["model_digest"]
-            job_root = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "v238-runs" / str(args.job_id)
+            job_root = default_state_dir() / "v238-runs" / str(args.job_id)
             capture_root = job_root / "captures"
             capture_root.mkdir(parents=True, exist_ok=True)
             provider = WebDurableResponseProvider(
@@ -170,50 +183,18 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 operation_id=uuid.uuid4().hex,
                 execution_mode="LIVE_CAPTURED",
                 capture_root=capture_root,
-                authorized_primary_models=transport_config.get("authorized_primary_models") or ["qwen", "gemini"],
+                authorized_primary_models=transport_config.get("authorized_primary_models") or ["qwen", "gemini", "openai", "llama", "meta"],
                 glossary=glossary,
                 glossary_hash=glossary_hash,
                 stage_completion_root=job_root / "completions",
                 checkpoint_root=job_root / "checkpoints",
                 job_id=args.job_id,
-                prompt_schema_hash=os.environ.get("PROMPT_SCHEMA_HASH"),
-                configuration_hash=os.environ.get("CONFIGURATION_HASH"),
-                candidate_commit=os.environ.get("CANDIDATE_COMMIT"),
-                candidate_image_id=os.environ.get("CANDIDATE_IMAGE_ID"),
-                failure_ledger_root=Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state")) / "failure-ledger",
+                prompt_schema_hash=identity["prompt_schema_hash"],
+                configuration_hash=identity["configuration_hash"],
+                candidate_commit=identity["candidate_commit"],
+                candidate_image_id=identity["candidate_image_id"],
+                failure_ledger_root=default_failure_ledger_root(),
             )
-            # Gemini profile: aplica modelo válido e budget, fallback se sem key
-            primary_provider = str((transport_config.get("primary") or {}).get("provider", "")).lower()
-            gemini_profile = transport_config.get("gemini_profile") or {}
-            if primary_provider == "gemini" and gemini_profile.get("enabled", True):
-                if not (transport_config.get("keys") or {}).get("gemini"):
-                    print("AVISO: Gemini sem API key — fallback para ollama", flush=True)
-                    fallback = transport_config.get("fallback") or {"provider": "ollama", "model": "qwen3.5:9b"}
-                    if fallback and fallback.get("provider"):
-                        transport_config["primary"] = dict(fallback)
-                        ctx["model"] = str(fallback.get("model") or "")
-                        # não aplica profile gemini
-                        # segue para response_provider que será recriado? provider já criado com gemini, mas ctx model será ollama — precisa recriar provider?
-                        # recria provider com fallback
-                        from web_durable_provider import WebDurableResponseProvider
-                        provider = WebDurableResponseProvider(transport_config, mode="LIVE_CAPTURED", capture_root=capture_root)
-                        ctx["response_provider"] = provider
-                        ctx["model"] = str(fallback.get("model") or "")
-                    # pula aplicação do profile
-                else:
-                    # Corrige modelo inválido (ex: 3.6-flash) para o do profile
-                    gemini_model = str(gemini_profile.get("model", "gemini-1.5-flash")).strip()
-                    if gemini_model and str((transport_config.get("primary") or {}).get("model") or "") != gemini_model:
-                        if "3.6" in str(transport_config.get("primary", {}).get("model") or ""):
-                            transport_config["primary"]["model"] = gemini_model
-                            ctx["model"] = gemini_model
-                    from v238_llama_policy import OperationCallBudget
-                    retry_budget = max(1, int(gemini_profile.get("retry_budget", 32)))
-                    if retry_budget < 16:
-                        retry_budget = 32
-                    if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
-                        ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=retry_budget, llama_generation_maximum=1)
-                        ctx["gemini_profile"] = gemini_profile
             ctx["response_provider"] = provider
             ctx["operation"] = "RETRANSLATE"
             ctx["defer_intermediate_cleanup"] = False
@@ -346,8 +327,16 @@ def main() -> int:
     # Transport config from the web UI: primary engine, optional fallback.
     transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
     keys = transport_config.get("keys") or {}
-    primary = _provider_for(transport_config.get("primary"), keys)
-    fallback = _provider_for(transport_config.get("fallback"), keys)
+    gemini_profile = transport_config.get("gemini_profile") or {}
+    groq_profile = transport_config.get("groq_profile") or {}
+    deepseek_profile = transport_config.get("deepseek_profile") or {}
+
+    primary = _provider_for(transport_config.get("primary"), keys, gemini_profile, groq_profile, deepseek_profile)
+
+    fallback_engine = transport_config.get("fallback")
+    if str((transport_config.get("primary") or {}).get("provider", "")).lower() in API_KEY_PROVIDERS and str((fallback_engine or {}).get("provider", "")).lower() == "ollama":
+        fallback_engine = None
+    fallback = _provider_for(fallback_engine, keys, gemini_profile, groq_profile, deepseek_profile)
     # Source language precedence: the per-job environment injected by the web
     # queue wins, then the global transport config, then English.  The env
     # must come first because the transport store always materializes a

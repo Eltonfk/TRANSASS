@@ -222,6 +222,7 @@ class Event:
     song_block_id: str = ""
     song_confidence: float = 0.0
     song_evidence: list[str] = field(default_factory=list)
+    is_comment: bool = False
 
 
 @dataclass
@@ -390,6 +391,8 @@ def classify_event(
     english_dictionary: set[str] | None = None,
     source_language: str = "inglês",
 ) -> tuple[str, str, float]:
+    if getattr(line, "is_comment", False):
+        return "TECHNICAL_OR_EMPTY", "ASS Comment preservado", 1.0
     if not clean_text.strip():
         return "TECHNICAL_OR_EMPTY", "sem texto linguístico", 1.0
     romanization_gloss = extract_romanization_gloss(clean_text, english_dictionary)
@@ -730,8 +733,9 @@ def load_events(
             line_break_boundaries=breaks, has_positioning=bool(POSITION_RE.search(_field(line, "text", ""))),
             romanization_base=romanized_gloss[0] if romanized_gloss else "",
             romanization_gloss=romanized_gloss[1] if romanized_gloss else "",
+            is_comment=bool(line.is_comment),
         ))
-    profile = profile or analyze_profile(subs, preliminary)
+    profile = profile or analyze_profile(subs, [event for event in preliminary if not event.is_comment])
     # Classify with the actual source fields while keeping pysubs2 objects out
     # of the serializable Event representation.
     for event, line in zip(preliminary, subs):
@@ -739,8 +743,9 @@ def load_events(
             line, event.clean_text, profile, english_dictionary,
             source_language=source_language,
         )
-    propagate_romaji_blocks(preliminary, english_dictionary)
-    song_info = classify_song_blocks(preliminary)
+    dialogue_events = [event for event in preliminary if not event.is_comment]
+    propagate_romaji_blocks(dialogue_events, english_dictionary)
+    song_info = classify_song_blocks(dialogue_events)
     profile["song_blocks"] = song_info["blocks"]
     profile["song_ambiguous_events"] = song_info["ambiguous_events"]
     profile["recurrent_song_blocks"] = song_info["recurrent_song_blocks"]
@@ -789,7 +794,7 @@ def build_sign_groups(events: list[Event], enabled: bool = True) -> list[Unit]:
 
 
 def choose_context(events: list[Event], target: Event, config: Config) -> dict[str, Any]:
-    ordered = sorted(events, key=lambda event: event.original_index)
+    ordered = sorted((event for event in events if not event.is_comment or event.id == target.id), key=lambda event: event.original_index)
     pos = next(index for index, event in enumerate(ordered) if event.id == target.id)
     previous: list[dict[str, Any]] = []
     following: list[dict[str, Any]] = []
@@ -853,6 +858,45 @@ def is_multi_speaker(event: Event) -> bool:
     return len(parts) > 1 and sum(segment.speaker_like for segment in parts) >= 2
 
 
+def _speaker_segment_groups(event: Event) -> list[list[CleanSegment]]:
+    """Group wrapped visual pieces into semantic speaker segments.
+
+    ASS uses ``\\N`` both for a new speaker and for a visual wrap of the same
+    speaker.  The model contract must expose one item per speaker, while the
+    renderer restores the wrapped line breaks afterwards.  This avoids
+    rejecting a valid two-speaker response merely because one or both lines
+    were wrapped in the source subtitle.
+    """
+    parts = [segment for segment in event.segments if segment.clean_text]
+    groups: list[list[CleanSegment]] = []
+    current: list[CleanSegment] = []
+    for segment in parts:
+        if current and segment.speaker_like:
+            groups.append(current)
+            current = []
+        current.append(segment)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _restore_group_line_breaks(group: list[CleanSegment], translated: str) -> str | None:
+    """Restore source visual wraps inside one translated speaker segment."""
+    if len(group) <= 1:
+        return translated.strip()
+    source_len = max(1, sum(len(segment.clean_text) for segment in group) + len(group) - 1)
+    base = translated.strip()
+    for boundary in range(len(group) - 1, 0, -1):
+        before = sum(len(segment.clean_text) for segment in group[:boundary]) + boundary - 1
+        index = _choose_visual_break(base, before / source_len)
+        if index is None:
+            return None
+        left = base[:index].rstrip()
+        right = base[index:].lstrip()
+        base = left + " " + r"\N" + right
+    return base
+
+
 def unit_schema_kind(units: list[Unit]) -> str:
     kinds = {"segmented" if is_multi_speaker(event) else "normal" for unit in units for event in unit.events}
     if len(kinds) != 1:
@@ -883,12 +927,59 @@ def _schema(units: list[Unit]) -> dict[str, Any]:
     return {"type": "object", "properties": {"translations": {"type": "array", "items": item, "minItems": len(ids), "maxItems": len(ids)}}, "required": ["translations"], "additionalProperties": False}
 
 
-def validate_response(value: Any, expected: dict[int, Event]) -> tuple[dict[int, dict[str, Any]], list[str]]:
+_GEMINI_PLACEHOLDER_RE = re.compile(r"§(?:T|G|C)\d+§")
+_GEMINI_LINEBREAK_PLACEHOLDER_RE = re.compile(r"§N§|\\N")
+_GEMINI_ASS_TAG_RE = re.compile(r"\{[^{}]*\}")
+
+
+def _clean_isolated_gemini_text(value: str) -> str:
+    """Remove only technical markers leaked by a singleton Gemini retry."""
+    cleaned = _GEMINI_LINEBREAK_PLACEHOLDER_RE.sub(" ", value)
+    cleaned = _GEMINI_PLACEHOLDER_RE.sub("", cleaned)
+    cleaned = _GEMINI_ASS_TAG_RE.sub("", cleaned)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+def validate_response(
+    value: Any,
+    expected: dict[int, Event],
+    *,
+    allow_positional_repair: bool = False,
+) -> tuple[dict[int, dict[str, Any]], list[str]]:
     issues: list[str] = []
     if not isinstance(value, dict) or set(value) != {"translations"} or not isinstance(value["translations"], list):
         return {}, ["root/translation array inválido"]
     found: dict[int, dict[str, Any]] = {}
-    for item in value["translations"]:
+    expected_ids = list(expected)
+    response_items = list(value["translations"])
+    raw_ids = [
+        item.get("id") if isinstance(item, dict) else None
+        for item in response_items
+    ]
+    # Gemini can occasionally preserve the requested row count and order but
+    # hallucinate one numeric ID from a neighboring batch.  In that narrow
+    # shape, the prompt's ordered contract makes positional repair safe:
+    # known IDs must already be in their expected positions, and every
+    # unknown ID must be unique.  Wrong-order, duplicate, or cardinality
+    # failures remain fail-closed and are isolated normally.
+    positional_repair = allow_positional_repair and (
+        len(response_items) == len(expected_ids)
+        and all(isinstance(item, dict) for item in response_items)
+        and all(isinstance(item_id, int) and not isinstance(item_id, bool) for item_id in raw_ids)
+        and len(set(raw_ids)) == len(raw_ids)
+        and all(
+            item_id not in expected or item_id == expected_id
+            for item_id, expected_id in zip(raw_ids, expected_ids)
+        )
+        and any(item_id not in expected for item_id in raw_ids)
+    )
+    if positional_repair:
+        response_items = []
+        for expected_id, item in zip(expected_ids, value["translations"]):
+            repaired = dict(item)
+            repaired["id"] = expected_id
+            response_items.append(repaired)
+    for item in response_items:
         if not isinstance(item, dict) or "id" not in item:
             issues.append("propriedades de item inválidas")
             continue
@@ -921,7 +1012,27 @@ def validate_response(value: Any, expected: dict[int, Event]) -> tuple[dict[int,
             if not good:
                 issues.append(f"segments inválidos: {item_id}")
                 continue
+            if allow_positional_repair and len(expected) == 1:
+                repaired_item = dict(item)
+                repaired_segments = []
+                changed = False
+                for segment in item["segments"]:
+                    segment_copy = dict(segment)
+                    cleaned = _clean_isolated_gemini_text(segment["text"])
+                    if cleaned != segment["text"]:
+                        segment_copy["text"] = cleaned
+                        changed = True
+                    repaired_segments.append(segment_copy)
+                if changed:
+                    repaired_item["segments"] = repaired_segments
+                    item = repaired_item
         text_values = [item.get("text", "")] if expected_kind == "normal" else [segment["text"] for segment in item["segments"]]
+        if allow_positional_repair and len(expected) == 1 and expected_kind == "normal":
+            cleaned = _clean_isolated_gemini_text(item["text"])
+            if cleaned != item["text"]:
+                item = dict(item)
+                item["text"] = cleaned
+                text_values = [cleaned]
         if any("§T" in text or "§N" in text or "{" in text or "}" in text or r"\N" in text for text in text_values):
             issues.append(f"estrutura/placeholder enviado na resposta: {item_id}")
             continue
@@ -1498,12 +1609,25 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
         if not is_multi_speaker(event):
             return event.original_text, ["SEGMENT_ID_MISMATCH"]
         values = sorted(response["segments"], key=lambda item: item["segment_id"])
-        expected = [segment.segment_id for segment in event.segments if segment.clean_text]
+        groups = _speaker_segment_groups(event)
+        expected = list(range(len(groups)))
+        physical_expected = [segment.segment_id for segment in event.segments if segment.clean_text]
         actual = [item["segment_id"] for item in values]
-        if expected != actual:
+        if actual not in (expected, physical_expected):
             return event.original_text, ["SEGMENT_ID_MISMATCH"]
         translated_segments = [item["text"].strip() for item in values]
-        base = r"\N".join(translated_segments)
+        if actual == expected:
+            restored: list[str] = []
+            for group, translated in zip(groups, translated_segments):
+                value = _restore_group_line_breaks(group, translated)
+                if value is None:
+                    return event.original_text, ["LINE_BREAK_INSIDE_WORD"]
+                restored.append(value)
+            base = r"\N".join(restored)
+        else:
+            # Backward-compatible acceptance for callers that still return
+            # one response segment per physical source piece.
+            base = r"\N".join(translated_segments)
     else:
         base = response.get("text", "").strip()
         if not isinstance(base, str):
@@ -1546,18 +1670,31 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
     if any(token in base for token in ("§T", "§N", "§G")) or "{" in base or "}" in base:
         flags.append("STRUCTURAL_CONTENT_IN_MODEL_OUTPUT")
         return event.original_text, flags
-    # Reinsert original ASS tags using visible offsets and lexical-safe
-    # boundaries.  Raw proportional indices are unsafe: translated words have
+    # Reinsert original ASS tags using scaled visible offsets and lexical-safe
+    # boundaries.  Raw character indices are unsafe: translated words have
     # different lengths and would yield e.g. `veze{\\i1}{\\i0}s`.
     source_visible_len = max(1, _visible_length(event.clean_text))
-    for anchor in sorted(event.tag_anchors, key=lambda item: item["position"], reverse=True):
-        desired = _visible_length(base) if anchor["position"] >= source_visible_len else min(_visible_length(base), max(0, anchor["position"]))
+    # Multiple source tags may collapse to the same translated boundary (for
+    # example a closing and opening italic pair at the end of a shortened
+    # sentence).  Insert each boundary's tags as one source-ordered group so
+    # they cannot be reversed by repeated insertion at the same raw index.
+    anchored: dict[int, list[str]] = {}
+    target_visible_len = _visible_length(base)
+    for anchor in event.tag_anchors:
+        # Scale source offsets into the translated payload before snapping to
+        # a lexical boundary.  Clamping a late source offset directly to the
+        # shorter target moves an entire style span to the end (and can turn
+        # ``\\i1...\\i0`` into a zero-width ``\\i1\\i0`` pair).
+        desired = round(max(0, anchor["position"]) * target_visible_len / source_visible_len)
+        desired = min(target_visible_len, desired)
         safe = _safe_inline_boundary(base, desired)
         if safe is None:
             flags.append("ASS_INLINE_TAG_ANCHOR_FAILURE")
             continue
+        anchored.setdefault(safe, []).append(anchor["tag"])
+    for safe, tags in sorted(anchored.items(), reverse=True):
         raw_position = _raw_index_for_visible_offset(base, safe)
-        base = base[:raw_position] + anchor["tag"] + base[raw_position:]
+        base = base[:raw_position] + "".join(tags) + base[raw_position:]
     if base.count(r"\N") != len(event.line_break_boundaries):
         flags.append("LINE_BREAK_COUNT_MISMATCH")
     if not segmented_response and not is_multi_speaker(event) and line_break_inside_word(base):
@@ -1575,6 +1712,11 @@ class Client:
         self.glossary = glossary or {}
         self.model = model or config.model
 
+    def _gemini_rate_limit(self) -> bool:
+        provider = str(getattr(getattr(self.config, "transport", None), "name", "")).lower()
+        model = str(self.model or getattr(self.config, "model", "")).lower()
+        return provider == "gemini" or model.startswith("gemini-")
+
     def finalize_request_payload(self, payload: dict[str, Any], units: list[Unit], phase: str) -> dict[str, Any]:
         """Return the exact transport payload before the durable boundary.
 
@@ -1588,6 +1730,13 @@ class Client:
         when no provider is set.  Returns (response, raw_body_bytes)."""
         transport = getattr(self.config, "transport", None)
         if transport is not None:
+            # Hosted-provider profiles are also used by the V226 direct
+            # client. Apply the limiter here so batches do not bypass the
+            # provider's rate-control path. The attribute is absent/zero for
+            # Ollama, generic OpenAI-compatible and NVIDIA transports.
+            delay = float(getattr(transport, "delay_between_calls", 0.0) or 0.0)
+            if delay > 0:
+                time.sleep(delay)
             request_body = transport.build_request(payload)
             request_bytes = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
             response = requests.post(transport.endpoint(), data=request_bytes,
@@ -1631,8 +1780,12 @@ class Client:
         for unit in units:
             for event in unit.events:
                 if is_multi_speaker(event):
+                    groups = _speaker_segment_groups(event)
                     item: dict[str, Any] = {"id": event.id, "kind": event.classification}
-                    item["segments"] = [{"segment_id": segment.segment_id, "text": segment.clean_text} for segment in event.segments if segment.clean_text]
+                    item["segments"] = [
+                        {"segment_id": group_index, "text": " ".join(segment.clean_text for segment in group).strip()}
+                        for group_index, group in enumerate(groups)
+                    ]
                 else:
                     target_text = event.romanization_gloss if event.classification == "ROMANIZATION_GLOSS" else event.clean_text
                     item = {"id": event.id, "text": target_text, "kind": event.classification}
@@ -1660,7 +1813,32 @@ class Client:
                 "siglas, códigos, romanizações e termos protegidos quando forem realmente não traduzíveis. "
                 "Não devolva a frase do idioma de origem integral. Preserve romanizações/onomatopeias quando não houver tradução confiável."
             )
-        if phase == "retry_simplified":
+        if phase == "retry_plain":
+            prompt = (
+                "Traduza o TARGET para português brasileiro natural. "
+                "Responda somente com o texto traduzido, sem JSON, sem explicações, "
+                "sem tags ASS e sem placeholders técnicos. Não copie o texto-fonte.\n\n"
+                f"TARGET: {json.dumps(targets, ensure_ascii=False)}"
+            )
+        elif phase == "retry_ultra_simplified":
+            # A final Gemini-only recovery prompt is deliberately smaller
+            # than the normal retry.  It is used only after a singleton
+            # event still leaked an ASS/placeholder token, so the model sees
+            # no context or optional metadata that it could echo back.
+            bare_targets = [
+                {key: item[key] for key in ("id", "text", "segments") if key in item}
+                for item in targets
+            ]
+            prompt = (
+                "Traduza cada texto abaixo para português brasileiro. "
+                "Retorne SOMENTE JSON válido no schema fornecido. "
+                "Use exatamente os IDs recebidos, uma vez cada. "
+                "Não escreva tags ASS, chaves ou qualquer placeholder técnico; "
+                "não copie o texto-fonte se houver tradução possível.\n\n"
+                f"TARGET: {json.dumps(bare_targets, ensure_ascii=False)}\n"
+                f"SCHEMA: {json.dumps(schema, ensure_ascii=False)}"
+            )
+        elif phase == "retry_simplified":
             # A compact second retry avoids the model copying a difficult
             # English target from the long contextual instruction.  It keeps
             # the same strict schema and event ID, but removes all optional
@@ -1709,13 +1887,16 @@ class Client:
                     "content": (
                         "Você é um tradutor de legendas. Responda somente com JSON válido no formato exato "
                         '{"translations":[{"id":inteiro,"text":"texto"}]} . '
-                        "Use exatamente os IDs recebidos, na mesma quantidade. Não inclua nenhum campo extra "
+                        "Use exatamente os IDs recebidos, na mesma ordem e quantidade. Não inclua nenhum campo extra "
                         "como kind, context, previous, next, classificação ou comentários."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
-            "stream": False, "format": schema, "think": self.config.think,
+            "stream": False,
+            "format": schema,
+            "gemini_plain_text": phase == "retry_plain" and self._gemini_rate_limit(),
+            "think": self.config.think,
             "options": {"temperature": self.config.temperature, "num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict},
             "keep_alive": self.config.keep_alive,
         }
@@ -1776,6 +1957,10 @@ class Client:
             observation["durable_attempt_ordinal"] = durable_call.metadata.get("attempt_ordinal")
             observation["parent_attempt_id"] = durable_call.metadata.get("parent_attempt_id")
             observation["unit_membership_sha256"] = membership
+        # Keep the provider reference available for bounded error details on
+        # both durable and non-durable HTTP status paths.  The actual POST is
+        # still centralized in _post_transport; this is metadata only.
+        transport = getattr(self.config, "transport", None)
         try:
             body = None
             derived_body = False
@@ -1835,7 +2020,15 @@ class Client:
                                 # not let the legacy Runner treat this as an
                                 # ordinary retryable exception.
                                 from v238_per_call_durability import DurableCallError
-                                raise DurableCallError(f"V238_DURABLE_HTTP_STATUS:{status_code}")
+                                detail = ""
+                                if transport is not None:
+                                    detail_fn = getattr(transport, "error_detail", None)
+                                    if callable(detail_fn):
+                                        detail = str(detail_fn(raw_body) or "").strip()
+                                suffix = f":{detail[:400]}" if detail else ""
+                                raise DurableCallError(
+                                    f"V238_DURABLE_HTTP_STATUS:{status_code}{suffix}"
+                                )
                             body = json.loads(bytes(raw_body).decode("utf-8"))
             else:
                 response, raw_body = self._post_transport(payload)
@@ -1846,6 +2039,14 @@ class Client:
                     "provider_call_delta": 1,
                     "durable_response_delta": 1,
                 })
+                if int(response.status_code) >= 400:
+                    detail = ""
+                    if transport is not None:
+                        detail_fn = getattr(transport, "error_detail", None)
+                        if callable(detail_fn):
+                            detail = str(detail_fn(raw_body) or "").strip()
+                    suffix = f":{detail[:400]}" if detail else ""
+                    raise RuntimeError(f"HTTP_STATUS:{int(response.status_code)}{suffix}")
                 response.raise_for_status()
                 body = json.loads(raw_body.decode("utf-8"))
             content = json.dumps(body, ensure_ascii=False) if (derived_body or subset_reused) else self._extract_content(raw_body, body)
@@ -1893,7 +2094,10 @@ class Client:
                 raise DurableCallError("V238_OUTPUT_TRUNCATED")
             if durable_call is not None:
                 durable_call._fault("before_parse")
-            value = body if (derived_body or subset_reused) else (strict_json(content) if self.config.strict_json else json.loads(content))
+            if phase == "retry_plain" and self._gemini_rate_limit() and len(ids) == 1 and schema_kind == "normal":
+                value = {"translations": [{"id": ids[0], "text": str(content or "").strip()}]}
+            else:
+                value = body if (derived_body or subset_reused) else (strict_json(content) if self.config.strict_json else json.loads(content))
             normalization_policy = str((durable_context or {}).get("response_normalization_policy") or "") if durable_context else ""
             normalized = False
             if normalization_policy in {"V238_ITEM_EXTRA_PROPERTY_PROJECTION_V1", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V2_MULTI_KIND", "V238_ITEM_EXTRA_PROPERTY_PROJECTION_V3_OPAQUE_CONTEXT_METADATA"} and not subset_reused:
@@ -1969,7 +2173,11 @@ class Client:
                         "derived_response_sha": None,
                         "retry_delta": 0,
                     })
-            found, issues = validate_response(value, events)
+            found, issues = validate_response(
+                value,
+                events,
+                allow_positional_repair=self._gemini_rate_limit(),
+            )
             if normalized and issues:
                 raise NormalizationRejected("V238_DERIVED_VALIDATION_FAILED:" + ";".join(issues))
             observation["json_valid"] = True
@@ -2035,6 +2243,43 @@ class Runner:
         self._last_call_id: str | None = None
         self._call_sequence = 0
         self._durable_attempt_ordinals: dict[str, int] = {}
+        # A 429 is transient for an online Gemini project.  Keep the retry
+        # count keyed by event set so recursive isolation cannot reset it and
+        # create an unbounded quota loop.  Ollama/OpenAI-compatible callers
+        # retain their historical terminal-on-429 behavior.
+        self._rate_limit_retries: dict[tuple[int, ...], int] = {}
+
+    def _gemini_rate_limit(self) -> bool:
+        provider = str(getattr(getattr(self.config, "transport", None), "name", "")).lower()
+        model = str(getattr(self.config, "model", "")).lower()
+        # The same bounded backoff/retry policy applies to hosted Groq. Keep
+        # the historical helper name for compatibility with existing callers.
+        return (
+            provider in {"gemini", "groq"}
+            or model.startswith("gemini-")
+            or (provider == "groq" and model.startswith(("openai/", "qwen/")))
+        )
+
+    def _rate_limit_backoff(self, event_ids: tuple[int, ...], attempt: int) -> float:
+        """Return a bounded Gemini 429 backoff, honoring Google's hint."""
+        detail = ""
+        if self.calls:
+            detail = str(self.calls[-1].get("error") or "")
+        hinted = re.search(
+            r"(?:retry|try\s+again)(?:\s+in|\s+after)\s+([0-9]+(?:\.[0-9]+)?)\s*s",
+            detail,
+            re.I,
+        )
+        if hinted:
+            return min(90.0, max(4.0, float(hinted.group(1))))
+        return min(60.0, 8.0 * (2 ** max(0, attempt)))
+
+    def _gemini_transient_status(self, error_text: str) -> int | None:
+        match = re.search(r"(?:HTTP_STATUS:|status code )([45]\d\d)", error_text, re.I)
+        if not match:
+            return None
+        status = int(match.group(1))
+        return status if status in {408, 425, 500, 502, 503, 504} and self._gemini_rate_limit() else None
 
     def _set_model_result(self, event: Event, response: dict[str, Any], model: str) -> bool:
         text, flags = reconstruct_event(event, response)
@@ -2103,8 +2348,13 @@ class Runner:
                  logical_batch_id: str | None = None, batch_index: int | None = None) -> tuple[set[int], list[str]]:
         expected = {event.id: event for unit in units for event in unit.events}
         self._diagnostic_phase = phase
-        retry_call = phase != "initial"
-        retry_depth = 0 if phase == "initial" else (2 if phase == "retry_simplified" else 1)
+        # A failed batch is recursively isolated before any actual retry is
+        # attempted.  Splitting is a diagnostic/recovery shape operation and
+        # must not consume the finite semantic retry budget; only localized,
+        # simplified or adapter-specific retries are budgeted.
+        rate_limit_retry = phase.startswith("retry_rate_limit")
+        retry_call = phase not in {"initial", "split_isolation"} and not rate_limit_retry
+        retry_depth = 0 if phase == "initial" else (2 if phase in {"retry_simplified", "retry_ultra_simplified", "retry_plain"} else 1)
         reason = "primary_translation" if phase == "initial" else ("batch_isolation" if phase == "split_isolation" else "localized_retry")
         if self.config.diagnostic_hard_stop_calls and len(self.calls) >= self.config.diagnostic_hard_stop_calls:
             return set(), ["LAB_HARD_STOP_CALL_LIMIT"]
@@ -2167,12 +2417,17 @@ class Runner:
                     issues.append(f"reconstrução inválida: {event_id}")
             return valid, issues
         except Exception as exc:
-            if getattr(exc, "durability_stop", False):
+            error_text = str(exc)
+            rate_limited = "429" in error_text or "Too Many Requests" in error_text
+            transient_status = self._gemini_transient_status(error_text)
+            if getattr(exc, "durability_stop", False) and not (
+                (rate_limited or transient_status is not None) and self._gemini_rate_limit()
+            ):
                 raise
             # B: rate limit (429) — NÃO retentar.  O Gemini/Ollama com quota
             # excedida retorna 429; retries agressivos só pioram o rate limit.
             # Retorna RATE_LIMIT_429 que o _process_units trata como parada.
-            if "429" in str(exc) or "Too Many Requests" in str(exc):
+            if rate_limited:
                 if self.calls:
                     observation = self.calls[-1]
                     observation.update({
@@ -2191,6 +2446,25 @@ class Runner:
                     self._last_call_id = observation.get("call_id")
                     self._call_sequence += 1
                 return set(), ["RATE_LIMIT_429"]
+            if transient_status is not None:
+                if self.calls:
+                    observation = self.calls[-1]
+                    observation.update({
+                        "parent_call_id": effective_parent_call_id,
+                        "retry_depth": retry_depth,
+                        "episode": self.config.episode_title,
+                        "batch_id": f"batch-{self._call_sequence}",
+                        "call_type": "PRIMARY_TRANSLATION" if phase == "initial" else "VALIDATION_RETRY",
+                        "attempt": self.retry_budget.consumed if retry_call else 0,
+                        "retry_reason": reason,
+                        "reason": reason,
+                        "validator_trigger": True,
+                        "success": False,
+                        "transient_http_status": transient_status,
+                    })
+                    self._last_call_id = observation.get("call_id")
+                    self._call_sequence += 1
+                return set(), [f"TRANSIENT_HTTP_{transient_status}"]
             # 4xx permanentes (ex.: NVIDIA 404 por model ID inválido) não
             # devem iniciar cascata de retries: repetir a mesma requisição não
             # pode corrigir autenticação, endpoint ou nome de modelo.
@@ -2241,6 +2515,45 @@ class Runner:
             attempt_type=attempt_type, logical_batch_id=logical_batch_id, batch_index=batch_index,
         )
         current_call_id = self._last_call_id
+        transient_issue = next(
+            (reason for reason in issues if reason.startswith("TRANSIENT_HTTP_")),
+            None,
+        )
+        if transient_issue and self._gemini_rate_limit():
+            transient_key = tuple(sorted(ids))
+            transient_attempt = self._rate_limit_retries.get(transient_key, 0)
+            if transient_attempt < 3:
+                self._rate_limit_retries[transient_key] = transient_attempt + 1
+                time.sleep(self._rate_limit_backoff(transient_key, transient_attempt))
+                self._process_units(
+                    units, "retry_transient", current_call_id,
+                    attempt_type="RETRY",
+                    logical_batch_id=f"{logical_batch_id}/transient-{transient_attempt + 1}",
+                    batch_index=batch_index,
+                )
+                return
+            # A persistent 5xx is an outage at the provider, not a malformed
+            # translation batch. Do not split the batch and multiply requests;
+            # leave a clear retryable failure for a later user re-run.
+            exhausted_issue = f"{transient_issue}_EXHAUSTED"
+            for unit in units:
+                result = self.results[unit.events[0].id]
+                result.status = "failed"
+                result.failure_reason = exhausted_issue
+            return
+        if "RATE_LIMIT_429" in issues and self._gemini_rate_limit():
+            rate_key = tuple(sorted(ids))
+            rate_attempt = self._rate_limit_retries.get(rate_key, 0)
+            if rate_attempt < 3:
+                self._rate_limit_retries[rate_key] = rate_attempt + 1
+                time.sleep(self._rate_limit_backoff(rate_key, rate_attempt))
+                self._process_units(
+                    units, "retry_rate_limit", current_call_id,
+                    attempt_type="RETRY",
+                    logical_batch_id=f"{logical_batch_id}/rate-limit-{rate_attempt + 1}",
+                    batch_index=batch_index,
+                )
+                return
         terminal_issue = any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")) or any(
             reason.startswith("NON_RETRYABLE_TRANSPORT_") for reason in issues
         )
@@ -2288,13 +2601,26 @@ class Runner:
             return
         result = self.results[event.id]
         retry_parent = current_call_id
-        for retry in range(self.config.max_retries):
+        structural_failure = any(
+            any(token in str(issue).lower() for token in ("placeholder", "estrutura", "schema", "ids ausentes", "quantidade inesperada"))
+            for issue in issues
+        )
+        # Gemini occasionally emits one structural placeholder even after the
+        # singleton retry. Give only that provider one extra, ultra-compact
+        # attempt; Ollama/OpenAI/NVIDIA keep their existing retry contract.
+        extra_structural_retry = 2 if self._gemini_rate_limit() and structural_failure else 0
+        for retry in range(self.config.max_retries + extra_structural_retry):
             if callable(cancel_check) and cancel_check():
                 result.status = "failed"
                 result.failure_reason = "STOP_REQUESTED"
                 return
             simplified = retry >= 1
-            retry_phase = "retry_simplified" if simplified else "retry_local"
+            if retry > self.config.max_retries:
+                retry_phase = "retry_plain"
+            elif retry == self.config.max_retries:
+                retry_phase = "retry_ultra_simplified"
+            else:
+                retry_phase = "retry_simplified" if simplified else "retry_local"
             result.retry_count += 1
             valid_retry, retry_issues = self._attempt(
                 [Unit(f"event-{event.id}", [event])], simplified, retry_phase, retry_parent,
@@ -2439,7 +2765,7 @@ def write_ass(original: pysubs2.SSAFile, events: list[Event], summary: dict[str,
 
 
 def validate_structure(original: pysubs2.SSAFile, candidate: pysubs2.SSAFile, selected_indices: set[int] | None = None, segmented_indices: set[int] | None = None) -> dict[str, Any]:
-    fields = ("layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect")
+    fields = ("type", "layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect")
     issues: list[str] = []
     if len(original) != len(candidate):
         issues.append("quantidade de eventos alterada")
@@ -2448,6 +2774,10 @@ def validate_structure(original: pysubs2.SSAFile, candidate: pysubs2.SSAFile, se
         for field_name in fields:
             if getattr(left, field_name, None) != getattr(right, field_name, None):
                 issues.append(f"evento {index}: campo {field_name} alterado")
+        if left.is_comment:
+            if left.text != right.text:
+                issues.append(f"evento {index}: ASS_COMMENT_CHANGED")
+            continue
         if sorted(TAG_RE.findall(left.text or "")) != sorted(TAG_RE.findall(right.text or "")):
             issues.append(f"evento {index}: tags alteradas")
         for flag in validate_inline_tags(left.text or "", right.text or ""):

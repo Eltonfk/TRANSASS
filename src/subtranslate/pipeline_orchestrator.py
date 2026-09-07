@@ -37,8 +37,82 @@ class PipelineStageValidationError(RuntimeError):
         super().__init__(json.dumps(self.details, sort_keys=True))
 
 
+GEMINI_PHYSICAL_CALL_FLOOR = 131
+GROQ_PHYSICAL_CALL_FLOOR = 192
+DEEPSEEK_PHYSICAL_CALL_FLOOR = 192
+
+
+def gemini_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
+    """Return ``(semantic_retries, physical_calls)`` for the Gemini profile.
+
+    The profile's retry value describes corrective attempts, while the
+    physical ledger also has to cover the initial batches and any diagnostic
+    isolation calls.  Keeping a separate floor preserves the canonical safety
+    ceiling without imposing the retry count as an accidental batch limit.
+    """
+    profile = profile if isinstance(profile, dict) else {}
+    semantic = max(1, int(profile.get("retry_budget", 32) or 32))
+    return semantic, max(GEMINI_PHYSICAL_CALL_FLOOR, semantic)
+
+
+def groq_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
+    """Return bounded semantic/physical budgets for the Groq profile."""
+    profile = profile if isinstance(profile, dict) else {}
+    semantic = max(1, int(profile.get("retry_budget", 16) or 16))
+    return semantic, max(GROQ_PHYSICAL_CALL_FLOOR, semantic)
+
+
+def deepseek_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
+    """Return bounded semantic/physical budgets for the DeepSeek profile."""
+    profile = profile if isinstance(profile, dict) else {}
+    semantic = max(1, int(profile.get("retry_budget", 32) or 32))
+    return semantic, max(DEEPSEEK_PHYSICAL_CALL_FLOOR, semantic)
+
+
 def _context(context: dict[str, Any] | None) -> dict[str, Any]:
     return dict(context or {})
+
+
+def _build_v238_operation_budget(ctx: dict[str, Any]) -> Any:
+    """Build the single physical-call budget owned by the orchestrator.
+
+    Provider profiles are execution policy, not transport credentials.  The
+    web context supplies the sanitized profile fields and this boundary turns
+    them into the same mutable budget object consumed by V226/V238.
+    """
+    existing = ctx.get("operation_budget")
+    if existing is not None:
+        return existing
+    from v238_llama_policy import OperationCallBudget
+
+    gemini_profile = ctx.get("gemini_profile") or {}
+    if not gemini_profile:
+        maybe_cfg = ctx.get("transport_config") or {}
+        gemini_profile = maybe_cfg.get("gemini_profile") or {}
+
+    maybe_cfg = ctx.get("transport_config") or {}
+    groq_profile = ctx.get("groq_profile") or maybe_cfg.get("groq_profile") or {}
+    deepseek_profile = ctx.get("deepseek_profile") or maybe_cfg.get("deepseek_profile") or {}
+    provider_name = str(
+        ctx.get("provider")
+        or getattr(ctx.get("transport"), "name", "")
+        or ""
+    ).lower()
+
+    if provider_name == "gemini" and bool(gemini_profile.get("enabled", False)):
+        _semantic_retry_budget, physical_maximum = gemini_operation_limits(gemini_profile)
+    elif provider_name == "groq" and bool(groq_profile.get("enabled", False)):
+        _semantic_retry_budget, physical_maximum = groq_operation_limits(groq_profile)
+    elif provider_name == "deepseek" and bool(deepseek_profile.get("enabled", False)):
+        _semantic_retry_budget, physical_maximum = deepseek_operation_limits(deepseek_profile)
+    else:
+        physical_maximum = int(
+            ctx.get("qwen_physical_maximum", os.environ.get("V238_QWEN_PHYSICAL_MAXIMUM", 131))
+        )
+    return OperationCallBudget(
+        qwen_physical_maximum=physical_maximum,
+        llama_generation_maximum=1,
+    )
 
 
 def _call_full_adapter(plan_id: str, source: Path, output: Path, context: dict[str, Any]) -> Any:
@@ -117,25 +191,20 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
     output = Path(output_path)
     ctx = _context(context)
     if plan.id == "v2_3_8":
-        from v238_llama_policy import OperationCallBudget
         mode = str(ctx.get("execution_mode") or getattr(ctx.get("response_provider"), "mode", "TEST_FAKE")).upper()
         if mode == "LIVE_CAPTURED" and not ctx.get("operation_id"):
             raise ValueError("V238_LIVE_OPERATION_ID_REQUIRED")
         if mode != "LIVE_CAPTURED":
             ctx.setdefault("operation_id", f"offline-{uuid.uuid4()}")
-        # Gemini profile: limita qwen_physical_maximum para respeitar 15 RPM / quota free
-        gemini_profile = ctx.get("gemini_profile") or {}
-        # também aceita perfil via transport_config-like context
-        if not gemini_profile:
-            # tenta derivar de model/gemini_profile se presente no ctx
-            maybe_cfg = ctx.get("transport_config") or {}
-            gemini_profile = maybe_cfg.get("gemini_profile") or {}
-        default_max = int(gemini_profile.get("retry_budget", 131)) if gemini_profile.get("enabled", False) and str(ctx.get("model") or "").lower().startswith("gemini") else int(ctx.get("qwen_physical_maximum", os.environ.get("V238_QWEN_PHYSICAL_MAXIMUM", 131)))
-        # se perfil gemini ativo mas ctx model ainda é genérico, checa ctx gemini_profile enabled
-        if gemini_profile.get("enabled", False) and not str(ctx.get("model") or "").lower().startswith("gemini"):
-            # fallback: usa retry_budget do profile se provider for gemini (detecta via gemini_profile enabled)
-            default_max = int(gemini_profile.get("retry_budget", 8))
-        ctx.setdefault("operation_budget", OperationCallBudget(qwen_physical_maximum=default_max, llama_generation_maximum=1))
+        # Gemini profile: retry_budget is the semantic retry allowance.  It
+        # must not also cap the physical requests needed for the initial
+        # batches (a 400+ event episode already needs about 30 calls at the
+        # profile's batch size).  Keep the canonical physical safety ceiling
+        # separate so one malformed batch can still be isolated and retried.
+        # Provider identity is explicit. Model prefixes are not an authority:
+        # an OpenAI-compatible endpoint can legitimately serve an ``openai/``
+        # or ``qwen/`` model without being Groq.
+        ctx["operation_budget"] = _build_v238_operation_budget(ctx)
     if ctx.get("operation") == "RETRANSLATE" and not plan.supports_retranslation:
         raise UnsupportedPipelineError(f"retranslation is not supported by pipeline plan: {plan.id}")
     if output.exists():

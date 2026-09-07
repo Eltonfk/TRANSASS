@@ -34,6 +34,7 @@ import os
 import subprocess
 import argparse
 import time
+import tempfile
 from pathlib import Path
 
 import requests
@@ -42,7 +43,9 @@ import pysubs2
 from ollama_runtime import ollama_keep_alive
 from pipeline_registry import UnsupportedPipelineError, get_pipeline_plan
 from pipeline_orchestrator import execute_pipeline_plan
+from runtime_paths import external_media_environment
 from pipeline_lineage import public_summary
+from runtime_config import default_glossary_path, default_media_root
 
 # ---------- CONFIG (ajuste aqui) ----------
 OLLAMA_URL = "http://192.168.1.5:11434/api/chat"   # confira a porta real do container Ollama
@@ -65,7 +68,8 @@ PARTIAL_NAME_MARKERS = (".part", ".partial", ".crdownload", ".aria2", ".!qb", ".
 BATCH_SIZE = max(1, int(os.environ.get("TRANSLATOR_BATCH_SIZE", "4")))
 OLLAMA_TIMEOUT = int(os.environ.get("TRANSLATOR_OLLAMA_TIMEOUT", "240"))
 MIN_FILE_AGE_SECONDS = int(os.environ.get("TRANSLATOR_MIN_FILE_AGE_SECONDS", "600"))
-BASE_LIBRARY = Path(os.environ.get("TRANSLATOR_BASE_LIBRARY", "/shows"))
+STREAM_PREFLIGHT_SECONDS = max(30, int(os.environ.get("TRANSLATOR_STREAM_PREFLIGHT_SECONDS", "180")))
+BASE_LIBRARY = default_media_root()
 def _ollama_endpoint(url: str) -> str:
     """Accept either an Ollama base URL or its ``/api/chat`` endpoint.
 
@@ -94,7 +98,7 @@ CONTEXT_MAX_CHARS = max(80, int(os.environ.get("TRANSLATOR_CONTEXT_MAX_CHARS", "
 # já válida e só é chamado para trechos que exigiram recuperação/retry.
 REVIEW_MODEL = os.environ.get("TRANSLATOR_REVIEW_MODEL", "")
 REVIEW_MAX_PER_FILE = max(0, int(os.environ.get("TRANSLATOR_REVIEW_MAX_PER_FILE", "30")))
-GLOSSARY_FILE = Path(os.environ.get("TRANSLATOR_GLOSSARY_FILE", "/app/glossaries/glossary.json"))
+GLOSSARY_FILE = Path(os.environ.get("TRANSLATOR_GLOSSARY_FILE", str(default_glossary_path())))
 TRANSLATOR_PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
 # Idioma de origem da legenda (destino sempre português do Brasil). Configurável
 # por episódio via variável de ambiente, definida pela camada web no start.
@@ -118,11 +122,12 @@ SOURCE_LANGUAGE_CODES = {
 }
 
 
-def _source_lang_matches(track_lang: str) -> bool:
+def _source_lang_matches(track_lang: str, source_language: str | None = None) -> bool:
     raw = str(track_lang or "").strip().casefold()
     if not raw or raw == "und":
         return False
-    codes = SOURCE_LANGUAGE_CODES.get(SOURCE_LANGUAGE, [SOURCE_LANGUAGE.casefold()])
+    configured = (source_language or SOURCE_LANGUAGE or "inglês").strip() or "inglês"
+    codes = SOURCE_LANGUAGE_CODES.get(configured, [configured.casefold()])
     return raw in codes
 
 TAG_PATTERN = re.compile(r"(\{[^}]*\})")   # blocos de override tags {\...}
@@ -568,26 +573,72 @@ SIGNS_SONGS_TITLE_KEYWORDS = ("sign", "song", "lyric", "op/ed", "op&ed", "karaok
 FORCED_TITLE_KEYWORDS = ("forced",)
 
 
-def find_subtitle_stream(video_path: Path):
+def find_subtitle_stream(video_path: Path, source_language: str | None = None):
     """Retorna (stream_index, idioma, extensao_nativa) da melhor faixa de DIÁLOGO embutida, ou None.
     Anime costuma ter faixas separadas por título: "Dialogue" vs "Signs & Songs" — sem checar o
     título, dava pra pegar a faixa errada mesmo priorizando o idioma certo."""
-    cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
-        "-show_streams", "-select_streams", "s", str(video_path),
+    configured_language = (source_language or SOURCE_LANGUAGE or "inglês").strip() or "inglês"
+    # Keep a compatibility probe for host ffprobe builds that emit no JSON
+    # with ``-v quiet`` when the Matroska metadata is slightly unusual.  The
+    # normal path remains one call; the second call happens only after an
+    # empty/invalid result and uses the same stream fields as the web source
+    # resolver.
+    probe_commands = [
+        [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", "-select_streams", "s", str(video_path),
+        ],
+        [
+            "ffprobe", "-v", "error", "-select_streams", "s",
+            "-show_entries", "stream=index,codec_type,codec_name,codec_tag_string:stream_tags=language,title",
+            "-of", "json", str(video_path),
+        ],
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    data = json.loads(result.stdout or "{}")
-    streams = data.get("streams", [])
+    streams = []
+    probe_diagnostics = []
+    for probe_index, cmd in enumerate(probe_commands):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                env=external_media_environment("ffprobe"),
+            )
+        except OSError as exc:
+            probe_diagnostics.append(f"probe {probe_index + 1}: {exc}")
+            continue
+        try:
+            data = json.loads(result.stdout or "{}")
+        except (TypeError, ValueError) as exc:
+            probe_diagnostics.append(f"probe {probe_index + 1}: JSON inválido ({exc})")
+            continue
+        streams = data.get("streams", []) or []
+        if streams:
+            break
+        probe_diagnostics.append(
+            f"probe {probe_index + 1}: nenhuma stream (rc={getattr(result, 'returncode', 0)})"
+        )
     if not streams:
+        detail = "; ".join(probe_diagnostics)
+        print(f"   ffprobe não retornou faixa de legenda para {video_path.name}. {detail}")
         return None
+
+    def normalized_codec(stream):
+        codec = str(stream.get("codec_name") or "").strip().casefold()
+        if codec in SUBTITLE_CODEC_EXTENSIONS:
+            return codec
+        # A few older ffprobe builds expose only the Matroska codec tag.
+        tag = str(stream.get("codec_tag_string") or "").strip().casefold()
+        if "ssa" in tag:
+            return "ssa"
+        if "ass" in tag:
+            return "ass"
+        return codec
 
     supported_streams = [
         stream for stream in streams
-        if stream.get("codec_name", "") in SUBTITLE_CODEC_EXTENSIONS
+        if normalized_codec(stream) in SUBTITLE_CODEC_EXTENSIONS
     ]
     if not supported_streams:
-        codecs = sorted({stream.get("codec_name", "desconhecido") for stream in streams})
+        codecs = sorted({normalized_codec(stream) or "desconhecido" for stream in streams})
         print(f"   Nenhuma faixa de legenda com codec suportado ({', '.join(codecs)}).")
         return None
 
@@ -600,7 +651,7 @@ def find_subtitle_stream(video_path: Path):
         is_forced = any(kw in title for kw in FORCED_TITLE_KEYWORDS)
         # O idioma configurado (SOURCE_LANGUAGE) tem prioridade máxima; os
         # demais seguem a ordem histórica eng/jpn como fallback.
-        if _source_lang_matches(lang):
+        if _source_lang_matches(lang, configured_language):
             lang_rank = 0
         else:
             lang_rank = lang_priority.get(lang, 2) + 1
@@ -617,16 +668,122 @@ def find_subtitle_stream(video_path: Path):
     supported_streams.sort(key=score)
     best = supported_streams[0]
 
+    # Metadata alone cannot distinguish two tracks both labelled "English"
+    # when one is a tiny signs/forced sample and the other contains the full
+    # dialogue.  For real video files, inspect candidates from the best
+    # language tier before committing to extraction.  Tests and callers that
+    # only provide an ffprobe payload keep the deterministic metadata path.
+    content_stats = {}
+    best_language_rank = score(best)[0]
+    content_candidates = [stream for stream in supported_streams if score(stream)[0] == best_language_rank]
+    non_sign_candidates = [stream for stream in content_candidates if score(stream)[1] == 0]
+    if non_sign_candidates:
+        # Keep the existing explicit protection for tracks named Signs,
+        # Songs, Lyrics or Forced.  Content analysis resolves ambiguity among
+        # dialogue candidates; it must not let a large signs-only track win
+        # merely because it contains many visual-text cards.
+        content_candidates = non_sign_candidates
+    if video_path.is_file() and len(content_candidates) > 1:
+        for stream in content_candidates:
+            stats = _subtitle_stream_content_stats(video_path, stream)
+            if stats is not None:
+                content_stats[stream["index"]] = stats
+        if content_stats:
+            def content_score(stream):
+                stats = content_stats.get(stream["index"])
+                if stats is None:
+                    return (-1, -1, -1, -1, -1, -score(stream)[1], -score(stream)[2], -stream.get("index", 0))
+                # Dialogue events and visible text dominate.  Coverage and
+                # metadata only break close ties, so a larger full-dialogue
+                # track wins over a nearly empty companion track.
+                return (
+                    stats["dialogue_events"], stats["dialogue_chars"],
+                    stats["non_empty_events"], stats["coverage_ms"],
+                    -score(stream)[1], score(stream)[2] * -1,
+                    -stream.get("index", 0),
+                )
+
+            best = max(content_candidates, key=content_score)
+
     title = best.get("tags", {}).get("title", "(sem título)")
     lang = best.get("tags", {}).get("language", "und")
+    if content_stats:
+        selected_stats = content_stats.get(best["index"])
+        if selected_stats:
+            print(
+                f"   Pré-análise: faixa {best['index']} tem {selected_stats['dialogue_events']} evento(s) "
+                f"de diálogo, {selected_stats['dialogue_chars']} caractere(s) e "
+                f"{selected_stats['coverage_ms'] / 1000:.0f}s de cobertura."
+            )
     print(
-        f"   Faixa de legenda escolhida: idioma={lang} (origem configurada: {SOURCE_LANGUAGE}), título='{title}' "
+        f"   Faixa de legenda escolhida: idioma={lang} (origem configurada: {configured_language}), título='{title}' "
         f"(de {len(supported_streams)} faixa(s) suportada(s))"
     )
 
-    codec = best.get("codec_name", "")
+    codec = normalized_codec(best)
     ext = SUBTITLE_CODEC_EXTENSIONS[codec]
     return best["index"], lang, ext
+
+
+def _subtitle_stream_content_stats(video_path: Path, stream: dict) -> dict | None:
+    """Return deterministic content metrics for one embedded subtitle track.
+
+    Extraction is temporary and read-only with respect to the media folder.
+    A failed/unsupported extraction returns ``None`` so stream selection can
+    safely fall back to the metadata score above.
+    """
+    codec = stream.get("codec_name", "")
+    ext = SUBTITLE_CODEC_EXTENSIONS.get(codec)
+    if not ext:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix=".subtranslate-stream-") as raw_dir:
+            extracted = Path(raw_dir) / f"stream-{stream.get('index', 0)}{ext}"
+            # Sample only the opening minutes.  A full ``-c:s copy`` over a
+            # multi-gigabyte video would scan the entire container before the
+            # translation even starts; the opening dialogue is sufficient to
+            # distinguish a nearly empty companion track in normal releases.
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-t", str(STREAM_PREFLIGHT_SECONDS),
+                    "-i", str(video_path), "-map", f"0:{int(stream['index'])}",
+                    "-c:s", "copy", "-y", str(extracted),
+                ],
+                capture_output=True, env=external_media_environment("ffmpeg"),
+                check=True,
+            )
+            subtitles = load_subtitles(extracted)
+            dialogue_events = 0
+            non_empty_events = 0
+            dialogue_chars = 0
+            first_start = None
+            last_end = None
+            for line in subtitles:
+                raw_text = str(getattr(line, "text", "") or "")
+                visible = re.sub(r"\{[^}]*\}", "", raw_text)
+                visible = re.sub(r"<[^>]*>", "", visible).replace(r"\N", " ")
+                visible = " ".join(visible.split())
+                if not visible:
+                    continue
+                non_empty_events += 1
+                start = int(getattr(line, "start", 0) or 0)
+                end = int(getattr(line, "end", start) or start)
+                first_start = start if first_start is None else min(first_start, start)
+                last_end = end if last_end is None else max(last_end, end)
+                if is_song_line(line):
+                    continue
+                dialogue_events += 1
+                dialogue_chars += len(visible)
+            coverage_ms = max(0, (last_end or 0) - (first_start or 0))
+            return {
+                "dialogue_events": dialogue_events,
+                "dialogue_chars": dialogue_chars,
+                "non_empty_events": non_empty_events,
+                "coverage_ms": coverage_ms,
+            }
+    except Exception as exc:
+        print(f"   Pré-análise da faixa {stream.get('index', '?')} indisponível: {exc}")
+        return None
 
 
 def extract_subtitle(video_path: Path, stream_index: int, out_path: Path):
@@ -635,7 +792,10 @@ def extract_subtitle(video_path: Path, stream_index: int, out_path: Path):
         "ffmpeg", "-y", "-i", str(video_path),
         "-map", f"0:{stream_index}", "-c:s", "copy", str(out_path),
     ]
-    subprocess.run(cmd, capture_output=True, check=True)
+    subprocess.run(
+        cmd, capture_output=True, check=True,
+        env=external_media_environment("ffmpeg"),
+    )
 
 
 def has_karaoke(text: str) -> bool:

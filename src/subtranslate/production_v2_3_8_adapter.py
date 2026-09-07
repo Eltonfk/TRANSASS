@@ -44,6 +44,12 @@ def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
     if len(source_subs.events) != len(base_subs.events):
         raise BaseTranslationMaterializerError("V238_BASE_TRANSLATION_CARDINALITY_MISMATCH")
     for event_index, (source_event, base_event) in enumerate(zip(source_subs.events, base_subs.events)):
+        if source_event.type != base_event.type:
+            raise BaseTranslationMaterializerError("V238_BASE_EVENT_TYPE_CHANGED")
+        if source_event.is_comment:
+            if source_event.as_dict() != base_event.as_dict():
+                raise BaseTranslationMaterializerError("V238_BASE_ASS_COMMENT_CHANGED")
+            continue
         if (source_event.start, source_event.end, source_event.layer, source_event.style) != (
             base_event.start, base_event.end, base_event.layer, base_event.style
         ):
@@ -75,7 +81,29 @@ def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
             continue
         if tuple(base_program.semantic_properties) != tuple(program.semantic_properties):
             raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_PROPERTIES_MISMATCH")
-        if len(base_program.source_semantic_segments) != len(program.source_semantic_segments):
+        # Translating a styled word can legitimately change the number of
+        # visible intervals.  For example, ``Haraguchi-{\\i1}san{\\i0}``
+        # becoming ``Sr Haraguchi{\\i1}!{\\i0}`` moves the same italic
+        # transitions across a different target word and collapses one
+        # segment.  Segment cardinality is therefore not a safe corruption
+        # test.  Require the effective transition sequence and event-wide base
+        # state to remain identical; a dropped or invented style transition
+        # still fails closed.
+        # Reset-to-base transitions are intentionally omitted here.  A reset
+        # that lands at the end of the translated payload may disappear from
+        # the parsed target program even though the event-level ASS style
+        # boundary is equivalent.  Activations/changes must still match.
+        source_trace = tuple(
+            (item.get("property"), item.get("after"))
+            for item in (program.provenance.get("transition_trace") or [])
+            if item.get("after") is not None
+        )
+        base_trace = tuple(
+            (item.get("property"), item.get("after"))
+            for item in (base_program.provenance.get("transition_trace") or [])
+            if item.get("after") is not None
+        )
+        if dict(base_program.base_state) != dict(program.base_state) or base_trace != source_trace:
             raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH")
 
 

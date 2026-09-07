@@ -40,6 +40,9 @@ class AppSafetyTests(unittest.TestCase):
             web.state["session_id"] = None
             web.state["jobs"] = []
             web.state["folder"] = None
+            web.state["cancel_requested"] = False
+            web.state["thermal_stop_requested"] = False
+            web.state["thermal_guard"] = None
 
     def test_health_endpoint(self):
         response = self.client.get("/health")
@@ -81,6 +84,23 @@ class AppSafetyTests(unittest.TestCase):
         with web.state_lock:
             self.assertFalse(web.state["running"])
 
+    def test_transport_config_path_preserves_runtime_override(self):
+        self.assertEqual(web.TRANSPORT_CONFIG_PATH, web.RUNTIME_CONFIG.transport_config)
+
+    def test_new_start_clears_stale_cooperative_cancel_flag(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            folder = Path(tmp_dir) / "anime"
+            folder.mkdir()
+            with patch.object(web, "BASE_LIBRARY", Path(tmp_dir)), \
+                    patch.object(web.threading, "Thread"):
+                with web.state_lock:
+                    web.state["cancel_requested"] = True
+                response = self.client.post("/start", json={"folder": "anime"})
+
+        self.assertEqual(response.status_code, 200)
+        with web.state_lock:
+            self.assertFalse(web.state["cancel_requested"])
+
     def test_second_start_is_rejected_before_the_worker_runs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             folder = Path(tmp_dir) / "anime"
@@ -93,6 +113,50 @@ class AppSafetyTests(unittest.TestCase):
             self.assertEqual(first.status_code, 200)
             self.assertEqual(second.status_code, 409)
             thread.return_value.start.assert_called_once()
+
+    def test_worker_exception_is_recorded_instead_of_leaving_waiting_job(self):
+        job = {
+            "id": "job-preparation-error",
+            "session_id": "session-preparation-error",
+            "status": "WAITING",
+            "name": "episode.mkv",
+        }
+        with web.state_lock:
+            web.state["session_id"] = job["session_id"]
+            web.state["running"] = True
+            web.state["jobs"] = [job]
+            web.state["history"] = []
+
+        with patch.object(web, "_run_episode", side_effect=RuntimeError("V238_NO_SUBTITLE_STREAM_FOUND")), \
+                patch.object(web, "_persist_locked"), patch.object(web, "_append_log") as append_log:
+            web._worker_loop()
+
+        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["stage"], "FAILED")
+        self.assertEqual(job["reason"], "worker_exception")
+        self.assertEqual(job["error"], "V238_NO_SUBTITLE_STREAM_FOUND")
+        append_log.assert_any_call(
+            "Falhou: episode.mkv — V238_NO_SUBTITLE_STREAM_FOUND",
+            level="error",
+            job_id="job-preparation-error",
+        )
+
+    def test_episode_discovery_deduplicates_symlink_and_hardlink_aliases(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            folder = Path(raw_dir)
+            original = folder / "episode.mkv"
+            original.write_bytes(b"media")
+            os.link(original, folder / "episode-hardlink.mkv")
+            try:
+                (folder / "episode-symlink.mkv").symlink_to(original)
+            except OSError:
+                self.skipTest("filesystem não permite symlink")
+
+            web._episode_discovery_cache.pop(str(folder), None)
+            discovered = web._discover_episode_videos(folder)
+
+            self.assertEqual(len(discovered), 1)
+            self.assertEqual(discovered[0].stat().st_ino, original.stat().st_ino)
 
     def test_folder_names_are_not_inserted_as_html(self):
         script = self._asset_text("/static/app.js")
@@ -242,9 +306,163 @@ class AppSafetyTests(unittest.TestCase):
             "memoryItems",
             "archiveDetails",
             "transportConfigDialog",
+            "tcTest",
+            "tcPrimaryModelSelect",
+            "tcGeminiModelsRefresh",
         ):
             with self.subTest(element_id=element_id):
                 self.assertEqual(web.PAGE.count(f'id="{element_id}"'), 1)
+
+    def test_provider_test_uses_http_status_without_exposing_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "transport_config.json"
+            config_path.write_text(
+                json.dumps({
+                    "primary": {"provider": "gemini", "model": "gemini-2.5-flash-lite"},
+                    "keys": {"gemini": "test-key"},
+                }),
+                encoding="utf-8",
+            )
+            fake_response = type("FakeResponse", (), {"status_code": 403, "close": lambda self: None})()
+            with patch.object(web, "TRANSPORT_CONFIG_PATH", config_path), \
+                    patch("requests.get", return_value=fake_response) as request_get:
+                response = self.client.post("/onboarding/provider-test", json={})
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["message"], "O motor respondeu HTTP 403. Verifique endereço e credencial.")
+        request_get.assert_called_once()
+        self.assertEqual(request_get.call_args.kwargs["headers"]["x-goog-api-key"], "test-key")
+
+    def test_provider_models_returns_stable_fallback_without_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "transport_config.json"
+            config_path.write_text(
+                json.dumps({"primary": {"provider": "gemini", "model": "gemini-2.5-flash-lite"}}),
+                encoding="utf-8",
+            )
+            with patch.object(web, "TRANSPORT_CONFIG_PATH", config_path), patch("requests.get") as request_get:
+                response = self.client.get("/onboarding/provider-models?provider=gemini")
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["source"], "catalog")
+        self.assertEqual(payload["models"][0]["id"], "gemini-3.5-flash-lite")
+        request_get.assert_not_called()
+
+    def test_provider_models_filters_online_catalogue(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "transport_config.json"
+            config_path.write_text(
+                json.dumps({
+                    "primary": {"provider": "gemini", "model": "gemini-2.5-flash-lite"},
+                    "keys": {"gemini": "test-key"},
+                }),
+                encoding="utf-8",
+            )
+            fake_response = type(
+                "FakeResponse",
+                (),
+                {
+                    "status_code": 200,
+                    "json": lambda self: {"models": [
+                        {"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+                        {"name": "models/gemini-2.5-flash-image", "supportedGenerationMethods": ["generateContent"]},
+                    ]},
+                    "close": lambda self: None,
+                },
+            )()
+            with patch.object(web, "TRANSPORT_CONFIG_PATH", config_path), patch("requests.get", return_value=fake_response):
+                response = self.client.get("/onboarding/provider-models?provider=gemini")
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["source"], "gemini-api")
+        self.assertEqual([item["id"] for item in payload["models"]], ["gemini-2.5-flash"])
+
+    def test_gemini_profile_does_not_replace_selected_model(self):
+        import anime_subtitle_translator as translator
+
+        config = {
+            "primary": {"provider": "gemini", "model": "gemini-2.5-flash"},
+            "keys": {"gemini": "test-key"},
+            "gemini_profile": {
+                "enabled": True,
+                "model": "gemini-1.5-flash",
+                "batch_size": 16,
+                "retry_budget": 32,
+                "delay_between_calls": 0.5,
+            },
+        }
+        previous_batch = translator.BATCH_SIZE
+        try:
+            web._apply_gemini_profile(config)
+        finally:
+            translator.BATCH_SIZE = previous_batch
+
+        self.assertEqual(config["primary"]["model"], "gemini-2.5-flash")
+
+    def test_gemini_without_key_fails_closed_instead_of_switching_to_ollama(self):
+        config = {
+            "primary": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
+            "keys": {},
+            "gemini_profile": {"enabled": True, "batch_size": 16, "retry_budget": 32},
+        }
+        with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY_MISSING"):
+            web._apply_gemini_profile(config)
+        self.assertEqual(config["primary"]["provider"], "gemini")
+
+    def test_gemini_profile_accepts_key_from_environment(self):
+        config = {
+            "primary": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
+            "keys": {},
+            "gemini_profile": {"enabled": True, "batch_size": 16, "retry_budget": 32},
+        }
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "env-secret"}):
+            web._apply_gemini_profile(config)
+
+    def test_groq_without_key_fails_closed(self):
+        config = {
+            "primary": {"provider": "groq", "model": "openai/gpt-oss-20b"},
+            "keys": {},
+            "groq_profile": {"enabled": True, "batch_size": 4, "retry_budget": 16},
+        }
+        with self.assertRaisesRegex(RuntimeError, "GROQ_API_KEY_MISSING"):
+            web._apply_groq_profile(config)
+
+    def test_deepseek_profile_applies_batch_retry_and_delay_limits(self):
+        import anime_subtitle_translator as translator
+
+        config = {
+            "primary": {"provider": "deepseek", "model": "deepseek-chat"},
+            "keys": {"deepseek": "test-key"},
+            "deepseek_profile": {
+                "enabled": True,
+                "batch_size": 99,
+                "retry_budget": 99,
+                "delay_between_calls": 0.0,
+            },
+        }
+        previous_batch = translator.BATCH_SIZE
+        try:
+            web._apply_deepseek_profile(config)
+            self.assertEqual(translator.BATCH_SIZE, 30)
+        finally:
+            translator.BATCH_SIZE = previous_batch
+
+        self.assertEqual(config["deepseek_profile"]["batch_size"], 30)
+        self.assertEqual(config["deepseek_profile"]["retry_budget"], 64)
+        self.assertGreaterEqual(config["deepseek_profile"]["delay_between_calls"], 2.0)
+
+    def test_deepseek_without_key_fails_closed(self):
+        config = {
+            "primary": {"provider": "deepseek", "model": "deepseek-chat"},
+            "keys": {},
+            "deepseek_profile": {"enabled": True},
+        }
+        with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY_MISSING"):
+            web._apply_deepseek_profile(config)
 
     def test_public_job_keeps_forensic_ledgers_out_of_ui_payloads(self):
         large_ledger = [{"event_id": index, "payload": "x" * 2048} for index in range(40)]

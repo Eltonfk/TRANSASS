@@ -39,6 +39,7 @@ from pipeline_v2_1_3 import (
     write_ass,
     _word_char,
 )
+from runtime_config import default_library_root
 from production_v2_1_3_adapter import APPROVED_CONFIG, APPROVED_MODEL, _fsync_file, _merged_glossary
 from production_v2_2_0_adapter import MemoryRunner
 from production_v2_2_1_adapter import (
@@ -342,7 +343,7 @@ def translate_subtitle_file_v2_2_2(
         raise FileExistsError(f"a saída final já existe: {output_path.name}")
     started = time.perf_counter()
     config, merged_glossary = _config(subtitle_path, glossary)
-    memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
+    memory_root = Path(memory_db_root or default_library_root())
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
     original, events, profile = load_events(subtitle_path, merged_glossary)

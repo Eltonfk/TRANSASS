@@ -13,13 +13,14 @@ from v238_response_provider import DurableResponseProvider
 from v238_base_materializer import CanonicalV226LiveMaterializer
 from v238_base_materializer import BaseTranslationMaterializerError
 from v238_full_translation_stage import reconcile_atomic_stage_output
+from production_v2_3_8_adapter import _validate_base_presentation_envelope
 
 
 ASS = """[Script Info]
 ScriptType: v4.00+
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,2,1,2,2,10,10,10,1
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,2,1,2,2,2,10,10,10,1
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello
@@ -66,6 +67,21 @@ def _ledger(statuses):
 
 
 class CanonicalV238EnforcementTests(unittest.TestCase):
+    def test_base_validation_allows_target_resegment_with_same_style_transitions(self):
+        """A translated styled word may change segment count without loss."""
+        with tempfile.TemporaryDirectory(prefix="v238-style-resegment-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Ah, Haraguchi-{\\i1}san{\\i0}!",
+            ), encoding="utf-8")
+            base.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Ah, Sr Haraguchi{\\i1}!{\\i0}",
+            ), encoding="utf-8")
+            _validate_base_presentation_envelope(source, base)
+
     def test_checkpoint_fault_points_resume_without_repeating_v226(self):
         for fault in ("after_v226_return", "after_base_ass", "after_manifest", "before_complete"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="v238-resume-") as raw:

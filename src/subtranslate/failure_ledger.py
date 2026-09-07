@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from runtime_config import default_failure_ledger_root
+
 
 MAX_TEXT = int(os.environ.get("TRANSLATOR_FAILURE_LEDGER_MAX_TEXT", "20000"))
 MAX_RESPONSE = int(os.environ.get("TRANSLATOR_FAILURE_LEDGER_MAX_RESPONSE", "50000"))
@@ -83,7 +85,7 @@ class FailureLedger:
 
     def __init__(self, job_id: str, metadata: dict[str, Any], root: str | Path | None = None):
         self.job_id = str(job_id)
-        base = Path(root or os.environ.get("TRANSLATOR_FAILURE_LEDGER_ROOT", "/app/state/failure-ledger"))
+        base = Path(root or default_failure_ledger_root())
         self.root = base
         self.job_dir = base / "jobs" / self.job_id
         self.job_dir.mkdir(parents=True, exist_ok=True)

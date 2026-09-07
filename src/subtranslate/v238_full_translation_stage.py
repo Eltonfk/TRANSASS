@@ -195,6 +195,37 @@ def _plain(value: str) -> str:
     return _TAG_RE.sub("", value or "").replace(r"\N", " ").replace(r"\h", " ").strip()
 
 
+def _safe_existing_envelope(source: str, target: str) -> bool:
+    """Accept an already materialized target only when its envelope is safe.
+
+    The V2.2.6 materializer normally returns a source-owned ASS envelope.  A
+    V2.3.8 semantic ownership response can still be unproven for a small
+    model; in that case retaining the validated V2.2.6 event is safer than
+    re-running lexical allocation through ``rc4``.  This guard prevents that
+    fallback from accepting duplicated/malformed tags or changed breaks.
+    """
+    if not isinstance(target, str):
+        return False
+    if source.count(r"\N") != target.count(r"\N"):
+        return False
+    if source.count(r"\h") != target.count(r"\h"):
+        return False
+    if target.count("{") != target.count("}"):
+        return False
+    unsafe_flags = {
+        "ASS_INLINE_TAG_DUPLICATION",
+        "ASS_TAG_MISMATCH",
+        "ASS_INLINE_TAG_SPLIT_WORD",
+        "ASS_INLINE_TAG_ANCHOR_FAILURE",
+    }
+    return not any(flag in unsafe_flags for flag in pipeline.validate_inline_tags(source, target))
+
+
+def _fallback_envelope(source: str, target: str, rebuilt: str) -> str:
+    """Prefer a safe V226 envelope; otherwise use the deterministic rebuild."""
+    return target if _safe_existing_envelope(source, target) else rebuilt
+
+
 def _provider(context: Mapping[str, Any]) -> DurableResponseProvider:
     value = context.get("response_provider")
     if not isinstance(value, DurableResponseProvider):
@@ -304,6 +335,12 @@ def _render_event(
     base = rc4_replace_source_payload(source_text, target_text)
     if base is None:
         raise ResponseProviderError("V238_SOURCE_PAYLOAD_RECONSTRUCTION_FAILED")
+    # Keep the materializer's line layout whenever it already supplied the
+    # expected number of breaks; otherwise use the deterministic source
+    # re-enveloping (which restores breaks omitted by a model).
+    line_break_template = (
+        target_text if target_text.count(r"\N") == source_text.count(r"\N") else base
+    )
     details: dict[str, Any] = {"event_id": event_id, "path": "SOURCE_PAYLOAD"}
     if punctuation_changed:
         details["punctuation_profile"] = "SOURCE_PRESERVED"
@@ -313,7 +350,7 @@ def _render_event(
         # linguistic payload for ordinary units.  Rebuild its source-owned
         # presentation envelope once so model-returned ASS tags and line
         # breaks cannot leak into the candidate.
-        return base, {"event_id": event_id, "path": "BASE_V226_PAYLOAD_REENVELOPED"}
+        return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "BASE_V226_PAYLOAD_REENVELOPED"}
     if reviewed_envelope is not None:
         # Explicit OFFLINE_REPLAY data is a reviewed envelope, never a global
         # runtime fallback.  The generic detectors still run before it is
@@ -334,7 +371,7 @@ def _render_event(
     temporal_probe = getattr(provider, "is_temporal_group", None)
     if "\\t(" in source_text and (not callable(temporal_probe) or temporal_probe(event_id)):
         if callable(group_probe) and group_probe(event_id) is None:
-            return base, {"event_id": event_id, "path": "DETERMINISTIC_TEMPORAL_PRESERVATION"}
+            return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "DETERMINISTIC_TEMPORAL_PRESERVATION"}
         counters["temporal_transform"] += 1
         temporal, trace = preserve_temporal_transform_envelope(source_text, target_text, base_rebuilder=rc4_replace_source_payload)
         if temporal is None:
@@ -346,7 +383,7 @@ def _render_event(
                 if temporal is not None:
                     return temporal, {"event_id": event_id, "path": "TEMPORAL_INJECTED_FROM_SOURCE", "trace": trace}
             # Se injeção não foi possível, fallback para base V226
-            return base, {"event_id": event_id, "path": "UNPROVEN_TEMPORAL_BASE_FALLBACK", "trace": trace}
+            return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "UNPROVEN_TEMPORAL_BASE_FALLBACK", "trace": trace}
         details.update({"path": "TEMPORAL_TRANSFORM", "trace": trace})
         return temporal, details
 
@@ -375,9 +412,9 @@ def _render_event(
                     source_text, _plain(target_text), program=visual_program, base_rebuilder=rc4_replace_source_payload
                 )
                 if rendered is None:
-                    return base, {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
+                    return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
                 return rendered, {"event_id": event_id, "path": "VISUAL_GLYPH", "trace": trace}
-            return base, {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
+            return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
         program, program_details = extract_semantic_style_ownership(
             source_text, program_id=f"event-{event_id}", envelope_id=event_id
         )
@@ -386,7 +423,10 @@ def _render_event(
                 mapping, identity_trace = identity_ownership_mapping(program, program.source_visible_text)
                 if mapping is None:
                     raise ResponseProviderError("V238_IDENTITY_OWNERSHIP_UNPROVEN")
-                rendered, validation = render_target_ownership(source_text, program.source_visible_text, program, mapping)
+                rendered, validation = render_target_ownership(
+                    source_text, program.source_visible_text, program, mapping,
+                    line_break_template=source_text,
+                )
                 if rendered is None or not validation.get("valid"):
                     raise ResponseProviderError("V238_IDENTITY_OWNERSHIP_RENDER_FAILED")
                 details.update({"path": "SEMANTIC_OWNERSHIP_IDENTITY", "span_issues": span_issues, "trace": identity_trace})
@@ -412,7 +452,7 @@ def _render_event(
             # no provider request is permitted.
             if resolved_group is None:
                 details.update({"path": "DETERMINISTIC_STYLE_PRESERVATION"})
-                return base, details
+                return _fallback_envelope(source_text, target_text, base), details
             group_key = str(resolved_group)
             if ownership_cache is not None and group_key in ownership_cache:
                 response = ownership_cache[group_key]
@@ -435,12 +475,15 @@ def _render_event(
                 # base (rc4) preserva texto traduzido com estilo base.
                 counters["semantic_ownership_fallback"] = counters.get("semantic_ownership_fallback", 0) + 1
                 details.update({"path": "SEMANTIC_OWNERSHIP_FALLBACK_UNPROVEN", "span_issues": span_issues})
-                return base, details
-            rendered, validation = render_target_ownership(source_text, _plain(target_text), program, mapping)
+                return _fallback_envelope(source_text, target_text, base), details
+            rendered, validation = render_target_ownership(
+                source_text, _plain(target_text), program, mapping,
+                line_break_template=line_break_template,
+            )
             if rendered is None or not validation.get("valid"):
                 counters["semantic_ownership_fallback"] = counters.get("semantic_ownership_fallback", 0) + 1
                 details.update({"path": "SEMANTIC_OWNERSHIP_FALLBACK_VALIDATION", "span_issues": span_issues, "validation": validation})
-                return base, details
+                return _fallback_envelope(source_text, target_text, base), details
             counters["semantic_ownership_render"] += 1
             details.update({"path": "SEMANTIC_OWNERSHIP", "span_issues": span_issues, "validation": validation})
             return rendered, details
@@ -460,7 +503,7 @@ def _render_event(
                 raise ResponseProviderError("V238_VISUAL_GLYPH_RECONSTRUCTION_FAILED")
             details.update({"path": "VISUAL_GLYPH", "trace": trace})
             return rendered, details
-    return base, details
+    return _fallback_envelope(source_text, target_text, base), details
 
 
 def execute_v238_stage(
@@ -506,11 +549,16 @@ def execute_v238_stage(
         raise ResponseProviderError("V238_LINGUISTIC_UNIT_IDENTITIES_INVALID")
     member_ids: dict[str, list[int]] = {}
     for event_index in range(len(source_subs.events)):
+        if source_subs.events[event_index].is_comment:
+            continue
         unit_id = str(explicit_units.get(event_index, f"event-{event_index}") if isinstance(explicit_units, Mapping) else f"event-{event_index}")
         member_ids.setdefault(unit_id, []).append(event_index)
     translated_units: dict[str, dict[str, Any]] = {}
     ownership_cache: dict[str, dict[str, Any]] = {}
     for index, (source_line, target_line) in enumerate(zip(source_subs.events, candidate.events)):
+        if source_line.is_comment:
+            candidate.events[index] = copy.deepcopy(source_line)
+            continue
         source_text = source_line.text or ""
         if base_translation is None:
             unit_id = str(explicit_units.get(index, f"event-{index}") if isinstance(explicit_units, Mapping) else f"event-{index}")
@@ -593,6 +641,14 @@ def validate_v238_candidate(source: str | Path, candidate: str | Path) -> dict[s
     if len(source_events) != len(candidate_events) or len(source_subs.events) != len(candidate_subs.events):
         raise ValueError("V2.3.8 candidate event cardinality mismatch")
     for source_event, target_event in zip(source_events, candidate_events):
+        source_line = source_subs[source_event.original_index]
+        target_line = candidate_subs[target_event.original_index]
+        if source_line.type != target_line.type:
+            raise ValueError("V238_EVENT_TYPE_CHANGED")
+        if source_line.is_comment:
+            if source_line.as_dict() != target_line.as_dict():
+                raise ValueError("V238_ASS_COMMENT_CHANGED")
+            continue
         if (source_event.start, source_event.end, source_event.layer, source_event.style) != (target_event.start, target_event.end, target_event.layer, target_event.style):
             raise ValueError(f"V2.3.8 presentation envelope mismatch at event {source_event.id}")
         if "\\" in (source_event.original_text or ""):

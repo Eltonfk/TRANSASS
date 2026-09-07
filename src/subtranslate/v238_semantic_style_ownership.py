@@ -114,7 +114,7 @@ def _apply_token(state: dict[str, str], base_state: dict[str, str], name: str, v
     # returning to an event-wide base state is represented by that base value;
     # otherwise the property is removed and the envelope's style default owns
     # it.  Toggle 0 is also a reset-to-default in the existing contract.
-    if not value or (name in {"b", "i", "u"} and value == "0"):
+    if not value or (name in {"b", "i", "u", "s"} and value == "0"):
         _reset_state(state, base_state, name)
     else:
         state[name] = value
@@ -323,8 +323,14 @@ def _state_delta(previous: dict[str, str], current: dict[str, str], base: dict[s
             continue
         if name not in current:
             # Explicitly return to the source base when available; otherwise
-            # use the ASS reset form.  Values are never invented.
-            tokens.append(_token_text(name, base.get(name, "")))
+            # use the ASS reset form.  Toggle resets require an explicit
+            # ``0``: emitting ``\i`` (or ``\b``/``\u``/``\s``) is a malformed
+            # and renderer-dependent tag, not an ASS reset.  Other properties
+            # retain their canonical empty-value reset form.
+            reset_value = base.get(name, "")
+            if not reset_value and name in {"b", "i", "u", "s"}:
+                reset_value = "0"
+            tokens.append(_token_text(name, reset_value))
         else:
             tokens.append(_token_text(name, after))
     return tokens
@@ -358,6 +364,8 @@ def render_target_ownership(
     target_text: str,
     program: SemanticStyleOwnershipProgram,
     mapping: Any,
+    *,
+    line_break_template: str | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     """Emit deterministic target runs while preserving nonsemantic ASS."""
     rows, validation = validate_ownership_mapping(program, target_text, mapping)
@@ -395,6 +403,72 @@ def render_target_ownership(
     actual = strip_ass_tags(result)
     if actual != target_text and _norm_ws(actual) != _norm_ws(target_text):
         return None, {"valid": False, "reason": "TARGET_TEXT_IDENTITY", "actual": actual}
+    # Ownership is semantic and therefore intentionally receives a target
+    # string with ``\\N`` flattened to whitespace.  The line-break envelope,
+    # however, remains source/base-owned.  Reinsert its projected break
+    # offsets after style composition so a valid ownership response cannot
+    # silently remove a visual ASS break.
+    template = line_break_template or source_ass
+    break_specs: list[tuple[int, str, str]] = []
+    visible_offset = 0
+    cursor = 0
+    while cursor < len(template):
+        tag = TAG_GROUP_RE.match(template, cursor)
+        if tag:
+            cursor = tag.end()
+            continue
+        if template.startswith(r"\N", cursor):
+            before = template[:cursor]
+            after = template[cursor + 2:]
+            # Preserve the materializer's canonical boundary spacing while
+            # allowing style tags to remain on their semantic side.
+            before_spaces = re.search(r"[ \t]*$", before)
+            after_spaces = re.match(r"[ \t]*", after)
+            break_specs.append((
+                visible_offset,
+                before_spaces.group(0) if before_spaces else "",
+                after_spaces.group(0) if after_spaces else "",
+            ))
+            cursor += 2
+            continue
+        visible_offset += 1
+        cursor += 1
+    for offset, before_spaces, after_spaces in break_specs:
+        # Map the visible offset back through the composed ASS string.  Tags
+        # do not count towards the offset, and inserting before the existing
+        # boundary whitespace keeps the lexical payload intact.
+        visible = 0
+        raw_index = len(result)
+        cursor = 0
+        while cursor < len(result):
+            tag = TAG_GROUP_RE.match(result, cursor)
+            if tag:
+                cursor = tag.end()
+                continue
+            if result.startswith(r"\N", cursor):
+                cursor += 2
+                continue
+            if visible >= offset:
+                raw_index = cursor
+                break
+            visible += 1
+            cursor += 1
+        right = result[raw_index:]
+        leading_match = re.match(r"[ \t]*", right)
+        leading = leading_match.group(0) if leading_match else ""
+        right = right[len(leading):]
+        left = result[:raw_index]
+        trailing_match = re.search(r"[ \t]*$", left)
+        trailing = trailing_match.group(0) if trailing_match else ""
+        left = left[:len(left) - len(trailing)] if trailing else left
+        result = left + before_spaces + r"\N" + after_spaces + right
+    if len(break_specs) != result.count(r"\N"):
+        return None, {
+            "valid": False,
+            "reason": "LINE_BREAK_ENVELOPE_MISMATCH",
+            "expected_break_count": len(break_specs),
+            "actual_break_count": result.count(r"\N"),
+        }
     return result, {
         "valid": True,
         "reason": "SEMANTIC_STYLE_OWNERSHIP_RENDERED",

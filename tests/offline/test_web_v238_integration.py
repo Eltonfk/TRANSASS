@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "subtransla
 import web_execution_context as c1  # noqa: E402
 import web_durable_provider as c2  # noqa: E402
 import transport_config_store as c4  # noqa: E402
+import pipeline_orchestrator as orchestrator  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ def test_c1_builds_required_fields():
     assert ctx["operation_id"] == "op-1"
     assert ctx["execution_mode"] == "LIVE_CAPTURED"
     assert ctx["source_language"] == "francês"
+    assert ctx["provider"] == "gemini"
     assert ctx["model"] == "gemini-3.6-flash"
     assert ctx["episode_id"] == 79
     assert ctx["anime_series_id"] == 3
@@ -63,6 +65,32 @@ def test_c1_does_not_create_budget_or_materializer():
     )
     assert "operation_budget" not in ctx
     assert "base_materializer" not in ctx
+
+
+def test_c1_profiles_reach_orchestrator_with_provider_specific_budgets():
+    cases = (
+        ("gemini", "gemini_profile", 131, 16),
+        ("groq", "groq_profile", 192, 4),
+        ("deepseek", "deepseek_profile", 192, 16),
+    )
+    for provider, profile_key, expected_physical_maximum, expected_batch_size in cases:
+        config = {
+            "primary": {"provider": provider, "model": f"{provider}-model"},
+            "keys": {provider: "must-not-enter-context"},
+            profile_key: {"enabled": True, "retry_budget": 7, "batch_size": expected_batch_size},
+        }
+        ctx = c1.build_v238_execution_context(
+            job={"id": "job-budget"},
+            transport_config=config,
+            source_language="inglês",
+            operation_id="op-budget",
+        )
+        budget = orchestrator._build_v238_operation_budget(ctx)
+        assert budget.snapshot()["qwen_physical_maximum"] == expected_physical_maximum
+        assert ctx["retry_budget_calls"] == 7
+        assert ctx["v238_batch_target_size"] == expected_batch_size
+        assert "keys" not in ctx
+        assert all("api_key" not in ctx[key] for key in ("gemini_profile", "groq_profile", "deepseek_profile"))
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +249,7 @@ def test_m10_fixture_materializer_source_preserving():
         source.write_text(
             "[Script Info]\nScriptType: v4.00+\n\n"
             "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,10,10,10,1\n\n"
+                "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
             "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
             "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,Olá mundo\n",
             encoding="utf-8",
@@ -273,6 +301,113 @@ def test_c4_missing_config_has_model_identity_for_live_jobs(tmp_path):
     config = c4.load_transport_config(tmp_path / "first-run.json")
     assert config["model_digest"] == c4._model_digest(config["primary"])
     assert config["primary_model_digest"] == config["model_digest"]
+
+
+def test_c4_missing_config_bootstraps_non_secret_transport_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRANSPORT_PROVIDER", "deepseek")
+    monkeypatch.setenv("TRANSPORT_MODEL", "deepseek-chat")
+    monkeypatch.setenv("TRANSPORT_FALLBACK_PROVIDER", "ollama")
+    monkeypatch.setenv("TRANSPORT_FALLBACK_MODEL", "qwen3.5:9b")
+
+    config = c4.load_transport_config(Path(tmp_path) / "missing.json")
+
+    assert config["primary"] == {
+        "provider": "deepseek",
+        "model": "deepseek-chat",
+        "base_url": None,
+    }
+    assert config["fallback"] == {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "base_url": None,
+    }
+    assert config["keys"] == {}
+    assert config["model_digest"] == c4._model_digest(config["primary"])
+
+
+def test_c4_public_projection_removes_credentials_from_engines_and_profiles(tmp_path):
+    path = Path(tmp_path) / "unsafe.json"
+    path.write_text(json.dumps({
+        "primary": {"provider": "gemini", "model": "gemini-3.5-flash-lite", "api_key": "secret"},
+        "gemini_profile": {"enabled": True, "api_key": "secret", "batch_size": 16},
+    }), encoding="utf-8")
+
+    public = c4.public_transport_config(path)
+
+    assert "api_key" not in public["primary"]
+    assert "api_key" not in public["gemini_profile"]
+    assert public["gemini_profile"]["batch_size"] == 16
+
+
+def test_c4_migrates_retired_gemini_models_and_refreshes_digest(tmp_path):
+    path = Path(tmp_path) / "legacy-gemini.json"
+    path.write_text(json.dumps({
+        "primary": {"provider": "gemini", "model": "gemini-1.5-flash"},
+        "gemini_profile": {"enabled": True, "model": "gemini-1.5-flash"},
+    }), encoding="utf-8")
+
+    loaded = c4.load_transport_config(path)
+
+    assert loaded["primary"]["model"] == "gemini-3.5-flash-lite"
+    assert "model" not in loaded["gemini_profile"]
+    assert loaded["model_digest"] == c4._model_digest(loaded["primary"])
+
+
+def test_c4_runtime_ollama_url_replaces_stale_docker_alias(tmp_path, monkeypatch):
+    path = Path(tmp_path) / "transport_config.json"
+    c4.save_transport_config(path, {
+        "primary": {"provider": "ollama", "model": "qwen3.5:9b", "base_url": "http://ollama:11434"},
+    })
+    monkeypatch.setenv("TRANSLATOR_OLLAMA_URL", "http://host.docker.internal:11434")
+
+    loaded = c4.load_transport_config(path)
+
+    assert loaded["primary"]["base_url"] == "http://host.docker.internal:11434"
+    assert loaded["model_digest"] == c4._model_digest(loaded["primary"])
+    assert loaded["primary_model_digest"] == loaded["model_digest"]
+
+
+def test_c4_without_runtime_url_maps_stale_docker_alias_to_localhost(tmp_path, monkeypatch):
+    path = Path(tmp_path) / "transport_config.json"
+    c4.save_transport_config(path, {
+        "primary": {"provider": "ollama", "model": "qwen3.5:9b", "base_url": "http://ollama:11434"},
+    })
+    monkeypatch.delenv("TRANSLATOR_OLLAMA_URL", raising=False)
+
+    loaded = c4.load_transport_config(path)
+
+    assert loaded["primary"]["base_url"] == "http://127.0.0.1:11434"
+
+
+def test_c4_runtime_ollama_url_does_not_override_explicit_remote_host(tmp_path, monkeypatch):
+    path = Path(tmp_path) / "transport_config.json"
+    c4.save_transport_config(path, {
+        "primary": {"provider": "ollama", "model": "qwen3.5:9b", "base_url": "http://192.168.1.5:11434"},
+    })
+    monkeypatch.setenv("TRANSLATOR_OLLAMA_URL", "http://host.docker.internal:11434")
+
+    loaded = c4.load_transport_config(path)
+
+    assert loaded["primary"]["base_url"] == "http://192.168.1.5:11434"
+
+
+def test_c4_removes_inactive_keyring_reference_on_provider_switch(tmp_path, monkeypatch):
+    path = Path(tmp_path) / "transport_config.json"
+    path.write_text(json.dumps({
+        "primary": {"provider": "gemini", "model": "gemini-2.5-flash-lite"},
+        "credential_refs": {"gemini": "keyring:Transass/gemini"},
+    }), encoding="utf-8")
+    deleted: list[str] = []
+    monkeypatch.setattr(c4.CredentialStore, "backend", property(lambda self: "keyring"))
+    monkeypatch.setattr(c4.CredentialStore, "get", lambda self, provider: None)
+    monkeypatch.setattr(c4.CredentialStore, "delete", lambda self, provider: deleted.append(provider) or True)
+    monkeypatch.setattr(c4.CredentialStore, "set", lambda self, provider, value: True)
+
+    c4.save_transport_config(path, {
+        "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
+    })
+
+    assert deleted == ["gemini"]
 
 
 def test_c1_can_carry_local_failure_ledger_root(tmp_path):

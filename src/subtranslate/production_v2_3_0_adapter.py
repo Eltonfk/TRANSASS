@@ -18,10 +18,11 @@ import pysubs2
 import requests
 
 from ollama_runtime import ollama_keep_alive
+from production_v2_2_6_adapter import APPROVED_MODEL as V226_MODEL
 from runtime_config import default_glossary_path
 
 APPROVED_PIPELINE = "v2_3_0"
-APPROVED_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", "qwen3.5:9b")
+APPROVED_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", V226_MODEL)
 KARAOKE_TRANSLATION_TIMING_UNSUPPORTED = "KARAOKE_TRANSLATION_TIMING_UNSUPPORTED"
 KARAOKE_TRANSLATION_RETRY = "KARAOKE_TRANSLATION"
 

@@ -548,6 +548,38 @@ def is_multi_speaker(event: Event) -> bool:
     return len(parts) > 1 and sum(segment.speaker_like for segment in parts) >= 2
 
 
+def _speaker_segment_groups(event: Event) -> list[list[CleanSegment]]:
+    """Group wrapped visual pieces into semantic speaker segments."""
+    parts = [segment for segment in event.segments if segment.clean_text]
+    groups: list[list[CleanSegment]] = []
+    current: list[CleanSegment] = []
+    for segment in parts:
+        if current and segment.speaker_like:
+            groups.append(current)
+            current = []
+        current.append(segment)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _restore_group_line_breaks(group: list[CleanSegment], translated: str) -> str | None:
+    """Restore source visual wraps inside one translated speaker segment."""
+    if len(group) <= 1:
+        return translated.strip()
+    source_len = max(1, sum(len(segment.clean_text) for segment in group) + len(group) - 1)
+    base = translated.strip()
+    for boundary in range(len(group) - 1, 0, -1):
+        before = sum(len(segment.clean_text) for segment in group[:boundary]) + boundary - 1
+        index = _choose_visual_break(base, before / source_len)
+        if index is None:
+            return None
+        left = base[:index].rstrip()
+        right = base[index:].lstrip()
+        base = left + " " + r"\N" + right
+    return base
+
+
 def unit_schema_kind(units: list[Unit]) -> str:
     kinds = {"segmented" if is_multi_speaker(event) else "normal" for unit in units for event in unit.events}
     if len(kinds) != 1:
@@ -1005,12 +1037,23 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
         if not is_multi_speaker(event):
             return event.original_text, ["SEGMENT_ID_MISMATCH"]
         values = sorted(response["segments"], key=lambda item: item["segment_id"])
-        expected = [segment.segment_id for segment in event.segments if segment.clean_text]
+        groups = _speaker_segment_groups(event)
+        expected = list(range(len(groups)))
+        physical_expected = [segment.segment_id for segment in event.segments if segment.clean_text]
         actual = [item["segment_id"] for item in values]
-        if expected != actual:
+        if actual not in (expected, physical_expected):
             return event.original_text, ["SEGMENT_ID_MISMATCH"]
         translated_segments = [item["text"].strip() for item in values]
-        base = r"\N".join(translated_segments)
+        if actual == expected:
+            restored: list[str] = []
+            for group, translated in zip(groups, translated_segments):
+                value = _restore_group_line_breaks(group, translated)
+                if value is None:
+                    return event.original_text, ["LINE_BREAK_INSIDE_WORD"]
+                restored.append(value)
+            base = r"\N".join(restored)
+        else:
+            base = r"\N".join(translated_segments)
     else:
         base = response.get("text", "").strip()
         if not isinstance(base, str):
@@ -1047,18 +1090,26 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
     if any(token in base for token in ("§T", "§N", "§G")) or "{" in base or "}" in base:
         flags.append("STRUCTURAL_CONTENT_IN_MODEL_OUTPUT")
         return event.original_text, flags
-    # Reinsert original ASS tags using visible offsets and lexical-safe
-    # boundaries.  Raw proportional indices are unsafe: translated words have
+    # Reinsert original ASS tags using scaled visible offsets and lexical-safe
+    # boundaries.  Raw character indices are unsafe: translated words have
     # different lengths and would yield e.g. `veze{\\i1}{\\i0}s`.
     source_visible_len = max(1, _visible_length(event.clean_text))
-    for anchor in sorted(event.tag_anchors, key=lambda item: item["position"], reverse=True):
-        desired = _visible_length(base) if anchor["position"] >= source_visible_len else min(_visible_length(base), max(0, anchor["position"]))
+    anchored: dict[int, list[str]] = {}
+    target_visible_len = _visible_length(base)
+    for anchor in event.tag_anchors:
+        # Scale source offsets into the translated payload before snapping to
+        # a lexical boundary.  Directly clamping late offsets to a shorter
+        # target can create a zero-width style span at the end of the line.
+        desired = round(max(0, anchor["position"]) * target_visible_len / source_visible_len)
+        desired = min(target_visible_len, desired)
         safe = _safe_inline_boundary(base, desired)
         if safe is None:
             flags.append("ASS_INLINE_TAG_ANCHOR_FAILURE")
             continue
+        anchored.setdefault(safe, []).append(anchor["tag"])
+    for safe, tags in sorted(anchored.items(), reverse=True):
         raw_position = _raw_index_for_visible_offset(base, safe)
-        base = base[:raw_position] + anchor["tag"] + base[raw_position:]
+        base = base[:raw_position] + "".join(tags) + base[raw_position:]
     if base.count(r"\N") != len(event.line_break_boundaries):
         flags.append("LINE_BREAK_COUNT_MISMATCH")
     if not segmented_response and not is_multi_speaker(event) and line_break_inside_word(base):
@@ -1084,8 +1135,12 @@ class Client:
         for unit in units:
             for event in unit.events:
                 if is_multi_speaker(event):
+                    groups = _speaker_segment_groups(event)
                     item: dict[str, Any] = {"id": event.id, "kind": event.classification}
-                    item["segments"] = [{"segment_id": segment.segment_id, "text": segment.clean_text} for segment in event.segments if segment.clean_text]
+                    item["segments"] = [
+                        {"segment_id": group_index, "text": " ".join(segment.clean_text for segment in group).strip()}
+                        for group_index, group in enumerate(groups)
+                    ]
                 else:
                     target_text = event.romanization_gloss if event.classification == "ROMANIZATION_GLOSS" else event.clean_text
                     item = {"id": event.id, "text": target_text, "kind": event.classification}

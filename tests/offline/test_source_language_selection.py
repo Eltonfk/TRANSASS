@@ -51,6 +51,15 @@ def test_select_track_for_language_picks_matching_dialogue():
     assert reason is None
 
 
+def test_select_track_for_language_accepts_single_unknown_textual_track():
+    """A lone embedded ASS track tagged ``und`` is still a usable source."""
+    tracks = [_track("und", title="Dialogue", index=7)]
+    selected, reason, bitmaps = _select_track_for_language(tracks, "inglês")
+    assert selected is not None and selected["index"] == 7
+    assert reason is None
+    assert bitmaps == []
+
+
 def test_select_track_for_language_excludes_signs_songs_only():
     tracks = [
         _track("spa", title="Signs & Songs", index=3),
@@ -70,6 +79,68 @@ def test_select_track_for_language_ambiguous_without_default():
     selected, reason, _ = _select_track_for_language(tracks, "espanhol")
     assert selected is None
     assert "múltiplas" in (reason or "")
+
+
+def test_select_track_for_language_refreshes_media_and_picks_content_choice(tmp_path, monkeypatch):
+    """Retranslation must not inherit an earlier wrong embedded-track choice."""
+    video = tmp_path / "ep01.mkv"
+    video.write_bytes(b"video")
+    tracks = [
+        _track("eng", title="English", index=2),
+        _track("eng", title="English", index=5),
+    ]
+
+    import anime_subtitle_translator as translator
+
+    monkeypatch.setattr(
+        translator,
+        "find_subtitle_stream",
+        lambda path, source_language=None: (5, "eng", ".ass"),
+    )
+    selected, reason, _ = _select_track_for_language(
+        tracks, "inglês", video_path=video,
+    )
+    assert selected is not None and selected["index"] == 5
+    assert reason is None
+
+
+def test_resolve_episode_source_refresh_bypasses_archived_parent(tmp_path, monkeypatch):
+    """A fresh retranslation source comes from the current MKV, not old lineage."""
+    video = tmp_path / "ep01.mkv"
+    video.write_bytes(b"video")
+    tracks = [_track("eng", title="English", index=5)]
+
+    class Library:
+        def get_record(self, record_id):
+            return {"id": int(record_id), "source_kind": "TRANSLATED"}
+
+        def lineage(self, record_id):
+            return []
+
+        def _episode_video(self, episode_id):
+            return video
+
+    import web_audit_retranslation as module
+
+    monkeypatch.setattr(
+        module,
+        "resolve_source_record",
+        lambda *args, **kwargs: {
+            "available": True,
+            "record_id": 99,
+            "path": "/archive/wrong-track.ass",
+            "format": "ass",
+        },
+    )
+    monkeypatch.setattr(module, "_probe_subtitle_tracks", lambda path: tracks)
+
+    archived = module.resolve_episode_source(Library(), 1, 10)
+    fresh = module.resolve_episode_source(
+        Library(), 1, 10, refresh_from_media=True,
+    )
+    assert archived["status"] == "SOURCE_AVAILABLE_LIBRARY"
+    assert fresh["status"] == "SOURCE_AVAILABLE_INTERNAL_TEXT"
+    assert fresh["track"]["index"] == 5
 
 
 def test_sidecar_candidates_filters_by_language(tmp_path):

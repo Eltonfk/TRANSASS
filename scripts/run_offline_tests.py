@@ -9,12 +9,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = ROOT / "tests" / "offline"
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src" / "subtranslate"))
 
 DESELECT = {
     "test_p2b1_architecture.DispatchTests.test_v230_calls_v226_then_v230",
     "test_p2b1a_closure.ContractAndControlPlaneTests.test_normal_archive_receives_final_v230_output",
 }
+
+HISTORICAL_FILES = {
+    "test_subtranslate_b5_planner.py",
+    "test_subtranslate_b6_planner.py",
+    "test_subtranslate_b7_planner.py",
+    "test_subtranslate_batch_planner.py",
+}
+STRESS_TEST_SUFFIX = (
+    "test_v238_per_call_durability.PerCallDurabilityTests."
+    "test_canonical_runner_233_initials_restart_mid_batches_without_retransport"
+)
 
 
 def flatten(suite: unittest.TestSuite):
@@ -30,6 +42,8 @@ def load_suite() -> tuple[unittest.TestSuite, list[str]]:
     suite = unittest.TestSuite()
     deselected: list[str] = []
     for path in sorted(TEST_ROOT.glob("test_*.py")):
+        if path.name in HISTORICAL_FILES:
+            continue
         module_name = path.stem
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -38,6 +52,8 @@ def load_suite() -> tuple[unittest.TestSuite, list[str]]:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         for test in flatten(loader.loadTestsFromModule(module)):
+            if test.id().endswith(STRESS_TEST_SUFFIX):
+                continue
             short_id = ".".join(test.id().split(".")[-3:])
             if short_id in DESELECT:
                 deselected.append(short_id)

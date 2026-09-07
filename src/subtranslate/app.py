@@ -139,6 +139,14 @@ def _effective_pipeline() -> str:
 
 
 def _model() -> str:
+    try:
+        from transport_config_store import load_transport_config
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        m = str((config.get("primary") or {}).get("model") or "").strip()
+        if m:
+            return m
+    except Exception:
+        pass
     return os.environ.get("TRANSLATOR_OLLAMA_MODEL", "").strip()
 
 
@@ -1006,7 +1014,11 @@ def _summary_level(line: str) -> str:
 def _job_uses_ollama(transport_config: dict) -> bool:
     """Return whether this job may execute a local Ollama request."""
     engines = [transport_config.get("primary"), transport_config.get("fallback")]
-    return any(isinstance(engine, dict) and str(engine.get("provider") or "").lower() == "ollama" for engine in engines)
+    return any(
+        isinstance(engine, dict)
+        and str(engine.get("provider") or "").lower() == "ollama"
+        for engine in engines
+    )
 
 
 def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
@@ -1046,10 +1058,14 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             state["thermal_stop_requested"] = True
             state["cancel_requested"] = True
             job["_thermal_trip"] = True
-            record("TRIPPED", snapshot, error=(
-                "GPU atingiu o limite preventivo; tradução interrompida para evitar "
-                "desligamento térmico"
-            ))
+            record(
+                "TRIPPED",
+                snapshot,
+                error=(
+                    "GPU atingiu o limite preventivo; tradução interrompida para evitar "
+                    "desligamento térmico"
+                ),
+            )
             process = state.get("process")
             if process is not None:
                 _send_process_group_signal(process, signal.SIGTERM)
@@ -1070,7 +1086,8 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             if status == "UNAVAILABLE":
                 _append_log(
                     "Proteção térmica GPU: sensor AMD indisponível; tradução liberada sem monitoramento térmico",
-                    level="error", job_id=job.get("id"),
+                    level="error",
+                    job_id=job.get("id"),
                 )
             _persist_locked()
     elif active:
@@ -1086,7 +1103,8 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             _append_log(
                 f"Proteção térmica GPU ativa: alerta={config.warning_c:.0f}°C, "
                 f"parada={config.stop_c:.0f}°C",
-                level="summary", job_id=job.get("id"),
+                level="summary",
+                job_id=job.get("id"),
             )
             _persist_locked()
     return guard
@@ -1099,7 +1117,11 @@ def _mark_thermal_guard_prestart(job: dict) -> None:
         job["reason"] = "gpu_thermal_guard"
         job["error"] = "GPU já estava acima do limite térmico antes do início"
         job["finished_at"] = _now()
-        _append_log(f"Falhou: {job.get('name', '')} — {job['error']}", level="error", job_id=job.get("id"))
+        _append_log(
+            f"Falhou: {job.get('name', '')} — {job['error']}",
+            level="error",
+            job_id=job.get("id"),
+        )
         _persist_locked()
 
 
@@ -1337,7 +1359,7 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
         return
 
     # Aplica BATCH_SIZE otimizado
-    new_batch = max(1, int(profile.get("batch_size", 16)))
+    new_batch = min(64, max(1, int(profile.get("batch_size", 16) or 16)))
     translator.BATCH_SIZE = new_batch
 
     # O perfil controla a política de chamadas, não a identidade do modelo.
@@ -1348,8 +1370,9 @@ def _apply_gemini_profile(transport_cfg: dict) -> None:
     # A escolha do usuário é uma decisão de execução, não uma sugestão. Nunca
     # troque Gemini por Ollama silenciosamente: isso mascara uma configuração
     # incompleta e pode enviar legendas para um motor diferente do escolhido.
+    from transport_providers import api_key_from_env
     keys = transport_cfg.get("keys") or {}
-    if not keys.get("gemini"):
+    if not (keys.get("gemini") or api_key_from_env("gemini")):
         raise RuntimeError(
             "GEMINI_API_KEY_MISSING: configure a chave do Google; "
             "Ollama não será usado como fallback automático"
@@ -1382,7 +1405,8 @@ def _apply_groq_profile(transport_cfg: dict) -> None:
     profile = transport_cfg.get("groq_profile") or {}
     if not profile.get("enabled", True):
         return
-    if not (transport_cfg.get("keys") or {}).get("groq"):
+    from transport_providers import api_key_from_env
+    if not ((transport_cfg.get("keys") or {}).get("groq") or api_key_from_env("groq")):
         raise RuntimeError(
             "GROQ_API_KEY_MISSING: configure a chave Groq; "
             "nenhum outro motor será usado automaticamente"
@@ -1400,13 +1424,50 @@ def _apply_groq_profile(transport_cfg: dict) -> None:
     )
 
 
+def _apply_deepseek_profile(transport_cfg: dict) -> None:
+    """Apply conservative DeepSeek batching and retry settings."""
+    import anime_subtitle_translator as translator
+
+    primary = transport_cfg.get("primary") or {}
+    if str(primary.get("provider", "")).lower() != "deepseek":
+        return
+    profile = transport_cfg.get("deepseek_profile") or {}
+    if not profile.get("enabled", True):
+        return
+    from transport_providers import api_key_from_env
+    if not ((transport_cfg.get("keys") or {}).get("deepseek") or api_key_from_env("deepseek")):
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY_MISSING: configure a chave DeepSeek; "
+            "nenhum outro motor será usado automaticamente"
+        )
+    from transport_providers import DEEPSEEK_MIN_DELAY_SECONDS
+
+    batch = min(30, max(1, int(profile.get("batch_size", 16) or 16)))
+    retry_budget = min(64, max(1, int(profile.get("retry_budget", 32) or 32)))
+    delay = max(
+        DEEPSEEK_MIN_DELAY_SECONDS,
+        float(profile.get("delay_between_calls", DEEPSEEK_MIN_DELAY_SECONDS) or 0.0),
+    )
+    profile.update({
+        "batch_size": batch,
+        "retry_budget": retry_budget,
+        "delay_between_calls": delay,
+    })
+    translator.BATCH_SIZE = batch
+    _append_log(
+        f"DeepSeek Profile ativo: batch={batch}, retry_budget={retry_budget}, "
+        f"delay={delay}s, model={primary.get('model', 'default')}",
+        level="info",
+    )
+
+
 def _run_episode_v238(job: dict) -> None:
     """C5: caminho in-process V2.3.8 para _run_episode.
 
     Preserva staging de temporada (glossário por série, app.py:865-873),
     output_exists_race (app.py:933-936) e cancelamento cooperativo (M4).
     """
-    from pipeline_orchestrator import execute_pipeline_plan, gemini_operation_limits
+    from pipeline_orchestrator import execute_pipeline_plan
     from web_execution_context import build_v238_execution_context
     from web_durable_provider import WebDurableResponseProvider
     from transport_config_store import load_transport_config
@@ -1469,9 +1530,10 @@ def _run_episode_v238(job: dict) -> None:
 
     transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
     identity = execution_identity(transport_cfg)
-    # Aplica Gemini profile quando provider=gemini (batch_size, retry, delay)
+    # Aplica o perfil do provider hospedado (batch, retry, delay).
     _apply_gemini_profile(transport_cfg)
     _apply_groq_profile(transport_cfg)
+    _apply_deepseek_profile(transport_cfg)
     # Roots ÚNICOS por job: checkpoints/captures compartilhados entre jobs
     # causam DURABLE_CAPTURE_DUPLICATE_CALL_ID (call_id derivado do request
     # colide com captures de jobs anteriores).
@@ -1528,34 +1590,18 @@ def _run_episode_v238(job: dict) -> None:
         candidate_image_id=identity["candidate_image_id"],
         failure_ledger_root=STATE_DIR / "failure-ledger",
     )
-    # Gemini profile: retry_budget é o limite de retries semânticos. O teto
+    # O retry_budget é o limite de retries semânticos. O teto
     # físico precisa ser separado: as chamadas iniciais de uma temporada
     # também ocupam o ledger (E110, por exemplo, precisa de ~30 lotes).
     primary_provider = str((transport_cfg.get("primary") or {}).get("provider", "")).lower()
-    gemini_profile = transport_cfg.get("gemini_profile") or {}
-    groq_profile = transport_cfg.get("groq_profile") or {}
-    if primary_provider == "gemini" and gemini_profile.get("enabled", True):
-        from v238_llama_policy import OperationCallBudget
-        retry_budget, physical_budget = gemini_operation_limits(gemini_profile)
-        # só injeta se ainda não existe (orchestrator usa setdefault)
-        if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
-            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=physical_budget, llama_generation_maximum=1)
-            ctx["gemini_profile"] = gemini_profile  # expõe para orchestrator/metrics
-            _append_log(
-                f"Gemini budget ativo: semantic_retries={retry_budget}, physical_calls={physical_budget}",
-                level="info", job_id=job.get("id"),
-            )
-    elif primary_provider == "groq" and groq_profile.get("enabled", True):
-        from pipeline_orchestrator import groq_operation_limits
-        from v238_llama_policy import OperationCallBudget
-        retry_budget, physical_budget = groq_operation_limits(groq_profile)
-        if "operation_budget" not in ctx or ctx.get("operation_budget") is None:
-            ctx["operation_budget"] = OperationCallBudget(qwen_physical_maximum=physical_budget, llama_generation_maximum=1)
-            ctx["groq_profile"] = groq_profile
-            _append_log(
-                f"Groq budget ativo: semantic_retries={retry_budget}, physical_calls={physical_budget}",
-                level="info", job_id=job.get("id"),
-            )
+    from transport_providers import API_KEY_PROVIDERS
+
+    primary_keys = transport_cfg.get("keys") or {}
+    from transport_providers import api_key_from_env
+    if primary_provider in API_KEY_PROVIDERS and not str(primary_keys.get(primary_provider) or api_key_from_env(primary_provider) or "").strip():
+        raise RuntimeError(
+            f"{primary_provider.upper()}_API_KEY_MISSING: configure a credencial antes de traduzir"
+        )
     ctx["response_provider"] = provider
     ctx["operation"] = "TRANSLATE"
     ctx["defer_intermediate_cleanup"] = False
@@ -1588,6 +1634,10 @@ def _run_episode_v238(job: dict) -> None:
             section["delay_between_calls"] = float(
                 (transport_cfg.get("groq_profile") or {}).get("delay_between_calls", 2.5)
             )
+        elif provider_name == "deepseek":
+            section["delay_between_calls"] = float(
+                (transport_cfg.get("deepseek_profile") or {}).get("delay_between_calls", 2.0)
+            )
         ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
 
     with state_lock:
@@ -1611,7 +1661,7 @@ def _run_episode_v238(job: dict) -> None:
         fallback_used = False
         configured_fallback = transport_cfg.get("fallback")
         primary_provider_name = str((transport_cfg.get("primary") or {}).get("provider", "")).lower()
-        if primary_provider_name in {"gemini", "groq"} and str((configured_fallback or {}).get("provider", "")).lower() == "ollama":
+        if primary_provider_name in API_KEY_PROVIDERS and str((configured_fallback or {}).get("provider", "")).lower() == "ollama":
             _append_log(
                 f"Fallback Ollama ignorado: {primary_provider_name.title()} está configurado como motor exclusivo.",
                 level="info", job_id=job.get("id"),
@@ -1640,6 +1690,14 @@ def _run_episode_v238(job: dict) -> None:
                 elif provider_name == "groq":
                     section["delay_between_calls"] = float(
                         (transport_cfg.get("groq_profile") or {}).get("delay_between_calls", 2.5)
+                    )
+                elif provider_name == "deepseek":
+                    section["delay_between_calls"] = float(
+                        (transport_cfg.get("deepseek_profile") or {}).get("delay_between_calls", 2.0)
+                    )
+                if provider_name in API_KEY_PROVIDERS and not str(section.get("api_key") or api_key_from_env(provider_name) or "").strip():
+                    raise RuntimeError(
+                        f"{provider_name.upper()}_API_KEY_MISSING: configure a credencial antes do fallback"
                     )
                 ctx["transport"] = transport_from_config(section, {"model": section.get("model")})
                 ctx["provider"] = provider_name
@@ -1848,7 +1906,6 @@ def _run_episode(job: dict) -> None:
     command = [sys.executable, "-u", str(SCRIPT_PATH), str(temporary_dir)]
     env = dict(os.environ)
     env["TRANSLATOR_SOURCE_LANGUAGE"] = job.get("source_language") or "inglês"
-    # Keep legacy subprocess ledgers beside the configured web state.  The
     # Keep legacy subprocess ledgers beside the configured web state.
     env["TRANSLATOR_FAILURE_LEDGER_ROOT"] = str(STATE_DIR / "failure-ledger")
     if job.get("dry_run"):
@@ -2277,7 +2334,9 @@ def _finish_session_locked() -> None:
         "failed": counts["failed"], "cancelled": counts["cancelled"], "skipped": counts["skipped"],
         "not_started_after_failure": counts.get("not_started_after_failure", 0),
         "interrupted": bool(state.get("bulk_stop_reason") or state.get("thermal_stop_requested")),
-        "stop_reason": state.get("bulk_stop_reason") or ("GPU_THERMAL_GUARD" if state.get("thermal_stop_requested") else None),
+        "stop_reason": state.get("bulk_stop_reason") or (
+            "GPU_THERMAL_GUARD" if state.get("thermal_stop_requested") else None
+        ),
     }
     state["history"].append(session)
     state["finished_ok"] = counts["failed"] == 0 and counts["cancelled"] == 0
@@ -2834,12 +2893,14 @@ def onboarding_provider_test():
         endpoint = f"{base_url or 'https://integrate.api.nvidia.com/v1'}/models"
     elif provider == "groq":
         endpoint = f"{base_url or 'https://api.groq.com/openai/v1'}/models"
+    elif provider == "deepseek":
+        endpoint = f"{base_url or 'https://api.deepseek.com/v1'}/models"
     else:
         return jsonify({"ok": False, "message": "Motor não reconhecido."}), 400
     if not endpoint.startswith(("http://", "https://")):
         return jsonify({"ok": False, "message": "O endereço do motor precisa começar com http:// ou https://."}), 400
     headers = {"Accept": "application/json"}
-    if key and provider in {"openai_compat", "groq", "nvidia"}:
+    if key and provider in {"openai_compat", "groq", "nvidia", "deepseek"}:
         headers["Authorization"] = f"Bearer {key}"
     if key and provider == "gemini":
         headers["x-goog-api-key"] = key

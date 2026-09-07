@@ -19,12 +19,17 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "subtranslate"))
 
 import web_retranslation_runner as wrr  # noqa: E402
 import anime_subtitle_translator as at  # noqa: E402
+import production_v2_2_1_adapter as v221  # noqa: E402
 import production_v2_2_5_adapter as v225  # noqa: E402
 import pipeline_orchestrator as orchestrator  # noqa: E402
+import pipeline_v2_1_3 as frozen_pipeline  # noqa: E402
+import v238_base_materializer as base_materializer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +41,76 @@ def test_legacy_ollama_url_accepts_base_or_chat_endpoint():
     assert at._ollama_endpoint("http://ollama:11434") == "http://ollama:11434/api/chat"
     assert at._ollama_endpoint("http://ollama:11434/api") == "http://ollama:11434/api/chat"
     assert at._ollama_endpoint("http://ollama:11434/api/chat") == "http://ollama:11434/api/chat"
+
+
+def test_v221_config_allows_external_transport_without_ollama_env(monkeypatch, tmp_path):
+    """Gemini/NVIDIA jobs must not fail in the frozen Ollama preflight."""
+    monkeypatch.delenv("TRANSLATOR_OLLAMA_URL", raising=False)
+    monkeypatch.delenv("TRANSLATOR_OLLAMA_MODEL", raising=False)
+    config, _ = v221._config(
+        tmp_path / "Series" / "episode.ass",
+        {},
+        execution_context={
+            "transport": object(),
+            "model": "gemini-2.5-flash-lite",
+        },
+    )
+    assert config.model == "gemini-2.5-flash-lite"
+    assert config.ollama_url == "http://transport-disabled.invalid/api/chat"
+
+
+def test_v221_config_keeps_legacy_ollama_preflight(monkeypatch, tmp_path):
+    """Direct V2.2.1/Ollama callers retain the historical guard."""
+    monkeypatch.delenv("TRANSLATOR_OLLAMA_URL", raising=False)
+    with pytest.raises(RuntimeError, match="TRANSLATOR_OLLAMA_URL"):
+        v221._config(tmp_path / "Series" / "episode.ass", {})
+
+
+def test_v226_batch_size_honors_gemini_profile(monkeypatch):
+    monkeypatch.delenv("TRANSLATOR_OLLAMA_URL", raising=False)
+    assert base_materializer._v226_batch_target_size({"provider": "gemini", "model": "gemini-2.5-flash-lite"}) == 16
+    assert base_materializer._v226_batch_target_size({"provider": "gemini", "model": "gemini-2.5-flash-lite", "gemini_profile": {"batch_size": 12}}) == 12
+    assert base_materializer._v226_batch_target_size({"model": "qwen3.5:9b"}) == 4
+
+
+def test_v226_batch_size_honors_groq_profile():
+    assert base_materializer._v226_batch_target_size({
+        "provider": "groq",
+        "model": "openai/gpt-oss-20b",
+        "groq_profile": {"batch_size": 8},
+    }) == 8
+
+
+def test_v226_batch_size_does_not_infer_groq_from_model_namespace():
+    assert base_materializer._v226_batch_target_size({
+        "provider": "openai_compat",
+        "model": "openai/gpt-oss-20b",
+        "groq_profile": {"batch_size": 8},
+    }) == 4
+
+
+def test_groq_rate_limit_backoff_parses_try_again_hint():
+    runner = object.__new__(frozen_pipeline.Runner)
+    runner.calls = [{"error": "HTTP_STATUS:429:Please try again in 20.9925s."}]
+    assert runner._rate_limit_backoff((1, 2), 0) == pytest.approx(20.9925)
+    assert orchestrator.groq_operation_limits({"retry_budget": 16}) == (16, 192)
+
+
+def test_gemini_retry_budget_is_separate_from_physical_call_ceiling():
+    assert orchestrator.gemini_operation_limits({"retry_budget": 32}) == (32, 131)
+    assert orchestrator.gemini_operation_limits({"retry_budget": 200}) == (200, 200)
+
+
+def test_split_isolation_does_not_consume_retry_budget():
+    config = frozen_pipeline.Config("http://local.invalid", retry_budget_calls=1)
+    runner = frozen_pipeline.Runner([], {}, config, {})
+    runner.client.call = lambda *args, **kwargs: ({}, [], {})
+
+    runner._attempt([], phase="split_isolation", attempt_type="RETRY", logical_batch_id="split")
+    assert runner.retry_budget.consumed == 0
+
+    runner._attempt([], phase="retry_local", attempt_type="RETRY", logical_batch_id="retry")
+    assert runner.retry_budget.consumed == 1
 
 
 def test_run_pipeline_passes_source_language(tmp_path, monkeypatch):
@@ -187,6 +262,62 @@ def test_track_selection_deterministic_on_full_tie(monkeypatch, tmp_path):
     assert idx == 6
 
 
+def test_track_selection_retries_compatible_ffprobe_probe(monkeypatch, tmp_path):
+    """An empty quiet probe is retried with the portable ffprobe query."""
+    streams = [_stream(2, "Subtitles")]
+    responses = iter([_ffprobe_result([]), _ffprobe_result(streams)])
+    monkeypatch.setattr(at, "SOURCE_LANGUAGE", "inglês")
+    monkeypatch.setattr(at.subprocess, "run", lambda *a, **k: next(responses))
+    idx, lang, ext = at.find_subtitle_stream(tmp_path / "ep01.mkv")
+    assert idx == 2
+    assert lang == "fre"
+    assert ext == ".ass"
+
+
+def test_track_selection_prefers_substantial_dialogue_content(monkeypatch, tmp_path):
+    """Two same-language tracks may have identical metadata; choose the full
+    dialogue track instead of a nearly empty companion track."""
+    video = tmp_path / "ep01.mkv"
+    video.write_bytes(b"placeholder")
+    streams = [_stream(2, "English"), _stream(3, "English")]
+    for stream in streams:
+        stream["tags"]["language"] = "eng"
+
+    def run(command, *args, **kwargs):
+        if command[0] == "ffprobe":
+            return _ffprobe_result(streams)
+        stream_index = int(command[command.index("-map") + 1].split(":", 1)[1])
+        output = Path(command[-1])
+        header = (
+            "[Script Info]\nScriptType: v4.00+\n\n"
+            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+            "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        )
+        if stream_index == 2:
+            output.write_text(header + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hi\n", encoding="utf-8")
+        else:
+            output.write_text(
+                header
+                + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hello there\n"
+                + "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,How are you?\n"
+                + "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,I am fine, thank you.\n",
+                encoding="utf-8",
+            )
+        return _ffprobe_result([])
+
+    monkeypatch.setattr(at, "SOURCE_LANGUAGE", "inglês")
+    monkeypatch.setattr(at.subprocess, "run", run)
+
+    idx, lang, ext = at.find_subtitle_stream(video)
+
+    assert idx == 3
+    assert lang == "eng"
+    assert ext == ".ass"
+
+
 # ---------------------------------------------------------------------------
 # Fix: environment source-language fallback on the V226 path
 # ---------------------------------------------------------------------------
@@ -238,8 +369,9 @@ def test_preflight_uses_per_episode_language(monkeypatch):
     captured = {}
 
     def fake_resolve(library, episode_id, record_id=None, materialize=False,
-                     job_id=None, source_language="inglês"):
+                     job_id=None, source_language="inglês", refresh_from_media=False):
         captured["source_language"] = source_language
+        captured["refresh_from_media"] = refresh_from_media
         return {"available": True, "record_id": record_id, "status": "SOURCE_AVAILABLE_LIBRARY"}
 
     episode = {"id": 85, "classification": "ANIME", "episode": "01",
@@ -254,10 +386,12 @@ def test_preflight_uses_per_episode_language(monkeypatch):
         [85], bulk=False, source_languages={85: "francês"})
     assert result["counts"]["eligible"] == 1
     assert captured["source_language"] == "francês"
+    assert captured["refresh_from_media"] is True
 
     # Sem seleção explícita: cai no idioma global configurado.
     app_module._retranslation_preflight([85], bulk=False)
     assert captured["source_language"] == app_module._global_source_language()
+    assert captured["refresh_from_media"] is True
 
 
 def test_retranslation_can_queue_only_eligible_selected_episodes(tmp_path, monkeypatch):
@@ -447,13 +581,17 @@ def test_load_state_marks_inflight_jobs_for_persisted_recovery(tmp_path, monkeyp
     import app as app_module
 
     state_file = tmp_path / "jobs.json"
-    state_file.write_text(_json.dumps({"jobs": [{"id": "job-1", "status": "PUBLISHING"}]}), encoding="utf-8")
+    state_file.write_text(_json.dumps({"jobs": [
+        {"id": "job-1", "status": "PUBLISHING"},
+        {"id": "job-2", "status": "WAITING"},
+    ]}), encoding="utf-8")
     old_file = app_module.STATE_FILE
     try:
         app_module.STATE_FILE = state_file
         loaded = app_module._load_state()
         assert loaded["recovery_needed"] is True
-        assert loaded["jobs"][0]["status"] == "FAILED"
-        assert loaded["jobs"][0]["reason"] == "service_restarted"
+        assert all(job["status"] == "FAILED" for job in loaded["jobs"])
+        assert all(job["reason"] == "service_restarted" for job in loaded["jobs"])
+        assert all("retomada automática" in job["error"] for job in loaded["jobs"])
     finally:
         app_module.STATE_FILE = old_file

@@ -23,6 +23,183 @@ import json
 from typing import Any
 
 
+# Google applies RPM/TPM limits per project and the exact ceiling varies by
+# account tier. Four seconds is a conservative floor for the free/API-Studio
+# profile (15 requests/minute); paid users can still choose a larger delay.
+GEMINI_MIN_DELAY_SECONDS = 4.0
+# Groq's free limits are model/account dependent. A conservative floor keeps
+# bursts below the common free-plan RPM ceiling while retaining its latency
+# advantage over slower hosted providers.
+GROQ_MIN_DELAY_SECONDS = 2.5
+# DeepSeek is also rate-limited by account/model. Keep a small floor in the
+# shared transport boundary so direct clients and durable web clients agree.
+DEEPSEEK_MIN_DELAY_SECONDS = 2.0
+# These providers are network services whose credentials must be explicit.
+# ``openai_compat`` is intentionally absent because it may point to a local
+# LM Studio/vLLM/llama.cpp endpoint.
+API_KEY_PROVIDERS = frozenset({"gemini", "groq", "nvidia", "deepseek"})
+
+
+def _gemini_schema(value: Any) -> Any:
+    """Project the canonical JSON schema to Gemini's responseSchema subset.
+
+    Ollama's schema uses lower-case JSON-Schema names and includes
+    JSON-Schema names. Gemini's structured output contract accepts the same
+    shape semantically, but expects enum type names and only a subset of JSON
+    Schema keywords. Keep the portable structural fields; batch cardinality
+    remains enforced by the canonical validator after the response returns.
+    """
+    if isinstance(value, list):
+        return [_gemini_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    if "type" in value:
+        projected["type"] = str(value["type"]).upper()
+    for key in (
+        "format", "title", "description", "nullable", "enum", "required",
+        "propertyOrdering", "minItems", "maxItems",
+    ):
+        if key in value:
+            projected[key] = _gemini_schema(value[key])
+    if "properties" in value and isinstance(value["properties"], dict):
+        projected["properties"] = {
+            str(name): _gemini_schema(schema)
+            for name, schema in value["properties"].items()
+        }
+    if "items" in value:
+        projected["items"] = _gemini_schema(value["items"])
+    return projected
+
+
+# Stable text-generation models that are appropriate for subtitle translation.
+# The online catalogue may contain audio, image, TTS, embedding and preview
+# models that cannot satisfy the Transass structured text contract; these are
+# the safe offline fallback shown before an API key is available.  The 2.5
+# family is retained only through migration for older configurations.
+GEMINI_TRANSLATION_MODEL_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "gemini-3.5-flash-lite",
+        "label": "Gemini 3.5 Flash-Lite · recomendado",
+        "description": "Mais econômico e rápido; melhor ponto de partida para temporadas.",
+        "stable": True,
+        "recommended": True,
+    },
+    {
+        "id": "gemini-3.5-flash",
+        "label": "Gemini 3.5 Flash · equilibrado",
+        "description": "Mais qualidade de raciocínio, com custo e latência moderados.",
+        "stable": True,
+        "recommended": True,
+    },
+    {
+        "id": "gemini-3.1-pro",
+        "label": "Gemini 3.1 Pro · maior qualidade",
+        "description": "Indicado para casos difíceis; mais lento e geralmente mais caro.",
+        "stable": True,
+        "recommended": False,
+    },
+)
+
+_GEMINI_MODEL_CATALOG_BY_ID = {
+    item["id"]: item for item in GEMINI_TRANSLATION_MODEL_CATALOG
+}
+GEMINI_MODEL_MIGRATIONS = {
+    # Models retired by Google are migrated to stable text-generation models
+    # before a request is made.  The user's configured model remains visible
+    # as the replacement in the UI and is persisted on the next save.
+    "gemini-1.5-flash": "gemini-3.5-flash-lite",
+    "gemini-1.5-flash-8b": "gemini-3.5-flash-lite",
+    "gemini-1.5-pro": "gemini-3.5-flash",
+    "gemini-2.0-flash": "gemini-3.5-flash-lite",
+    "gemini-2.0-flash-001": "gemini-3.5-flash-lite",
+    "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-2.0-flash-lite-001": "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-2.5-flash-lite-preview-09-2025": "gemini-3.5-flash-lite",
+    "gemini-2.5-flash": "gemini-3.5-flash",
+    "gemini-2.5-pro": "gemini-3.1-pro",
+}
+_GEMINI_MODEL_BLOCKLIST = (
+    "audio", "embedding", "image", "live", "tts", "transcribe", "veo", "imagen",
+)
+
+
+def gemini_model_catalog() -> list[dict[str, Any]]:
+    """Return a copy of the safe stable fallback catalogue."""
+    return [dict(item) for item in GEMINI_TRANSLATION_MODEL_CATALOG]
+
+
+def migrate_gemini_model(model: str) -> str:
+    """Return a stable replacement for a known retired Gemini model."""
+    value = str(model or "").strip()
+    lowered = value.casefold()
+    direct = GEMINI_MODEL_MIGRATIONS.get(lowered)
+    if direct:
+        return direct
+    # Versioned aliases (``-001``, ``-latest`` and experimental suffixes)
+    # were also used by older configs.  Keep the migration deterministic while
+    # leaving newer families to the live catalogue returned by Google.
+    if lowered.startswith("gemini-1.5-flash") or lowered.startswith("gemini-2.0-flash"):
+        return "gemini-3.5-flash-lite"
+    if lowered.startswith("gemini-1.5-pro"):
+        return "gemini-3.5-flash"
+    if lowered.startswith("gemini-2.5-flash-lite-preview"):
+        return "gemini-3.5-flash-lite"
+    if lowered.startswith("gemini-2.5-flash-lite"):
+        return "gemini-3.5-flash-lite"
+    if lowered.startswith("gemini-2.5-flash"):
+        return "gemini-3.5-flash"
+    if lowered.startswith("gemini-2.5-pro"):
+        return "gemini-3.1-pro"
+    return value
+
+
+def gemini_models_from_api(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract text-generation models from ``GET /v1beta/models``.
+
+    Google returns several model families in this endpoint.  Only models that
+    advertise ``generateContent`` and are not specialized audio/image/TTS
+    variants can be used by the Transass Gemini transport.
+    """
+    rows = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    models: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        methods = row.get("supportedGenerationMethods")
+        if isinstance(methods, list) and "generateContent" not in methods:
+            continue
+        raw_id = str(row.get("baseModelId") or row.get("name") or "").strip()
+        model_id = raw_id.removeprefix("models/").strip()
+        lowered = model_id.lower()
+        if (
+            not model_id.startswith("gemini-")
+            or any(token in lowered for token in _GEMINI_MODEL_BLOCKLIST)
+            or "preview" in lowered
+            or "experimental" in lowered
+        ):
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        known = _GEMINI_MODEL_CATALOG_BY_ID.get(model_id, {})
+        display = str(row.get("displayName") or "").strip() or model_id
+        description = str(row.get("description") or "").strip()
+        models.append({
+            "id": model_id,
+            "label": known.get("label") or display,
+            "description": description or known.get("description") or "Modelo Gemini com generateContent.",
+            "stable": bool(known.get("stable", "preview" not in lowered)),
+            "recommended": bool(known.get("recommended", False)),
+        })
+    models.sort(key=lambda item: (not item["recommended"], not item["stable"], item["id"]))
+    return models
+
+
 class TransportBlocked(RuntimeError):
     """Raised for provider-side errors (HTTP errors, refusals, empty output)."""
 
@@ -31,10 +208,16 @@ class BaseTransport:
     name = "base"
 
     def __init__(self, *, model: str, base_url: str | None = None,
-                 api_key: str | None = None) -> None:
+                 api_key: str | None = None,
+                 delay_between_calls: float = 0.0) -> None:
         self.model = model
         self.base_url = (base_url or self.default_base_url()).rstrip("/")
         self.api_key = api_key
+        # Hosted-provider profiles set this value. Keeping it on the
+        # transport makes the V226 direct-client path obey the same limiter
+        # as the durable V238 provider without affecting local Ollama or
+        # generic OpenAI-compatible/NVIDIA transports.
+        self.delay_between_calls = max(0.0, float(delay_between_calls or 0.0))
 
     @staticmethod
     def default_base_url() -> str:
@@ -53,6 +236,21 @@ class BaseTransport:
     def extract_content(self, body: bytes) -> str:
         """Extract assistant text from a successful response body."""
         raise NotImplementedError
+
+    @staticmethod
+    def error_detail(body: bytes) -> str:
+        """Return a bounded provider error without exposing request secrets."""
+        try:
+            value = json.loads(bytes(body).decode("utf-8", errors="replace"))
+        except (TypeError, ValueError, UnicodeError):
+            return bytes(body).decode("utf-8", errors="replace")[:400]
+        if isinstance(value, dict):
+            error = value.get("error")
+            if isinstance(error, dict):
+                message = error.get("message") or error.get("status") or error.get("code")
+                if message:
+                    return str(message)[:400]
+        return json.dumps(value, ensure_ascii=False)[:400]
 
 
 def _messages_of(canonical_payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -149,6 +347,82 @@ class OpenAICompatTransport(BaseTransport):
         return content
 
 
+GROQ_TRANSLATION_MODEL_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "openai/gpt-oss-20b",
+        "label": "GPT-OSS 20B · recomendado",
+        "description": "Rápido e econômico para tradução em lotes.",
+        "recommended": True,
+    },
+    {
+        "id": "openai/gpt-oss-120b",
+        "label": "GPT-OSS 120B · maior qualidade",
+        "description": "Mais qualidade, com maior consumo de tokens.",
+        "recommended": False,
+    },
+    {
+        "id": "qwen/qwen3.6-27b",
+        "label": "Qwen 3.6 27B · equilibrado",
+        "description": "Alternativa Qwen hospedada pela Groq.",
+        "recommended": True,
+    },
+)
+_GROQ_BLOCKLIST = ("whisper", "guard", "embed", "audio", "tts", "compound")
+
+
+def groq_model_catalog() -> list[dict[str, Any]]:
+    return [dict(item) for item in GROQ_TRANSLATION_MODEL_CATALOG]
+
+
+def groq_models_from_api(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    known = {item["id"]: item for item in GROQ_TRANSLATION_MODEL_CATALOG}
+    models: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        lowered = model_id.lower()
+        if not model_id or any(token in lowered for token in _GROQ_BLOCKLIST):
+            continue
+        item = known.get(model_id, {})
+        models.append({
+            "id": model_id,
+            "label": item.get("label") or model_id,
+            "description": item.get("description") or "Modelo Groq compatível com chat.",
+            "stable": True,
+            "recommended": bool(item.get("recommended", False)),
+        })
+    models.sort(key=lambda item: (not item["recommended"], item["id"]))
+    return models
+
+
+class GroqTransport(OpenAICompatTransport):
+    """Groq Inference API using its OpenAI-compatible chat endpoint."""
+
+    name = "groq"
+
+    @staticmethod
+    def default_base_url() -> str:
+        return "https://api.groq.com/openai/v1"
+
+
+_NVIDIA_MODEL_NAMESPACES = {
+    "deepseek-ai", "google", "meta", "microsoft", "minimaxai", "mistralai",
+    "moonshotai", "nvidia", "openai", "poolside", "qwen", "sarvamai",
+    "stepfun-ai", "stockmark", "thinkingmachines", "upstage", "z-ai",
+}
+
+
+def nvidia_model_is_supported(model: str) -> bool:
+    """Check the provider namespace before an NVIDIA NIM request is made."""
+    value = str(model or "").strip()
+    namespace = value.split("/", 1)[0].casefold() if "/" in value else ""
+    return bool(namespace and namespace in _NVIDIA_MODEL_NAMESPACES)
+
+
 class NvidiaTransport(OpenAICompatTransport):
     """NVIDIA NIM API (build.nvidia.com) — OpenAI-compatible /chat/completions.
 
@@ -159,17 +433,14 @@ class NvidiaTransport(OpenAICompatTransport):
 
     name = "nvidia"
 
-    NVIDIA_MODEL_NAMESPACES = {
-        "deepseek-ai", "google", "meta", "microsoft", "minimaxai", "mistralai",
-        "moonshotai", "nvidia", "openai", "poolside", "qwen", "sarvamai",
-        "stepfun-ai", "stockmark", "thinkingmachines", "upstage", "z-ai",
-    }
+    NVIDIA_MODEL_NAMESPACES = _NVIDIA_MODEL_NAMESPACES
 
-    def __init__(self, *, model: str, base_url: str | None = None, api_key: str | None = None):
-        namespace = model.split("/", 1)[0].casefold() if "/" in model else ""
-        if namespace not in self.NVIDIA_MODEL_NAMESPACES:
+    def __init__(self, *, model: str, base_url: str | None = None, api_key: str | None = None,
+                 delay_between_calls: float = 0.0):
+        if not nvidia_model_is_supported(model):
             raise TransportBlocked("NVIDIA_MODEL_AUTHORITY_MISMATCH")
-        super().__init__(model=model, base_url=base_url, api_key=api_key)
+        super().__init__(model=model, base_url=base_url, api_key=api_key,
+                         delay_between_calls=delay_between_calls)
 
     @staticmethod
     def default_base_url() -> str:
@@ -207,11 +478,19 @@ class GeminiTransport(BaseTransport):
                 # Gemini truncates at maxOutputTokens; the canonical 1024 is
                 # too small for 8-event batches with long translations.
                 "maxOutputTokens": max(int(options.get("num_predict", 1024)), 8192),
-                "responseMimeType": "application/json",
+                "responseMimeType": "text/plain" if canonical_payload.get("gemini_plain_text") else "application/json",
             },
         }
         if system_texts:
             request["systemInstruction"] = {"parts": [{"text": "\n".join(system_texts)}]}
+        # The canonical V226 payload already contains the exact per-batch
+        # schema.  Supplying it natively prevents Gemini from dropping IDs,
+        # inventing fields, or mixing normal/segmented item shapes.  The
+        # prompt remains present for providers without structured output; the
+        # schema is an additional Gemini-only constraint.
+        response_schema = canonical_payload.get("format")
+        if isinstance(response_schema, dict) and not canonical_payload.get("gemini_plain_text"):
+            request["generationConfig"]["responseSchema"] = _gemini_schema(response_schema)
         return request
 
     def extract_content(self, body: bytes) -> str:
@@ -232,11 +511,23 @@ class GeminiTransport(BaseTransport):
         return content
 
 
+class DeepseekTransport(OpenAICompatTransport):
+    """DeepSeek API — OpenAI-compatible /chat/completions."""
+
+    name = "deepseek"
+
+    @staticmethod
+    def default_base_url() -> str:
+        return "https://api.deepseek.com/v1"
+
+
 _PROVIDERS = {
     "ollama": OllamaTransport,
     "openai_compat": OpenAICompatTransport,
+    "groq": GroqTransport,
     "gemini": GeminiTransport,
     "nvidia": NvidiaTransport,
+    "deepseek": DeepseekTransport,
 }
 
 
@@ -253,8 +544,21 @@ def transport_from_config(transport_config: dict[str, Any] | None,
     model = tc.get("model") or canonical_model
     if not model:
         raise TransportBlocked("TRANSPORT_MODEL_MISSING")
-    api_key = tc.get("api_key") or tc.get("api_key_env_placeholder")
-    return cls(model=str(model), base_url=tc.get("base_url"), api_key=api_key)
+    if name == "gemini":
+        model = migrate_gemini_model(str(model))
+    # Environment/keyring resolution stays at the transport boundary.  The
+    # execution context remains credential-free, while `.env` deployments and
+    # headless runs behave like the UI-configured file/keyring path.
+    api_key = tc.get("api_key") or tc.get("api_key_env_placeholder") or api_key_from_env(name)
+    delay = tc.get("delay_between_calls", 0.0) if name in {"gemini", "groq", "deepseek"} else 0.0
+    if name == "gemini":
+        delay = max(GEMINI_MIN_DELAY_SECONDS, float(delay or 0.0))
+    elif name == "groq":
+        delay = max(GROQ_MIN_DELAY_SECONDS, float(delay or 0.0))
+    elif name == "deepseek":
+        delay = max(DEEPSEEK_MIN_DELAY_SECONDS, float(delay or 0.0))
+    return cls(model=str(model), base_url=tc.get("base_url"), api_key=api_key,
+               delay_between_calls=max(0.0, float(delay or 0.0)))
 
 
 def api_key_from_env(provider_name: str, environ_getter=None) -> str | None:
@@ -264,8 +568,10 @@ def api_key_from_env(provider_name: str, environ_getter=None) -> str | None:
     env_names = {
         "openai_compat": ("TRANSPORT_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY",
                           "OPENROUTER_API_KEY"),
+        "groq": ("TRANSPORT_API_KEY", "GROQ_API_KEY"),
         "gemini": ("TRANSPORT_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "nvidia": ("TRANSPORT_API_KEY", "NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"),
+        "deepseek": ("TRANSPORT_API_KEY", "DEEPSEEK_API_KEY"),
         "ollama": ("TRANSPORT_API_KEY",),
     }
     for env_name in env_names.get(provider_name, ("TRANSPORT_API_KEY",)):

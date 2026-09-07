@@ -33,6 +33,7 @@ from pipeline_v2_1_3 import (
     validate_structure,
     write_ass,
 )
+from runtime_config import default_library_root
 from production_v2_1_3_adapter import _fsync_file
 from production_v2_2_3_adapter import (
     INTERRUPTED_DIALOGUE_RETRY_INSTRUCTION,
@@ -41,6 +42,7 @@ from production_v2_2_3_adapter import (
     classify_short_english_fragment,
     normalize_short_fragment_for_detection,
 )
+import production_v2_2_1_adapter as v221_config_adapter
 from production_v2_2_4_adapter import V224MemoryRunner, _config
 from translation_memory import TranslationMemory
 
@@ -404,9 +406,29 @@ def translate_subtitle_file_v2_2_5(
     if output_path.exists():
         raise FileExistsError(f"a saída final já existe: {output_path.name}")
     started = time.perf_counter()
-    config, merged_glossary = _config(subtitle_path, glossary)
+    # V2.2.1's historical bootstrap requires Ollama env vars.  When V2.3.8
+    # supplies a provider transport, let that adapter build a compatible
+    # Config without imposing the obsolete Ollama preflight.
+    if execution_context and execution_context.get("transport") is not None:
+        config, merged_glossary = v221_config_adapter._config(
+            subtitle_path,
+            glossary,
+            execution_context=execution_context,
+        )
+    else:
+        config, merged_glossary = _config(subtitle_path, glossary)
     if execution_context:
         config.model = execution_context.get("model") or execution_context.get("model_override") or config.model
+        # V2.3.8 uses a smaller bounded batch than the historical V2.2.x
+        # entrypoint.  Long subtitle lines plus the contextual neighbors can
+        # otherwise consume the 2560-token context before the JSON envelope is
+        # complete, yielding V238_OUTPUT_TRUNCATED.
+        v238_batch_size = execution_context.get("v238_batch_target_size")
+        if v238_batch_size is not None:
+            config.batch_target_size = max(1, int(v238_batch_size))
+        retry_budget_calls = execution_context.get("retry_budget_calls")
+        if retry_budget_calls is not None:
+            config.retry_budget_calls = max(0, int(retry_budget_calls))
         config.operation_budget = execution_context.get("operation_budget")
         config.model_digest = execution_context.get("primary_model_digest") or execution_context.get("model_digest")
         if execution_context.get("durable_call_root"):
@@ -420,7 +442,7 @@ def translate_subtitle_file_v2_2_5(
     # English.  Applied even without an execution context so direct plan
     # calls (e.g. v2_3_0 via the orchestrator) honor the configured language.
     config.source_language = _resolve_source_language(execution_context)
-    memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
+    memory_root = Path(memory_db_root or default_library_root())
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
     original, events, profile = load_events(
@@ -451,9 +473,51 @@ def translate_subtitle_file_v2_2_5(
     summary["model"] = config.model
     if not summary.get("eligible_experimental") and not (execution_context or {}).get("v238_allow_primary_ledger_failures"):
         snapshot = ledger.snapshot(runner, summary, stage="eligibility_gate", error="v2_2_5_not_eligible")
+        failed_event_ids = [
+            item.get("id")
+            for item in summary.get("results", [])
+            if isinstance(item, dict) and item.get("status") != "resolved"
+        ][:32]
+        # Keep the first actionable provider/validator evidence in the
+        # compact exception prefix.  The full forensic snapshot remains in
+        # the private ledger, but without this projection a UI log can end at
+        # ``failed_event_ids`` before revealing whether the cause was HTTP,
+        # JSON shape, or linguistic validation.
+        first_call_diagnostics = []
+        for call in summary.get("calls", []):
+            if not isinstance(call, dict):
+                continue
+            if call.get("success") is True and not call.get("error") and not call.get("structural_issues"):
+                continue
+            first_call_diagnostics.append({
+                "phase": call.get("phase"),
+                "http_status": call.get("http_status"),
+                "event_ids": list(call.get("event_ids") or [])[:8],
+                "error": str(call.get("error") or "")[:240] or None,
+                "structural_issues": list(call.get("structural_issues") or [])[:8],
+                "json_valid": call.get("json_valid"),
+            })
+            if len(first_call_diagnostics) >= 3:
+                break
+        first_result_diagnostics = [
+            {
+                "id": item.get("id"),
+                "failure_reason": str(item.get("failure_reason") or "")[:240],
+                "flags": list(item.get("flags") or [])[:8],
+            }
+            for item in summary.get("results", [])
+            if isinstance(item, dict) and item.get("status") != "resolved"
+        ][:3]
         failure_summary = {
             "reason": "v2_2_5_not_eligible",
-            "resolved": summary.get("resolved"), "events": summary.get("events"),
+            "resolved": summary.get("resolved"), "failed": summary.get("failed"), "events": summary.get("events"),
+            "first_call_diagnostics": first_call_diagnostics,
+            "first_result_diagnostics": first_result_diagnostics,
+            "failed_event_ids": failed_event_ids,
+            "retry_budget": summary.get("retry_budget", {}),
+            "multiline_sign_card_failed_event_ids": summary.get("multiline_sign_card_failed_event_ids", []),
+            "sign_group_ambiguous_groups": summary.get("sign_group_ambiguous_groups", 0),
+            "sign_group_structural_failures": summary.get("sign_group_structural_failures", 0),
             "critical_flags": summary.get("critical_flags", []), "flags": summary.get("flags", {}),
             "structural_failures": summary.get("structural_failures", []),
             "short_english_residual_event_ids": summary.get("short_english_residual_event_ids", []),

@@ -38,6 +38,7 @@ from pipeline_v2_1_3 import (
     validate_structure,
     write_ass,
 )
+from runtime_config import default_library_root
 from production_v2_1_3_adapter import APPROVED_CONFIG, APPROVED_MODEL, _fsync_file, _merged_glossary
 from production_v2_2_0_adapter import MemoryRunner
 from translation_memory import TranslationMemory
@@ -334,6 +335,10 @@ class V221MemoryRunner(MemoryRunner):
         last_sign_representative: int | None = None
         last_dedup_representative: int | None = None
         for event in events:
+            if event.is_comment:
+                prepared.append(event)
+                last_sign_key = last_sign_index = last_sign_representative = last_dedup_representative = None
+                continue
             info = analyze_vector_event(event)
             sign_key = (event.clean_text, event.style, event.name, event.effect, _structural_shape(event))
             contiguous_sign = (
@@ -508,13 +513,43 @@ class V221MemoryRunner(MemoryRunner):
         return valid
 
 
-def _config(subtitle_path: Path, folder_glossary: dict[str, str] | None) -> tuple[Config, dict[str, str]]:
-    ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "").strip()
-    model = os.environ.get("TRANSLATOR_OLLAMA_MODEL", APPROVED_MODEL).strip()
-    if not ollama_url:
-        raise RuntimeError("TRANSLATOR_OLLAMA_URL não configurada para V2.2.1")
-    if model != APPROVED_MODEL:
-        raise RuntimeError(f"V2.2.1 exige {APPROVED_MODEL}; modelo configurado: {model or '<vazio>'}")
+def _config(
+    subtitle_path: Path,
+    folder_glossary: dict[str, str] | None,
+    *,
+    execution_context: dict[str, Any] | None = None,
+) -> tuple[Config, dict[str, str]]:
+    """Build the legacy config without blocking an injected provider.
+
+    V2.2.1 predates the provider transports and historically required the
+    Ollama URL/model during startup.  V2.3.8 injects a Gemini, NVIDIA or
+    OpenAI-compatible transport into ``Config`` before the first model call;
+    in that path the old Ollama preflight is irrelevant and must not reject a
+    valid external provider.  Direct/legacy calls still take the exact old
+    Ollama validation path when no transport is supplied.
+    """
+    context = execution_context or {}
+    external_transport = context.get("transport") is not None
+    if external_transport:
+        # Config.ollama_url remains a compatibility field used by the frozen
+        # client only when Config.transport is absent.  Use a deliberately
+        # non-routable placeholder when no Ollama URL is configured so an
+        # accidental fallback fails closed instead of contacting localhost.
+        ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "").strip()
+        if not ollama_url:
+            ollama_url = "http://transport-disabled.invalid/api/chat"
+        model = str(
+            context.get("model")
+            or context.get("model_override")
+            or APPROVED_MODEL
+        ).strip() or APPROVED_MODEL
+    else:
+        ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "").strip()
+        model = os.environ.get("TRANSLATOR_OLLAMA_MODEL", APPROVED_MODEL).strip()
+        if not ollama_url:
+            raise RuntimeError("TRANSLATOR_OLLAMA_URL não configurada para V2.2.1")
+        if model != APPROVED_MODEL:
+            raise RuntimeError(f"V2.2.1 exige {APPROVED_MODEL}; modelo configurado: {model or '<vazio>'}")
     values = dict(APPROVED_CONFIG)
     values.update({
         "ollama_url": ollama_url,
@@ -551,7 +586,7 @@ def translate_subtitle_file_v2_2_1(
         raise FileExistsError(f"a saída final já existe: {output_path.name}")
     started = time.perf_counter()
     config, merged_glossary = _config(subtitle_path, glossary)
-    memory_root = Path(memory_db_root or os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", "/app/state/anime-subtitle-library"))
+    memory_root = Path(memory_db_root or default_library_root())
     memory = TranslationMemory(memory_root)
     build = memory.sync_approved()
     original, events, profile = load_events(subtitle_path, merged_glossary)

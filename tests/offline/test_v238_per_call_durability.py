@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from v238_per_call_durability import (
     DurableCallFault,
     DurableCallOutcomeUnknown,
@@ -546,6 +548,7 @@ class PerCallDurabilityTests(unittest.TestCase):
             self.assertEqual(resumed.state(), "RESPONSE_DURABLE")
             self.assertEqual(resumed.load_raw(), b'{"message":{"content":"{}"}}')
 
+    @pytest.mark.stress
     def test_canonical_runner_233_initials_restart_mid_batches_without_retransport(self):
         from pipeline_v2_1_3 import CleanSegment, Config, Event, Runner
         from v238_llama_policy import OperationCallBudget

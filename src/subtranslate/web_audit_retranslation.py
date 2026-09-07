@@ -30,6 +30,7 @@ from pipeline_v2_1_3 import (
     validate_inline_tags,
     validate_structure,
 )
+from runtime_paths import external_media_environment
 
 
 TEXTUAL_SUBTITLE_CODECS = {
@@ -39,6 +40,11 @@ TEXTUAL_SUBTITLE_CODECS = {
 BITMAP_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "vobsub"}
 SIDE_CAR_EXTENSIONS = {".ass", ".ssa", ".srt"}
 ENGLISH_NAMES = {"en", "eng", "english", "en-us", "en_us", "en-gb", "en_gb"}
+# Matroska commonly uses ``und`` when the muxer did not carry language
+# metadata.  It is not a source-language match by itself, but it is safe to
+# consider as a fallback when no track matches the configured language and
+# a textual dialogue track is available; ambiguity is still handled below.
+UNKNOWN_LANGUAGE_CODES = {"", "und", "unknown", "unk"}
 
 # Source language selection map: pt-BR display name -> subtitle track/sidecar
 # language codes (ISO 639-2/3 and common short forms).  The target language is
@@ -149,11 +155,24 @@ def _delimiter_balance_signature(value: str) -> dict[str, int]:
     }
 
 
+def _delimiter_token_counts(value: str) -> dict[str, int]:
+    """Count literal prose delimiters, retaining event-boundary ownership."""
+    visible = _plain(value)
+    return {
+        "double_quotes": visible.count('"'),
+        "open_parentheses": visible.count("("),
+        "close_parentheses": visible.count(")"),
+        "open_brackets": visible.count("["),
+        "close_brackets": visible.count("]"),
+    }
+
+
 def source_relative_delimiter_audit(
     source: str,
     output: str,
     *,
     protected_exact: bool = False,
+    sequence_preserved: bool = False,
 ) -> dict[str, Any]:
     """Separate inherited preserved anomalies from output corruption.
 
@@ -168,7 +187,16 @@ def source_relative_delimiter_audit(
     source_unbalanced = any(source_signature.values()) or bool(source_core_flags)
     output_unbalanced = any(output_signature.values()) or bool(candidate_core_flags)
     exact = source == output
-    if source_unbalanced and protected_exact and exact:
+    # A quote (or bracket) can intentionally open in one subtitle event and
+    # close in the next, such as a two-line sign.  Per-event balance is then
+    # false for both files even though the delimiter ownership is unchanged.
+    # The caller proves this narrowly by comparing the literal delimiter
+    # counts for the event; it does not waive newly introduced delimiters.
+    preserved_sequence = (
+        bool(sequence_preserved)
+        and _delimiter_token_counts(source) == _delimiter_token_counts(output)
+    )
+    if source_unbalanced and (protected_exact and exact or preserved_sequence):
         state = DELIMITER_SOURCE_PRESERVED
         fatal = False
     elif source_unbalanced and not exact:
@@ -190,6 +218,7 @@ def source_relative_delimiter_audit(
         "fatal": fatal,
         "byte_identical": exact,
         "protected_exact": bool(protected_exact and exact),
+        "sequence_preserved": preserved_sequence,
         "source_signature": source_signature,
         "output_signature": output_signature,
         "source_core_flags": source_core_flags,
@@ -269,6 +298,9 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
         delimiter_audit: dict[str, Any] | None = None
         if output_line is None:
             event_flags.append("MISSING_EVENT")
+        elif source_line.is_comment:
+            if source_line.as_dict() != output_line.as_dict():
+                event_flags.append("ASS_COMMENT_CHANGED")
         else:
             event_flags.extend(validate_inline_tags(source_text, output_text))
             preserved_exactly = event.classification in DETERMINISTIC_PRESERVE_CLASSES and source_text == output_text
@@ -276,6 +308,7 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
                 source_text,
                 output_text,
                 protected_exact=preserved_exactly,
+                sequence_preserved=_delimiter_token_counts(source_text) == _delimiter_token_counts(output_text),
             )
             delimiter_states[delimiter_audit["state"]] += 1
             if delimiter_audit["state"] == DELIMITER_SOURCE_PRESERVED:
@@ -458,7 +491,10 @@ def _probe_subtitle_tracks(video_path: Path) -> list[dict[str, Any]]:
         "-of", "json", str(video_path),
     ]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=20, check=False,
+            env=external_media_environment("ffprobe"),
+        )
         payload = json.loads(completed.stdout or "{}")
     except (OSError, subprocess.SubprocessError, ValueError):
         return []
@@ -521,16 +557,51 @@ def _track_is_signs_or_songs(track: dict[str, Any]) -> bool:
     return bool(re.search(r"\b(signs?|songs?|karaoke|lyrics?)\b", title))
 
 
-def _select_track_for_language(tracks: list[dict[str, Any]], source_language: str = "inglês") -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]]]:
+def _select_track_for_language(
+    tracks: list[dict[str, Any]],
+    source_language: str = "inglês",
+    *,
+    video_path: Path | None = None,
+) -> tuple[dict[str, Any] | None, str | None, list[dict[str, Any]]]:
     """Select a dialogue track for the configured source language.
 
     Mirrors the previous English-only logic but is language-agnostic: it picks
     the textual, non-signs/songs track whose language matches ``source_language``.
     """
     matching = [track for track in tracks if _language_matches(track.get("language"), source_language)]
+    if not matching:
+        # A missing language tag must not make an otherwise valid embedded
+        # ASS/SRT subtitle invisible to the UI.  Do this only after looking
+        # for an explicit match, and only among textual tracks; multiple
+        # unknown tracks remain subject to the same ambiguity/content rules
+        # below instead of silently selecting an arbitrary stream.
+        matching = [
+            track for track in tracks
+            if _normalize_lang_code(track.get("language")) in UNKNOWN_LANGUAGE_CODES
+            and track.get("textual")
+        ]
     textual = [track for track in matching if track.get("textual")]
     bitmap = [track for track in matching if track.get("bitmap")]
     dialogue = [track for track in textual if not _track_is_signs_or_songs(track)]
+    # The web source resolver must use the same content-aware decision as the
+    # normal V2.3.8 path.  Otherwise a retranslation can blindly reuse the
+    # previously archived (and possibly wrong) embedded track.  The helper is
+    # imported lazily so read-only metadata tests and installations without the
+    # translation runner keep the deterministic metadata path.
+    if video_path is not None and video_path.is_file() and len(dialogue) > 1:
+        try:
+            from anime_subtitle_translator import find_subtitle_stream
+
+            selected = find_subtitle_stream(video_path, source_language=source_language)
+            selected_index = int(selected[0]) if selected is not None else None
+            if selected_index is not None:
+                chosen = next((item for item in dialogue if int(item.get("index")) == selected_index), None)
+                if chosen is not None:
+                    return chosen, None, bitmap
+        except (OSError, TypeError, ValueError, ImportError):
+            # Metadata selection below remains the safe fallback when a media
+            # preflight cannot be performed.
+            pass
     if len(dialogue) == 1:
         return dialogue[0], None, bitmap
     if len(dialogue) > 1:
@@ -590,7 +661,10 @@ def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[
     target = Path(raw.name)
     command = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path), "-map", f"0:{track['index']}", "-c:s", "copy", str(target)]
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=120, check=False,
+            env=external_media_environment("ffmpeg"),
+        )
         if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
             raise RuntimeError((completed.stderr or "falha ao extrair track ENG")[-500:])
         return _ingest_source(library, episode_id, target, source_kind="EXTRACTED", source_language=source_language, track=track, job_id=job_id)
@@ -604,7 +678,16 @@ def _public_source_status(result: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in result.items() if key in allowed}
 
 
-def resolve_episode_source(library: Any, episode_id: int, record_id: int | None = None, *, materialize: bool = False, job_id: str | None = None, source_language: str = "inglês") -> dict[str, Any]:
+def resolve_episode_source(
+    library: Any,
+    episode_id: int,
+    record_id: int | None = None,
+    *,
+    materialize: bool = False,
+    job_id: str | None = None,
+    source_language: str = "inglês",
+    refresh_from_media: bool = False,
+) -> dict[str, Any]:
     """Resolve an original textual source for an anime episode.
 
     Priority is library lineage, explicit sidecar for ``source_language``, then
@@ -614,15 +697,27 @@ def resolve_episode_source(library: Any, episode_id: int, record_id: int | None 
     """
     lang_label = _display_language(source_language)
     old = library.get_record(int(record_id)) if record_id else None
-    if old:
-        linked = resolve_source_record(library, int(old["id"]), materialize=materialize)
-        if linked.get("available"):
-            fmt = str(linked.get("format") or "").upper()
-            result = {**linked, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"{lang_label} {fmt} — Biblioteca".strip()}
-            return result if materialize else {**result, "path": result.get("path")}
+    linked_source = None
+    if old and not refresh_from_media:
+        linked_source = resolve_source_record(library, int(old["id"]), materialize=materialize)
+    # A normal audit should retain the exact archived parent.  Retranslation,
+    # however, can explicitly request a fresh decision from the current video
+    # so a previously selected embedded track is not treated as immutable input.
+    if old and linked_source and linked_source.get("available") and not refresh_from_media:
+        fmt = str(linked_source.get("format") or "").upper()
+        result = {**linked_source, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"{lang_label} {fmt} — Biblioteca".strip()}
+        return result if materialize else {**result, "path": result.get("path")}
     try:
         video_path = library._episode_video(int(episode_id))
     except Exception as exc:
+        # If the media was removed, an archived source is still a valid and
+        # recoverable fallback for retranslation.
+        if old and linked_source is None:
+            linked_source = resolve_source_record(library, int(old["id"]), materialize=materialize)
+        if linked_source and linked_source.get("available"):
+            fmt = str(linked_source.get("format") or "").upper()
+            result = {**linked_source, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"{lang_label} {fmt} — Biblioteca".strip()}
+            return result if materialize else {**result, "path": result.get("path")}
         return {"available": False, "status": "SOURCE_NOT_FOUND", "display": "Fonte não encontrada", "reason": str(exc)}
 
     sidecars = _sidecar_candidates(video_path, source_language)
@@ -638,7 +733,9 @@ def resolve_episode_source(library: Any, episode_id: int, record_id: int | None 
         return {"available": False, "status": "SOURCE_AMBIGUOUS", "kind": "SIDECAR_TEXT", "display": f"Múltiplos sidecars {lang_label}", "reason": "escolha explícita necessária", "candidates": [item.name for item in sidecars]}
 
     tracks = _probe_subtitle_tracks(video_path)
-    selected, selection_reason, bitmaps = _select_track_for_language(tracks, source_language)
+    selected, selection_reason, bitmaps = _select_track_for_language(
+        tracks, source_language, video_path=video_path,
+    )
     if selected:
         result = {"available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT", "kind": "EMBEDDED_TEXT", "display": f"{str(selected.get('codec') or '').upper()} — track {lang_label} interna {selected.get('index')}", "track": selected}
         if materialize:

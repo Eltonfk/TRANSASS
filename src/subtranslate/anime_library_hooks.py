@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+
+from runtime_config import default_media_root, default_state_dir, default_library_root
 from typing import Any
 
 from anime_subtitle_library import AnimeSubtitleLibrary, ClassificationError, LibraryError
@@ -22,9 +24,9 @@ _LIBRARY: AnimeSubtitleLibrary | None = None
 def _library() -> AnimeSubtitleLibrary:
     global _LIBRARY
     if _LIBRARY is None:
-        state_dir = Path(os.environ.get("TRANSLATOR_WEB_STATE_DIR", "/app/state"))
-        root = Path(os.environ.get("ANIME_SUBTITLE_LIBRARY_ROOT", str(state_dir / "anime-subtitle-library")))
-        roots_raw = os.environ.get("ANIME_LIBRARY_ROOTS", os.environ.get("TRANSLATOR_BASE_LIBRARY", "/shows"))
+        state_dir = default_state_dir()
+        root = default_library_root()
+        roots_raw = os.environ.get("ANIME_LIBRARY_ROOTS", str(default_media_root()))
         roots = [Path(item.strip()) for item in roots_raw.split(os.pathsep) if item.strip()]
         _LIBRARY = AnimeSubtitleLibrary(root, media_roots=roots)
     return _LIBRARY

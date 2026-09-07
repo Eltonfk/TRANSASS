@@ -1,4 +1,15 @@
-const $=id=>document.getElementById(id);let path="",selectedFolder="",selectionFolder="",cursor=0,episodes=[],statusData=null,selectedEpisodeKeys=new Set(),refreshInFlight=false,renderedLogIds=new Set(),activeView="translate",lastEpisodesRefreshAt=0,episodeOffset=0,episodeHasMore=false,episodeLoading=false,eventStream=null;let globalSourceLang="inglês";let seasonLangValue="inglês";const episodeSourceLang={};const langSelects={};
+const $=id=>document.getElementById(id);const uiI18n=window.TransassI18n||{t:(key,vars)=>key,apply:()=>{}};const t=(key,vars)=>uiI18n.t(key,vars);let path="",selectedFolder="",selectionFolder="",cursor=0,episodes=[],statusData=null,selectedEpisodeKeys=new Set(),refreshInFlight=false,renderedLogIds=new Set(),activeView="translate",lastEpisodesRefreshAt=0,episodeOffset=0,episodeHasMore=false,episodeLoading=false,eventStream=null;let globalSourceLang="inglês";let seasonLangValue="inglês";const episodeSourceLang={};const langSelects={};
+const GEMINI_MODEL_FALLBACK=[
+ {id:'gemini-3.5-flash-lite',label:'Gemini 3.5 Flash-Lite · recomendado',description:'Mais econômico e rápido; melhor ponto de partida para temporadas.'},
+ {id:'gemini-3.5-flash',label:'Gemini 3.5 Flash · equilibrado',description:'Mais qualidade de raciocínio, com custo e latência moderados.'},
+ {id:'gemini-3.1-pro',label:'Gemini 3.1 Pro · maior qualidade',description:'Para casos difíceis; mais lento e geralmente mais caro.'}
+];
+const GROQ_MODEL_FALLBACK=[
+ {id:'openai/gpt-oss-20b',label:'GPT-OSS 20B · recomendado',description:'Rápido e econômico para tradução em lotes.'},
+ {id:'openai/gpt-oss-120b',label:'GPT-OSS 120B · maior qualidade',description:'Mais qualidade, com maior consumo de tokens.'},
+ {id:'qwen/qwen3.6-27b',label:'Qwen 3.6 27B · equilibrado',description:'Alternativa Qwen hospedada pela Groq.'}
+];
+let geminiModelOptions=GEMINI_MODEL_FALLBACK.slice();let groqModelOptions=GROQ_MODEL_FALLBACK.slice();let geminiModelsLoadedAt=0;let groqModelsLoadedAt=0;let geminiModelsSource='catalog';let groqModelsSource='catalog';
 async function api(url,opt){const r=await fetch(url,opt);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);return d}
 function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML}
 function notify(message,tone='info',timeout=4800){const region=$('toastRegion');if(!region)return;const toast=document.createElement('div');toast.className=`toast ${tone}`;toast.textContent=message;region.append(toast);setTimeout(()=>toast.remove(),timeout)}
@@ -59,9 +70,30 @@ function connectEvents(){if(!window.EventSource)return;try{eventStream=new Event
 async function loadHealth(){try{const d=await api('/health');$('serviceChip').textContent=d.status==='ok'?'Serviço online':'Serviço indisponível';$('serviceChip').classList.toggle('online',d.status==='ok');$('serviceChip').classList.toggle('offline',d.status!=='ok')}catch(e){$('serviceChip').textContent='Serviço indisponível';$('serviceChip').classList.remove('online');$('serviceChip').classList.add('offline')}}
 async function loadPipeline(){try{const d=await api('/pipeline');$('pipelineChip').textContent=d.pipeline_label;$('modelChip').textContent=d.model}catch(e){$('pipelineChip').textContent='Pipeline indisponível';$('modelChip').textContent='Modelo indisponível'}await loadHealth()}
 async function loadTransportConfig(){try{const d=await api('/transport-config');const p=d.primary||{};const f=d.fallback||{};globalSourceLang=d.source_language||'inglês';if($('seasonLang'))$('seasonLang').value=globalSourceLang;$('motorChip').textContent=(p.provider||'?')+(f&&f.provider?` + ${f.provider}`:'')}catch(e){$('motorChip').textContent='Motor indisponível'}}
-async function openTransportConfig(){try{const d=await api('/transport-config');const p=d.primary||{},f=d.fallback||{};$('tcSourceLanguage').value=d.source_language||'inglês';$('tcPrimaryProvider').value=p.provider||'ollama';$('tcPrimaryModel').value=p.model||'';$('tcPrimaryBaseUrl').value=p.base_url||'';$('tcFallbackProvider').value=f?f.provider:'';$('tcFallbackModel').value=f?f.model:'';$('tcFallbackBaseUrl').value=f?f.base_url||'':'';const kc=d.keys_configured||{};let html='';for(const prov of ['ollama','openai_compat','gemini','nvidia']){if(prov==='ollama')continue;html+=`<label>Key ${prov}${kc[prov]?' <span class="badge">configurada</span>':''}</label><input id="tcKey_${prov}" type="password" placeholder="${kc[prov]?'deixe vazio para manter':'cole a API key'}" style="width:100%;margin:4px 0">`}$('tcKeys').innerHTML=html;$('tcStatus').textContent='';const dialog=$('transportConfigDialog');if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','')}catch(e){alert('Não foi possível carregar a configuração de motor.')}}
-async function saveTransportConfig(){const keys={};for(const prov of ['openai_compat','gemini','nvidia']){const el=$('tcKey_'+prov);if(el&&el.value.trim())keys[prov]=el.value.trim()}const payload={primary:{provider:$('tcPrimaryProvider').value,model:$('tcPrimaryModel').value.trim(),base_url:$('tcPrimaryBaseUrl').value.trim()||null},fallback:null,keys,source_language:$('tcSourceLanguage').value.trim()||'inglês'};if($('tcFallbackProvider').value){payload.fallback={provider:$('tcFallbackProvider').value,model:$('tcFallbackModel').value.trim(),base_url:$('tcFallbackBaseUrl').value.trim()||null}}try{await api('/transport-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});$('tcStatus').textContent='Salvo ✓';$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open');await loadTransportConfig();notify('Motor de tradução atualizado. A bunda agora sabe para onde ir.','ok')}catch(e){$('tcStatus').textContent='Erro: '+(e.message||e)}}
-$('openTransportConfig').onclick=openTransportConfig;$('closeTransportConfig').onclick=()=>{$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open')};$('tcSave').onclick=saveTransportConfig;
+function normalizeGeminiModelOptions(options){return (Array.isArray(options)?options:[]).map(item=>typeof item==='string'?{id:item,label:item,description:''}:{id:String(item?.id||'').trim(),label:String(item?.label||item?.id||'').trim(),description:String(item?.description||'').trim()}).filter(item=>item.id)}
+function modelValue(prefix){const provider=$(`${prefix}Provider`)?.value||'';const input=$(`${prefix}Model`),select=$(`${prefix}ModelSelect`);if((provider==='gemini'||provider==='groq'||provider==='deepseek')&&select&&!select.hidden)return select.value.trim();return input?.value.trim()||''}
+function providerModels(provider){if(provider==='groq')return groqModelOptions;if(provider==='deepseek')return [{id:'deepseek-chat',label:'DeepSeek V3 (Chat)',description:'Modelo rápido e econômico.'},{id:'deepseek-reasoner',label:'DeepSeek R1 (Reasoner)',description:'Modelo avançado de raciocínio.'}];return geminiModelOptions}
+function syncModelControl(prefix,provider,value){const input=$(`${prefix}Model`),select=$(`${prefix}ModelSelect`);if(!input||!select)return;let current=String(value??input.value??'').trim();if(provider==='nvidia'&&!current.includes('/'))current='';if(provider==='nvidia')input.placeholder='Modelo NVIDIA, ex.: meta/llama-3.1-8b-instruct';else if(provider==='ollama')input.placeholder='Modelo Ollama, ex.: qwen3.5:9b';else if(provider==='groq')input.placeholder='Modelo Groq';else input.placeholder='Modelo';if(provider!=='gemini'&&provider!=='groq'&&provider!=='deepseek'){input.hidden=false;select.hidden=true;input.value=current;return}const options=normalizeGeminiModelOptions(providerModels(provider));const source=provider==='groq'?groqModelsSource:provider==='deepseek'?'catalog':geminiModelsSource;const currentAvailable=options.some(item=>item.id===current);let chosen=current;if(chosen&&!currentAvailable&&source!=='catalog')chosen=options[0]?.id||'';else if(chosen&&!currentAvailable)options.push({id:chosen,label:`${chosen} · modelo atual`,description:'Modelo mantido da configuração anterior.'});if(!chosen&&options.length)chosen=options[0].id;select.replaceChildren(...options.map(item=>{const option=document.createElement('option');option.value=item.id;option.textContent=item.label;option.title=item.description||item.label;return option}));select.value=chosen;input.value=chosen;select.setAttribute('aria-label',`${provider==='groq'?'Modelo Groq':provider==='gemini'?'Modelo Gemini':provider==='deepseek'?'Modelo DeepSeek':'Modelo'} ${prefix==='tcPrimary'?'principal':'de fallback'}`);input.hidden=true;select.hidden=false;select.onchange=()=>{input.value=select.value}}
+function syncGeminiControls(){const primary=$('tcPrimaryProvider')?.value||'',fallback=$('tcFallbackProvider')?.value||'';syncModelControl('tcPrimary',primary);syncModelControl('tcFallback',fallback);const active=primary==='gemini'||fallback==='gemini'||primary==='groq'||fallback==='groq'||primary==='deepseek'||fallback==='deepseek';if($('tcGeminiModelTools'))$('tcGeminiModelTools').hidden=!active;if($('tcGeminiProfile'))$('tcGeminiProfile').hidden=!active}
+function paintGeminiProfile(profile,active,provider='gemini'){const target=$('tcGeminiProfile');if(!target)return;if(!active){target.hidden=true;return}profile=profile||{enabled:true,batch_size:provider==='groq'?4:16,retry_budget:provider==='groq'?16:32,delay_between_calls:provider==='groq'?2.5:provider==='deepseek'?2.5:4};if(!profile.enabled){target.hidden=true;return}const batch=Number(profile.batch_size||(provider==='groq'?4:16)),retry=Number(profile.retry_budget||(provider==='deepseek'?32:16)),delay=Number(profile.delay_between_calls??2.5);target.textContent=`Perfil ${provider==='groq'?'Groq':provider==='deepseek'?'DeepSeek':'Gemini'} otimizado ativo · ${batch} unidades/chamada · até ${retry} tentativas · intervalo ${delay}s`;target.hidden=false}
+async function loadGeminiModels({force=false,persist=false}={}){const primary=$('tcPrimaryProvider')?.value||'',fallback=$('tcFallbackProvider')?.value||'',provider=primary==='groq'||fallback==='groq'?'groq':'gemini';if(primary!=='gemini'&&fallback!=='gemini'&&primary!=='groq'&&fallback!=='groq')return;const loadedAt=provider==='groq'?groqModelsLoadedAt:geminiModelsLoadedAt;if(!force&&loadedAt&&Date.now()-loadedAt<300000){syncGeminiControls();return}if(persist&&$(`tcKey_${provider}`)?.value.trim()&&!await saveTransportConfig({close:false,silent:true}))return;const status=$('tcGeminiModelsStatus');if(status)status.textContent='Atualizando lista…';try{const d=await api('/onboarding/provider-models?provider='+provider);const models=normalizeGeminiModelOptions(d.models);if(models.length){if(provider==='groq'){groqModelOptions=models;groqModelsSource=d.source||'catalog';groqModelsLoadedAt=Date.now()}else{geminiModelOptions=models;geminiModelsSource=d.source||'catalog';geminiModelsLoadedAt=Date.now()}}syncGeminiControls();if(persist&&d.source===provider+'-api')await saveTransportConfig({close:false,silent:true});if(status)status.textContent=d.source===provider+'-api'?`✓ ${models.length} modelo(s) disponíveis para esta key`:(d.message||'Opções estáveis conhecidas')}catch(e){if(provider==='groq')groqModelsSource='catalog';else geminiModelsSource='catalog';if(status)status.textContent='Lista online indisponível; opções estáveis mantidas.';syncGeminiControls()}}
+function syncProviderFields() {
+    const primary = $('tcPrimaryProvider')?.value || '';
+    const fallback = $('tcFallbackProvider')?.value || '';
+    if ($('tcPrimaryBaseUrlControl')) $('tcPrimaryBaseUrlControl').hidden = (primary !== 'openai_compat');
+    if ($('tcFallbackBaseUrlControl')) $('tcFallbackBaseUrlControl').hidden = (fallback !== 'openai_compat');
+    for (const prov of ['openai_compat', 'gemini', 'groq', 'nvidia', 'deepseek']) {
+        const container = $('tcKeyContainer_' + prov);
+        if (container) {
+            container.hidden = (primary !== prov && fallback !== prov);
+        }
+    }
+}
+async function openTransportConfig(){try{const d=await api('/transport-config');const p=d.primary||{},f=d.fallback||{};$('tcSourceLanguage').value=d.source_language||'inglês';$('tcPrimaryProvider').value=p.provider||'ollama';$('tcPrimaryModel').value=p.model||'';$('tcPrimaryBaseUrl').value=p.base_url||'';$('tcFallbackProvider').value=f?f.provider:'';$('tcFallbackModel').value=f?f.model||'':'';$('tcFallbackBaseUrl').value=f?f.base_url||'':'';const kc=d.keys_configured||{};let html='';for(const prov of ['ollama','openai_compat','gemini','groq','nvidia','deepseek']){if(prov==='ollama')continue;html+=`<div id="tcKeyContainer_${prov}" hidden><label>Key ${prov}${kc[prov]?' <span class="badge">configurada</span>':''}</label><input id="tcKey_${prov}" type="password" placeholder="${kc[prov]?'deixe vazio para manter':'cole a API key'}" style="width:100%;margin:4px 0"></div>`}$('tcKeys').innerHTML=html;$('tcStatus').textContent='';$('tcStatus').className='muted';syncProviderFields();syncGeminiControls();const primaryProv=$('tcPrimaryProvider').value,fallbackProv=$('tcFallbackProvider').value;const activeProvider=['groq','gemini','deepseek'].includes(primaryProv)?primaryProv:['groq','gemini','deepseek'].includes(fallbackProv)?fallbackProv:'gemini';paintGeminiProfile(activeProvider==='groq'?d.groq_profile:activeProvider==='deepseek'?d.deepseek_profile:d.gemini_profile,['gemini','groq','deepseek'].includes(primaryProv)||['gemini','groq','deepseek'].includes(fallbackProv),activeProvider);const dialog=$('transportConfigDialog');if(typeof dialog.showModal==='function')dialog.showModal();else dialog.setAttribute('open','');if(['gemini','groq','deepseek'].includes(primaryProv)||['gemini','groq','deepseek'].includes(fallbackProv))loadGeminiModels({force:false})}catch(e){alert('Não foi possível carregar a configuração de motor.')}}
+function transportConfigPayload(){const keys={};for(const prov of ['openai_compat','gemini','groq','nvidia','deepseek']){const el=$('tcKey_'+prov);if(el&&el.value.trim())keys[prov]=el.value.trim()}const payload={primary:{provider:$('tcPrimaryProvider').value,model:modelValue('tcPrimary'),base_url:$('tcPrimaryBaseUrl').value.trim()||null},fallback:null,keys,source_language:$('tcSourceLanguage').value.trim()||'inglês'};if($('tcFallbackProvider').value){payload.fallback={provider:$('tcFallbackProvider').value,model:modelValue('tcFallback'),base_url:$('tcFallbackBaseUrl').value.trim()||null}}return payload}
+async function saveTransportConfig({close=true,silent=false}={}){try{await api('/transport-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(transportConfigPayload())});if(!silent)$('tcStatus').textContent='Salvo ✓';await loadTransportConfig();await loadPipeline();if(close){$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open');notify('Motor de tradução atualizado. A bunda agora sabe para onde ir.','ok')}return true}catch(e){$('tcStatus').textContent='Erro: '+(e.message||e);return false}}
+async function testTransportConfig(){const button=$('tcTest');if(button)button.disabled=true;$('tcStatus').textContent='Salvando e testando sem chamar o modelo…';try{if(!await saveTransportConfig({close:false}))return;const d=await api('/onboarding/provider-test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('tcStatus').textContent=(d.ok?'✓ ':'⚠ ')+(d.message||'Teste concluído');$('tcStatus').className='muted '+(d.ok?'onboarding-ok':'onboarding-warn')}catch(e){$('tcStatus').textContent='⚠ '+(e.message||e);$('tcStatus').className='muted onboarding-warn'}finally{if(button)button.disabled=false}}
+ $('openTransportConfig').onclick=openTransportConfig;$('closeTransportConfig').onclick=()=>{$('transportConfigDialog').close?.();$('transportConfigDialog').removeAttribute('open')};$('tcTest').onclick=testTransportConfig;$('tcSave').onclick=saveTransportConfig;const refreshProviderModels=()=>{const primary=$('tcPrimaryProvider').value,fallback=$('tcFallbackProvider').value,provider=['groq','gemini','deepseek'].includes(primary)?primary:['groq','gemini','deepseek'].includes(fallback)?fallback:'gemini';paintGeminiProfile(null,['gemini','groq','deepseek'].includes(primary)||['gemini','groq','deepseek'].includes(fallback),provider);if(['gemini','groq','deepseek'].includes(primary)||['gemini','groq','deepseek'].includes(fallback))loadGeminiModels({force:false})};$('tcPrimaryProvider').onchange=()=>{syncGeminiControls();refreshProviderModels();syncProviderFields()};$('tcFallbackProvider').onchange=()=>{syncGeminiControls();refreshProviderModels();syncProviderFields()};$('tcGeminiModelsRefresh').onclick=()=>loadGeminiModels({force:true,persist:true});
 async function loadHistory(){try{const d=await api('/history?technical='+($('showTechnical').checked?'1':'0'));$('history').innerHTML=d.history.length?d.history.slice().reverse().map(x=>`<div class="jobline"><span>${esc(x.folder||'')}<br><small>${esc(x.finished_at||x.created_at||'')}</small></span><span>${x.completed||0} concluídos · ${x.failed||0} falhos</span></div>`).join(''):'Nenhuma sessão registrada.'}catch(e){}}
 async function loadArchive(){try{const d=await api('/library');const c=d.counts||{};$('libraryStats').textContent=`${c.records||0} versões · ${c.objects||0} objetos · ${c.publications||0} publicados`;
 const s=await api('/library/series?classification=ANIME');$('archiveSeries').innerHTML=s.series.length?s.series.map(x=>`<div class="jobline"><span><b>${esc(x.title)}</b><br><small>${esc(x.library_relative_path||'')} · ${esc(x.classification)}</small></span><button class="button" data-library-series="${x.id}">Abrir</button></div>`).join(''):'Nenhuma série anime catalogada.';$('archiveSeries').querySelectorAll('[data-library-series]').forEach(b=>b.onclick=()=>openArchiveSeries(b.dataset.librarySeries));}catch(e){$('archiveSeries').textContent='Biblioteca indisponível';}}
@@ -137,3 +169,91 @@ $('closeVersionDetails').onclick=()=>{$('versionDetailsDialog').close?.();$('ver
 // carregadas. O botão continua explícito, mas garante que nenhum episódio
 // fique de fora por causa da paginação.
 if($('retranslateSeasonBtn'))$('retranslateSeasonBtn').onclick=async()=>{try{while(episodeHasMore)await loadMoreEpisodes();const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};
+
+// Presentation-only refresh for the locale selector. The original queue and
+// source-selection state is untouched; only labels are rebuilt through i18n.
+function syncSelectionUi(){
+ const count=selectedEpisodeKeys.size,busy=Boolean(statusData&&(statusData.running||(statusData.queue||{}).waiting));
+ const summary=$('selectionSummary');
+ if(summary){const query=($('episodeSearch')?.value||'').trim().toLowerCase(),visible=episodes.filter(ep=>!query||[ep.episode,ep.name,ep.status,ep.audit_status].some(value=>String(value||'').toLowerCase().includes(query))).length;summary.textContent=t(count===1?'episodes.selected.one':'episodes.selected.many',{count,visible,total:episodes.length})}
+ const start=$('startBtn');if(start)start.textContent=count?t(count===1?'queue.translate.one':'queue.translate.many',{count}):t('queue.selectEpisodes');
+ if(start)start.disabled=busy||count===0;
+ if($('retranslateSelectedBtn'))$('retranslateSelectedBtn').disabled=busy||selectedEpisodeIds().length===0;
+ if($('clearSelection'))$('clearSelection').disabled=count===0;
+ if($('navQueueCount')){const q=statusData?.queue||{},pending=(q.waiting||0)+(q.running||0);$('navQueueCount').textContent=pending?String(pending):''}
+ if(statusData?.running){$('workflowStep').textContent='3';$('workflowTitle').textContent=t('workflow.step3');$('workflowHint').textContent=t('workflow.hint.running')}
+ else if(!selectedFolder){$('workflowStep').textContent='1';$('workflowTitle').textContent=t('workflow.step1');$('workflowHint').textContent=t('workflow.hint.loaded')}
+ else if(!count){$('workflowStep').textContent='2';$('workflowTitle').textContent=t('workflow.step2');$('workflowHint').textContent=t('workflow.hint.select')}
+ else{$('workflowStep').textContent='3';$('workflowTitle').textContent=t('workflow.ready');$('workflowHint').textContent=t('workflow.hint.ready',{count,source:seasonLangValue||globalSourceLang})}
+}
+
+window.addEventListener('transass:locale-changed',()=>{
+ uiI18n.apply();
+ syncSelectionUi();
+ if(typeof renderEpisodes==='function')renderEpisodes();
+ if(statusData&&typeof renderStatus==='function')renderStatus(statusData);
+ if(typeof loadBrowse==='function')loadBrowse();
+ if(typeof loadHistory==='function')loadHistory();
+ if(typeof loadInbox==='function')loadInbox();
+});
+
+function badge(status){
+ const cls=status==='COMPLETED'||status==='ALREADY_TRANSLATED'?'ok':status==='FAILED'?'fail':['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING','PAUSED'].includes(status)?'wait':'neutral';
+ const labels={ALREADY_TRANSLATED:t('status.alreadyTranslated'),NOT_STARTED:t('status.notStarted')};
+ return `<span class="badge ${cls}">${esc(labels[status]||status)}</span>`;
+}
+function sourceBadge(ep){
+ const s=ep.source_status||{},status=s.status||'SOURCE_NOT_FOUND';
+ const cls=s.available?'ok':status==='SOURCE_AMBIGUOUS'||status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'||status==='SOURCE_STATUS_ERROR'?'wait':'neutral';
+ const labels={SOURCE_AVAILABLE_LIBRARY:t('status.sourceLibrary'),SOURCE_AVAILABLE_SIDECAR:t('status.sourceSidecar'),SOURCE_AVAILABLE_INTERNAL_TEXT:t('status.sourceInternal'),SOURCE_AVAILABLE_PGS_UNSUPPORTED:t('status.sourcePgs'),SOURCE_AMBIGUOUS:t('status.sourceAmbiguous'),SOURCE_STATUS_ERROR:t('status.sourceError'),SOURCE_NOT_FOUND:t('status.sourceMissing')};
+ const text=uiI18n.locale==='qi-83'?(labels[status]||s.display||labels.SOURCE_NOT_FOUND):(s.display||(labels[status]||labels.SOURCE_NOT_FOUND));
+ return `<span class="badge ${cls}" title="${esc(s.reason||s.display||text)}">${esc(text)}</span>`;
+}
+function auditBadge(ep){
+ const s=ep.audit_status||'NÃO AUDITADA';
+ const cls=s==='SEM PROBLEMAS DETECTADOS'?'ok':s==='PROBLEMAS DETECTADOS'?'fail':['AUDITORIA PARCIAL','REVISÃO RECOMENDADA','VERSÕES SEPARADAS'].includes(s)?'wait':'neutral';
+ const labels={'SEM PROBLEMAS DETECTADOS':t('status.auditClean'),'PROBLEMAS DETECTADOS':t('status.auditProblems'),'AUDITORIA PARCIAL':t('status.auditPartial'),'REVISÃO RECOMENDADA':t('status.auditReview'),'VERSÕES SEPARADAS':t('status.auditSeparated')};
+ return `<span class="badge ${cls}" title="${esc(s)}">${esc(labels[s]||t('status.auditNone'))}</span>`;
+}
+function renderEpisodes(){
+ const box=$('episodes'),query=($('episodeSearch')?.value||'').trim().toLowerCase();
+ if(!episodes.length){box.innerHTML=`<div class="empty-state"><b>${esc(t('episodes.noneFound'))}</b><span>${esc(t('episodes.notSeason'))}</span></div>`;syncSelectionUi();return}
+ const visible=episodes.filter(ep=>!query||[ep.episode,ep.name,ep.status,ep.audit_status].some(value=>String(value||'').toLowerCase().includes(query)));
+ if(!visible.length){box.innerHTML=`<div class="empty-state"><b>${esc(t('episodes.nothingHere'))}</b><span>${esc(t('episodes.noMatch'))}</span></div>`;syncSelectionUi();return}
+ box.replaceChildren(...visible.map(ep=>{
+  const row=document.createElement('label');row.className='episode';const key=episodeKey(ep),disabled=['WAITING','TRANSLATING','STARTING','VALIDATING','PUBLISHING'].includes(ep.status),lang=episodeSourceLang[key]||seasonLangValue||globalSourceLang;
+  const sel=`<select class="srclang" data-key="${esc(key)}" data-epid="${esc(ep.library_episode_id||'')}" data-path="${esc(ep.source||'')}" data-i18n-title="episodes.sourceLanguage" data-i18n-aria-label="aria.episodeSource" data-i18n-name="${esc(ep.name)}" title="${esc(t('episodes.sourceLanguage'))}" aria-label="${esc(t('aria.episodeSource',{name:ep.name}))}" style="min-height:30px;max-width:150px;padding:4px 6px"><option value="${esc(lang)}">${esc(lang)}</option></select>`;
+  row.innerHTML=`<input type="checkbox" data-selection-key="${esc(key)}" data-source="${esc(ep.source)}" data-episode-id="${esc(ep.library_episode_id||'')}" aria-label="${esc(t('aria.episodeSelect',{name:ep.name}))}" ${selectedEpisodeKeys.has(key)?'checked':''} ${disabled?'disabled':''}><b>${esc(ep.episode||'—')}</b><span class="epname" title="${esc(ep.name)}">${esc(ep.name)}</span>${badge(ep.status)}${auditBadge(ep)}<span data-source-badge="${esc(key)}">${sourceBadge(ep)}</span>${sel}`;
+  return row;
+ }));
+ // Mark generated accessibility attributes for the next locale refresh.
+ box.querySelectorAll('[data-i18n-title]').forEach(el=>el.title=t(el.dataset.i18nTitle));
+ bindSelection();
+}
+
+function localizeStatusPresentation(d){
+ if(uiI18n.locale!=='qi-83')return;
+ const q=d.queue||{},cur=d.current_job,t=cur||{};
+ const stage=t.stage==='SEMANTIC_RECONSTRUCTION'?uiI18n.t('status.stageSemantic'):(t.stage||t.status||'');
+ $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:uiI18n.t('progress.none');
+ const total=t.total_units,resolved=t.resolved_units??0,semantic=t.semantic_calls??0;
+ $('currentMeta').textContent=cur?(total!=null?`${uiI18n.t('status.progress')} ${resolved}/${total}`:uiI18n.t('status.preparing')):'';
+ const details=cur?[
+  `<span>${uiI18n.t('status.baseCalls')}: <b>${t.calls??0}</b></span>`,
+  semantic?`<span>${uiI18n.t('status.semanticCalls')}: <b>${semantic}</b></span>`:'',
+  `<span>${uiI18n.t('status.retries')}: <b>${t.retries??0}</b></span>`,
+  t.retry_budget_total!=null?`<span>${uiI18n.t('status.budget')}: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',
+  `<span>${uiI18n.t('status.time')}: <b>${duration(t.elapsed_seconds)}</b></span>`,
+  `<span>${uiI18n.t('status.lastActivity')}: <b>${age(t.last_activity_at)}</b></span>`
+ ].filter(Boolean).join(' · '):'';
+ $('currentTelemetry').innerHTML=details;
+ if(cur&&cur.status==='FAILED')$('currentTelemetry').innerHTML+=`<div class="note" style="margin-top:6px">${uiI18n.t('status.failure')}: ${esc(cur.reason||cur.error||'resultado reprovado')}</div>`;
+ const interrupted=d.bulk_stop_reason==='STOPPED_ON_FAILURE'?`<div class="note">${uiI18n.t('status.interrupted')}</div>`:'';
+ $('queueList').innerHTML=interrupted+(d.jobs||[]).filter(j=>['WAITING','FAILED','COMPLETED','SKIPPED_CURRENT_VALIDATED','NOT_STARTED_AFTER_FAILURE'].includes(j.status)).map(j=>{const candidate=j.candidate_download_url?`<a class="button compact" href="${esc(j.candidate_download_url)}">${uiI18n.t('status.downloadCandidate')}</a>`:'';return `<div class="jobline"><span>${esc(j.episode||j.name)}</span><span>${badge(j.status)} ${candidate}</span></div>`}).join('');
+}
+const _renderStatusForLocale=renderStatus;
+renderStatus=function(d){_renderStatusForLocale(d);localizeStatusPresentation(d)};
+
+// The compact legacy template is kept stable; add the provider option once
+// at runtime so older cached templates also expose Groq immediately.
+for(const [id,label] of [['tcPrimaryProvider','Groq · API'],['tcFallbackProvider','Groq']]){const select=$(id);if(select&&!select.querySelector('option[value="groq"]')){const option=document.createElement('option');option.value='groq';option.textContent=label;const anchor=select.querySelector('option[value="gemini"]');select.insertBefore(option,anchor||null)}}
