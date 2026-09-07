@@ -1621,6 +1621,43 @@ def _run_episode_v238(job: dict) -> None:
     ctx["response_provider"] = provider
     ctx["operation"] = "TRANSLATE"
     ctx["defer_intermediate_cleanup"] = False
+    # A etapa V230 também é uma chamada de tradução.  Ela não pode descobrir
+    # um Ollama por conta própria: quando o primário é DeepSeek (ou outro
+    # provider hospedado), a abertura/encerramento deve passar pelo mesmo
+    # provider durável e pela mesma política de transporte.
+    def translate_karaoke(text: str, context_before: str, context_after: str) -> str:
+        active_provider = ctx.get("response_provider")
+        if active_provider is None or not callable(getattr(active_provider, "translate", None)):
+            raise RuntimeError("V238_KARAOKE_PROVIDER_REQUIRED")
+        request = {
+            "operation": "v230_karaoke_translation",
+            "text": text,
+            "context_before": context_before,
+            "context_after": context_after,
+            "model": ctx.get("model") or ctx.get("model_override"),
+        }
+        # O callback permanece válido durante uma reexecução com fallback:
+        # ele lê ctx["response_provider"] a cada chamada, em vez de capturar
+        # apenas o provider primário.
+        request_identity = json.dumps(
+            {
+                "operation": request["operation"],
+                "text": text,
+                "context_before": context_before,
+                "context_after": context_after,
+                "operation_id": ctx.get("operation_id"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        capture_id = f"v230-karaoke-{_hashlib.sha256(request_identity).hexdigest()[:24]}"
+        value = active_provider.translate(request, capture_id=capture_id)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError("V238_KARAOKE_TRANSLATION_EMPTY")
+        return value.strip()
+
+    ctx["karaoke_translator"] = translate_karaoke
     # O pipeline V2.3.8 roda in-process; fornece uma consulta cooperativa para
     # parar antes da próxima chamada/retry sem matar o processo do servidor.
     ctx["cancel_check"] = lambda: bool(state.get("cancel_requested"))

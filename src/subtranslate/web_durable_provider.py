@@ -172,6 +172,19 @@ class WebDurableResponseProvider(DurableResponseProvider):
             }
         # Prompt de tradução explícito para pt-BR, incluindo contexto de anime
         # e instrução para NÃO preservar letras de música em inglês (OP/ED English).
+        user_content = text
+        if payload.get("operation") == "v230_karaoke_translation":
+            # A abertura/encerramento passa pelo provider selecionado, mas
+            # mantém o contexto da unidade separado do alvo para que o modelo
+            # traduza somente a linha canônica.
+            user_content = (
+                "Traduza somente o texto entre <ALVO> e </ALVO>. "
+                "O conteúdo entre <CONTEXTO_ANTERIOR> e </CONTEXTO_ANTERIOR> "
+                "e entre <CONTEXTO_POSTERIOR> e </CONTEXTO_POSTERIOR> é apenas contexto.\n"
+                f"<CONTEXTO_ANTERIOR>{payload.get('context_before') or ''}</CONTEXTO_ANTERIOR>\n"
+                f"<ALVO>{text}</ALVO>\n"
+                f"<CONTEXTO_POSTERIOR>{payload.get('context_after') or ''}</CONTEXTO_POSTERIOR>"
+            )
         return {
             "messages": [
                 {
@@ -185,7 +198,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
                         "Retorne APENAS o texto traduzido, sem explicações, sem formatação JSON, sem comentários."
                     ),
                 },
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_content},
             ],
             "options": {"temperature": 0.0, "num_predict": 1024},
             "format": "json",

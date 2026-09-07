@@ -123,6 +123,56 @@ def test_c2_project_request_chat_shape():
     assert chat["format"] == "json"
 
 
+def test_c2_projects_karaoke_request_with_context_and_target_delimiters():
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "deepseek", "model": "deepseek-chat"}},
+        mode="TEST_FAKE",
+        capture_root=Path("/tmp/captures"),
+    )
+    chat = provider._project_request({
+        "operation": "v230_karaoke_translation",
+        "text": "Moonlight signpost",
+        "context_before": "linha anterior",
+        "context_after": "linha posterior",
+    })
+    content = chat["messages"][-1]["content"]
+    assert "<ALVO>Moonlight signpost</ALVO>" in content
+    assert "<CONTEXTO_ANTERIOR>linha anterior</CONTEXTO_ANTERIOR>" in content
+    assert "<CONTEXTO_POSTERIOR>linha posterior</CONTEXTO_POSTERIOR>" in content
+
+
+def test_c2_deepseek_karaoke_uses_selected_network_endpoint(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_http_post(url, _headers, request, delay=0.0):
+        calls.append((url, request, delay))
+        return json.dumps({
+            "choices": [{"message": {"content": '{"translation":"Poste de luz lunar"}'}}],
+        }).encode("utf-8")
+
+    monkeypatch.setattr(c2, "_http_post", fake_http_post)
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "deepseek", "model": "deepseek-chat", "api_key": "secret"}},
+        mode="LIVE_CAPTURED",
+        capture_root=tmp_path,
+    )
+    value = provider.translate(
+        {
+            "operation": "v230_karaoke_translation",
+            "text": "Moonlight signpost",
+            "context_before": "antes",
+            "context_after": "depois",
+            "model": "deepseek-chat",
+        },
+        capture_id="karaoke-deepseek",
+    )
+    assert value == "Poste de luz lunar"
+    assert len(calls) == 1
+    assert calls[0][0] == "https://api.deepseek.com/v1/chat/completions"
+    assert calls[0][1]["model"] == "deepseek-chat"
+    assert calls[0][1]["messages"][-1]["content"].startswith("Traduza somente")
+
+
 def test_c2_inject_api_key():
     provider = c2.WebDurableResponseProvider(
         {"primary": {"provider": "gemini", "model": "gemini-3.6-flash"},

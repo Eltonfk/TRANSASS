@@ -232,7 +232,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         stage_results.append({"id": plan.stages[0], "result": full_stage_result})
         v230 = getattr(importlib.import_module(plan.augmentation_module), plan.augmentation_function)
         karaoke_kwargs: dict[str, Any] = {
-            "model": ctx.get("model_override"),
+            "model": ctx.get("model") or ctx.get("model_override"),
             "ollama_url": ctx.get("ollama_url"),
         }
         karaoke_provider = ctx.get("karaoke_translator")
@@ -251,7 +251,17 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         result = dict(full_stage_result) if isinstance(full_stage_result, dict) else {"adapter_result": full_stage_result}
         base_calls = result.get("calls", result.get("total_ollama_calls", 0))
         base_retries = result.get("retry_calls", result.get("actual_retry_ollama_calls", 0))
-        v230_calls = v230_result.get("ollama_calls", 0)
+        # ``provider_calls`` counts calls through the selected hosted/local
+        # provider; ``ollama_calls`` is retained for direct legacy callers.
+        # Both may be present in a result, so totalize them instead of making
+        # the new field hide the legacy count.
+        v230_calls = sum(
+            value for value in (
+                v230_result.get("provider_calls", 0),
+                v230_result.get("ollama_calls", 0),
+            )
+            if isinstance(value, int)
+        )
         result.update({
             "plan_id": plan.id,
             "pipeline": plan.id,
@@ -261,7 +271,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
             "retry_calls": base_retries,
             "karaoke": {
                 key: v230_result.get(key)
-                for key in ("song_units", "translated_units", "translated_events", "unsupported", "failures", "structural_failures", "ollama_calls", "input_sha256", "output_sha256")
+                for key in ("song_units", "translated_units", "translated_events", "unsupported", "failures", "structural_failures", "ollama_calls", "provider_calls", "input_sha256", "output_sha256")
                 if key in v230_result
             },
             "metrics_measurements": {

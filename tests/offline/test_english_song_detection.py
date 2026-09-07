@@ -90,6 +90,8 @@ def test_v230_translates_english_bottom_lines_and_preserves_ass_envelope(tmp_pat
     assert result["song_units"] == 2
     assert result["translated_units"] == 2
     assert result["translated_events"] == 2
+    assert result["ollama_calls"] == 0
+    assert result["provider_calls"] == 2
     assert result["failures"] == []
     assert translated[0].text == r"{\be1}Tsukiakari no michishirube"
     assert translated[1].text == r"{\be2}Poste de luz lunar"

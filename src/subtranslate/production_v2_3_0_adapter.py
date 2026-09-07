@@ -230,6 +230,7 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
     translated_units = 0
     translated_events = 0
     calls = 0
+    provider_calls = 0
     failures: list[dict[str, Any]] = []
     for (style, canonical), indices in sorted(discovered["units"].items()):
         if any(index in discovered["unsupported"] for index in indices):
@@ -238,9 +239,10 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
             continue
         if translator:
             value = translator(canonical, "", "")
+            provider_calls += 1
         else:
             value = _ollama_translate(canonical, model=model, url=ollama_url)
-        calls += 0 if translator else 1
+            calls += 1
         if visible(value).casefold() == canonical.casefold():
             failures.append({"style": style, "source": canonical, "event_indices": indices,
                              "reason": "KARAOKE_TRANSLATION_SOURCE_COPY"})
@@ -265,7 +267,8 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
     return {"pipeline": APPROVED_PIPELINE, "model": model or APPROVED_MODEL,
             "mode": "KARAOKE_AUGMENTATION", "song_units": len(discovered["units"]),
             "translated_units": translated_units, "translated_events": translated_events,
-            "ollama_calls": calls, "unsupported": len(discovered["unsupported"]),
+            "ollama_calls": calls, "provider_calls": provider_calls,
+            "unsupported": len(discovered["unsupported"]),
             "failures": failures, "structural_failures": structural_failures,
             "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
             "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest()}
