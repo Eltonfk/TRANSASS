@@ -1056,6 +1056,45 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
     def on_warning(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
         record("WARNING", snapshot)
 
+    def on_sample(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
+        """Expose live temperature/fan telemetry without persisting every sample."""
+        with state_condition:
+            info = snapshot.as_dict(guard_config)
+            effective_stop = snapshot.effective_stop_c(guard_config.stop_c) if snapshot.available else guard_config.stop_c
+            observing = snapshot.hottest_c is not None and snapshot.hottest_c >= effective_stop
+            previous = job.get("thermal_guard") if isinstance(job.get("thermal_guard"), dict) else {}
+            info.update({
+                "status": "TRIPPED" if thermal_guard.tripped else ("COOLING_OBSERVATION" if observing else "MONITORING"),
+                "warning_c": guard_config.warning_c,
+                "stop_c": guard_config.stop_c,
+                "interval_s": guard_config.interval_s,
+                "trip_confirmations": guard_config.trip_confirmations,
+                "cooling_window_s": guard_config.cooling_window_s,
+                "cooling_elapsed_s": round(thermal_guard.over_stop_elapsed_s, 1),
+                "consecutive_over_stop": thermal_guard.consecutive_over_stop,
+                "fan_control": "hardware_driver",
+            })
+            if thermal_guard.tripped and previous.get("error"):
+                info["error"] = previous["error"]
+            job["thermal_guard"] = info
+            state["thermal_guard"] = info
+            temperature = (
+                f"{snapshot.hottest_sensor or 'sensor'}={snapshot.hottest_c:.1f}°C"
+                if snapshot.hottest_c is not None else "temperatura indisponível"
+            )
+            fan = f"ventoinha={snapshot.fan_rpm:.0f} RPM" if snapshot.fan_rpm is not None else "ventoinha=indisponível"
+            power = f"potência={snapshot.power_w:.1f} W" if snapshot.power_w is not None else "potência=indisponível"
+            window = (
+                f" · janela={thermal_guard.over_stop_elapsed_s:.1f}/{guard_config.cooling_window_s:.0f}s"
+                if observing else ""
+            )
+            _append_log(
+                f"Telemetria GPU: {temperature} · {fan} · {power}{window}",
+                level="technical",
+                job_id=job.get("id"),
+            )
+            state_condition.notify_all()
+
     def on_trip(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
         with state_lock:
             state["thermal_stop_requested"] = True
@@ -1073,7 +1112,7 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             if process is not None:
                 _send_process_group_signal(process, signal.SIGTERM)
 
-    guard = GpuThermalGuard(on_warning=on_warning, on_trip=on_trip, config=config)
+    guard = GpuThermalGuard(on_warning=on_warning, on_trip=on_trip, on_sample=on_sample, config=config)
     active = guard.start()
     snapshot = guard.latest
     if not active and snapshot is not None:
@@ -1112,13 +1151,16 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 "stop_c": config.stop_c,
                 "interval_s": config.interval_s,
                 "trip_confirmations": config.trip_confirmations,
+                "cooling_window_s": config.cooling_window_s,
+                "fan_control": "hardware_driver",
             }
             state["thermal_guard"] = job["thermal_guard"]
             _append_log(
                 f"Proteção térmica GPU ativa: alerta={config.warning_c:.0f}°C, "
                 f"parada={config.stop_c:.0f}°C, limite efetivo={effective_stop:.1f}°C, "
                 f"leitura inicial={initial_reading}, "
-                f"confirmação={config.trip_confirmations} leitura(s)",
+                f"janela de resfriamento={config.cooling_window_s:.0f}s, "
+                f"intervalo={config.interval_s:.1f}s, confirmação={config.trip_confirmations} leitura(s)",
                 level="summary",
                 job_id=job.get("id"),
             )

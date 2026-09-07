@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import gpu_thermal_guard as thermal
 from gpu_thermal_guard import (
     GpuThermalGuard,
     ThermalGuardConfig,
@@ -62,7 +63,7 @@ def test_guard_trips_at_conservative_threshold_without_pipeline_call():
         emergency_c={"edge": 115.0, "junction": 115.0, "mem": 110.0},
     )
     guard = GpuThermalGuard(
-        config=ThermalGuardConfig(interval_s=0.25),
+        config=ThermalGuardConfig(interval_s=0.25, cooling_window_s=0.0),
         reader=lambda: snapshot,
         on_warning=lambda value, config: warnings.append(value),
         on_trip=lambda value, config: trips.append(value),
@@ -99,12 +100,41 @@ def test_guard_trips_immediately_when_matching_hardware_limit_is_breached():
     assert trips == [snapshot]
 
 
+def test_guard_waits_for_cooling_window_before_soft_trip(monkeypatch):
+    trips = []
+    clock = [100.0]
+    hot = ThermalSnapshot(available=True, temperatures_c={"junction": 101.0})
+    guard = GpuThermalGuard(
+        config=ThermalGuardConfig(
+            interval_s=2.0,
+            trip_confirmations=2,
+            cooling_window_s=30.0,
+        ),
+        reader=lambda: hot,
+        on_warning=lambda value, config: None,
+        on_trip=lambda value, config: trips.append(value),
+    )
+    monkeypatch.setattr(thermal.time, "monotonic", lambda: clock[0])
+
+    guard._evaluate(hot)
+    clock[0] = 101.0
+    guard._evaluate(hot)
+    assert guard.tripped is False
+    assert trips == []
+
+    clock[0] = 130.0
+    guard._evaluate(hot)
+
+    assert guard.tripped is True
+    assert trips == [hot]
+
+
 def test_guard_resets_soft_trip_confirmation_after_temperature_falls():
     trips = []
     hot = ThermalSnapshot(available=True, temperatures_c={"junction": 101.0})
     cool = ThermalSnapshot(available=True, temperatures_c={"junction": 95.0})
     guard = GpuThermalGuard(
-        config=ThermalGuardConfig(trip_confirmations=2),
+        config=ThermalGuardConfig(trip_confirmations=2, cooling_window_s=0.0),
         reader=lambda: hot,
         on_warning=lambda value, config: None,
         on_trip=lambda value, config: trips.append(value),
@@ -122,6 +152,12 @@ def test_config_reads_thermal_trip_confirmations_from_environment():
     config = ThermalGuardConfig.from_environment({"TRANSASS_GPU_THERMAL_CONFIRMATIONS": "3"})
 
     assert config.trip_confirmations == 3
+
+
+def test_config_reads_thermal_cooling_window_from_environment():
+    config = ThermalGuardConfig.from_environment({"TRANSASS_GPU_THERMAL_COOLING_WINDOW_S": "30"})
+
+    assert config.cooling_window_s == 30.0
 
 
 def test_guard_warning_precedes_trip():

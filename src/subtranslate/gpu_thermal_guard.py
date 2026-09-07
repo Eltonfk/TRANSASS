@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
@@ -20,6 +21,7 @@ DEFAULT_WARNING_C = 90.0
 DEFAULT_STOP_C = 100.0
 DEFAULT_INTERVAL_S = 2.0
 DEFAULT_TRIP_CONFIRMATIONS = 2
+DEFAULT_COOLING_WINDOW_S = 30.0
 
 
 def _float_env(environ: Mapping[str, str], name: str, default: float, *, minimum: float) -> float:
@@ -52,6 +54,7 @@ class ThermalGuardConfig:
     stop_c: float = DEFAULT_STOP_C
     interval_s: float = DEFAULT_INTERVAL_S
     trip_confirmations: int = DEFAULT_TRIP_CONFIRMATIONS
+    cooling_window_s: float = DEFAULT_COOLING_WINDOW_S
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "ThermalGuardConfig":
@@ -70,6 +73,12 @@ class ThermalGuardConfig:
                 "TRANSASS_GPU_THERMAL_CONFIRMATIONS",
                 DEFAULT_TRIP_CONFIRMATIONS,
                 minimum=1,
+            ),
+            cooling_window_s=_float_env(
+                env,
+                "TRANSASS_GPU_THERMAL_COOLING_WINDOW_S",
+                DEFAULT_COOLING_WINDOW_S,
+                minimum=0.0,
             ),
         )
 
@@ -140,6 +149,7 @@ class ThermalSnapshot:
             "fan_rpm": self.fan_rpm,
             "power_w": self.power_w,
             "effective_stop_c": self.effective_stop_c(configured) if self.available else configured,
+            "cooling_window_s": config.cooling_window_s if config else DEFAULT_COOLING_WINDOW_S,
             "hardware_breach": (
                 {
                     "sensor": breach[0],
@@ -222,6 +232,7 @@ class GpuThermalGuard:
         *,
         on_warning: Callable[[ThermalSnapshot, ThermalGuardConfig], None],
         on_trip: Callable[[ThermalSnapshot, ThermalGuardConfig], None],
+        on_sample: Callable[[ThermalSnapshot, ThermalGuardConfig], None] | None = None,
         config: ThermalGuardConfig | None = None,
         reader: Callable[[], ThermalSnapshot] | None = None,
     ) -> None:
@@ -229,32 +240,60 @@ class GpuThermalGuard:
         self.reader = reader or read_amdgpu_snapshot
         self.on_warning = on_warning
         self.on_trip = on_trip
+        self.on_sample = on_sample
         self.latest: ThermalSnapshot | None = None
         self.tripped = False
         self.warning_sent = False
         self.consecutive_over_stop = 0
+        self.over_stop_since: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @property
+    def over_stop_elapsed_s(self) -> float:
+        if self.over_stop_since is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self.over_stop_since)
+
+    def _emit_sample(self, snapshot: ThermalSnapshot) -> None:
+        if self.on_sample is None:
+            return
+        try:
+            self.on_sample(snapshot, self.config)
+        except Exception:
+            # Telemetry must never change the safety decision or kill the
+            # translation worker when a UI/state sink is unavailable.
+            return
 
     def _evaluate(self, snapshot: ThermalSnapshot) -> None:
         self.latest = snapshot
         if not snapshot.available or snapshot.hottest_c is None:
             self.consecutive_over_stop = 0
+            self.over_stop_since = None
+            self._emit_sample(snapshot)
             return
         stop_c = snapshot.effective_stop_c(self.config.stop_c)
         warning_c = min(self.config.warning_c, max(1.0, stop_c - 5.0))
         if snapshot.hottest_c >= stop_c:
+            if self.over_stop_since is None:
+                self.over_stop_since = time.monotonic()
             self.consecutive_over_stop += 1
             hardware_breach = snapshot.hardware_breach()
-            confirmed = self.consecutive_over_stop >= self.config.trip_confirmations
+            confirmed = (
+                self.consecutive_over_stop >= self.config.trip_confirmations
+                and self.over_stop_elapsed_s >= self.config.cooling_window_s
+            )
             if not self.tripped and (hardware_breach is not None or confirmed):
                 self.tripped = True
                 self.on_trip(snapshot, self.config)
+            self._emit_sample(snapshot)
             return
         self.consecutive_over_stop = 0
+        self.over_stop_since = None
         if snapshot.hottest_c >= warning_c and not self.warning_sent:
             self.warning_sent = True
             self.on_warning(snapshot, self.config)
+        self._emit_sample(snapshot)
 
     def start(self) -> bool:
         if not self.config.enabled:
