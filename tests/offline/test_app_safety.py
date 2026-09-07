@@ -184,7 +184,7 @@ class AppSafetyTests(unittest.TestCase):
     def test_web_assets_are_extracted_from_python_module(self):
         page = self.client.get("/").get_data(as_text=True)
         self.assertIn('href="/static/app.css"', page)
-        self.assertIn('src="/static/app.js"', page)
+        self.assertRegex(page, r'src="/static/app\.js(?:\?v=[a-f0-9]+)?"')
         self.assertNotIn("<style>", page)
         self.assertNotIn("<script>\n", page)
         css_response = self.client.get("/static/app.css")
