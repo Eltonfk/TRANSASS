@@ -69,7 +69,7 @@ function renderStatus(d){
   $('skipCount').textContent=q.skipped||0;
   $('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;
   const cur=statusCurrentJob(d),t=cur||{},stage=t.stage==='SEMANTIC_RECONSTRUCTION'?'RECONSTRUÇÃO SEMÂNTICA':(t.stage||t.status);
-  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:'Nenhum episódio em execução.';
+  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:t('progress.none');
   const total=t.total_units,resolved=t.resolved_units??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
   $('progressBar').style.width=pct+'%';
   const semantic=t.semantic_calls??0;

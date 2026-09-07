@@ -54,6 +54,7 @@ def test_dynamic_workspace_containers_are_not_overwritten_by_localization_observ
         "archiveSeries",
         "memoryStats",
         "memoryItems",
+        "currentTitle",
     ):
         match = re.search(rf'<[^>]+id="{element_id}"[^>]*>', page)
         assert match, element_id

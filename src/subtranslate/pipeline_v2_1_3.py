@@ -373,6 +373,12 @@ def probable_romaji(
     unknown_ratio = 1.0 - english_hits / max(1, len(words))
     marker_hits = sum(word in ROMAJI_MARKERS for word in words)
     syllable_hit = bool(ROMAJI_COMMON_SYLLABLES.search(" ".join(words)))
+    # Content-heavy English song lines can contain particles such as "to" or
+    # syllables such as "shi" by coincidence.  Check lexical evidence before
+    # the romaji score so an English OP/ED line cannot be preserved as Japanese.
+    _, _, lyric_content_hits = _english_source_evidence(plain)
+    if _looks_like_english_source_text(plain) and lyric_content_hits:
+        return False, 0.0, "English lyric content detected"
     # Plausible English syntax is a strong veto.  This keeps ordinary dialogue
     # with one or two proper names on the normal translation path.
     english_syntax = sum(word in {"the", "you", "are", "have", "has", "will", "should", "we", "i", "to", "in", "of", "and", "but", "this", "that"} for word in words)
@@ -567,34 +573,64 @@ ENGLISH_INDICATORS = {
     "shall", "will", "would", "could", "should", "might",  # modais
 }
 
-# Common content words found in English OP/ED verses.  The block detector
-# cannot rely only on function words: short lyric lines such as "How serene"
-# contain little or no overlap with the compact dialogue indicator set above.
-# These words are deliberately scoped to the block-level source-language
-# check; they do not classify ordinary dialogue by themselves.
+# Common content words found in English OP/ED verses.  The detector cannot rely
+# only on function words: short lyric lines such as "Moonlight signpost" and
+# "I start walking" contain little overlap with the compact dialogue set above.
+# This is release-independent vocabulary, deliberately scoped to source-content
+# detection; it does not classify ordinary dialogue by itself.
 ENGLISH_LYRIC_INDICATORS = {
-    "oh", "how", "sacred", "serene", "benign", "fair", "pure", "lily",
+    "above", "after", "again", "answers", "around", "beyond", "burden",
+    "called", "carrying", "child", "cloud", "clouds", "day", "endlessly",
+    "everyone", "fate", "fair", "going", "headed", "happen", "hey",
+    "know", "leads", "lily", "light", "meetings", "moonlight", "now",
+    "partings", "passing", "pure", "reach", "repeating", "sacred", "say",
+    "serene", "shadow", "shine", "signpost", "sin", "somebody", "start",
+    "star", "starlight", "tell", "time", "tomorrow", "walking", "wanders",
+    "way", "wherever", "yeah", "benign", "how",
 }
+
+# Apostrophe-aware tokens keep short English clauses such as "I don't know"
+# together.  The singleton list is intentionally tiny: one English-looking
+# word is otherwise too weak to override the conservative preservation rules.
+_ENGLISH_DETECTOR_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)?", re.UNICODE)
+_ENGLISH_FUNCTION_CONTRACTIONS = {
+    "don't", "i'm", "it's", "that's", "they're", "we're", "what's", "you're",
+}
+_ENGLISH_SINGLETON_INDICATORS = {
+    "hey", "yeah", "oh", "moonlight", "signpost", "tomorrow",
+}
+
+
+def _english_source_evidence(text: str) -> tuple[list[str], int, int]:
+    """Return tokens, function-word hits and content-word hits for English."""
+    words = [word.casefold().replace("’", "'") for word in _ENGLISH_DETECTOR_TOKEN_RE.findall(text or "")]
+    function_hits = sum(word in ENGLISH_INDICATORS or word in _ENGLISH_FUNCTION_CONTRACTIONS for word in words)
+    content_hits = sum(word in ENGLISH_LYRIC_INDICATORS for word in words)
+    return words, function_hits, content_hits
+
+
+def _looks_like_english_source_text(text: str) -> bool:
+    """Detect short/content-heavy English without treating romaji as English."""
+    words, function_hits, content_hits = _english_source_evidence(text)
+    if not words:
+        return False
+    if len(words) == 1:
+        return words[0] in _ENGLISH_SINGLETON_INDICATORS
+    if content_hits >= 2 or (content_hits >= 1 and function_hits >= 1):
+        return True
+    # Longer clauses with several English function words are covered even when
+    # their content vocabulary is outside this conservative lyric set.
+    return len(words) >= 4 and function_hits >= 2 and function_hits / len(words) >= 0.30
 
 
 def _block_has_english_source_text(events: list[Event]) -> bool:
     """Detecta se um bloco contém texto em inglês (idioma de origem).
 
-    Verifica se pelo menos 30% das palavras visíveis são indicadores ingleses
-    comuns. Isso impede que traduções inglesas de OP/ED (ex: "OP English")
-    sejam preservadas em vez de traduzidas para pt-BR.
+    Usa evidência lexical conservadora para também cobrir linhas curtas e
+    conteúdo-heavy de OP/ED. Isso impede que texto inglês seja preservado em
+    vez de traduzido para pt-BR, sem confundir romaji japonês com inglês.
     """
-    total_words = 0
-    english_words = 0
-    for event in events:
-        text = event.clean_text.strip()
-        words = [word.lower() for word in WORD_RE.findall(text)]
-        total_words += len(words)
-        english_words += sum(1 for word in words
-                             if word in ENGLISH_INDICATORS or word in ENGLISH_LYRIC_INDICATORS)
-    if total_words == 0:
-        return False
-    return (english_words / total_words) >= 0.30
+    return _looks_like_english_source_text(" ".join(event.clean_text.strip() for event in events))
 
 
 def classify_song_blocks(events: list[Event]) -> dict[str, Any]:
@@ -1226,14 +1262,21 @@ def high_confidence_untranslated_dialogue(event: Event, source: str, output: str
     """
     source_norm = " ".join(source.lower().replace(r"\N", " ").split())
     output_norm = " ".join(output.lower().replace(r"\N", " ").split())
-    if not source_norm or not output_norm or source_norm == output_norm and len(source_norm.split()) < 4:
+    english_music_source = (
+        event.classification == "MUSIC_OR_KARAOKE"
+        and canonical_source_language(source_language) == "english"
+        and _looks_like_english_source_text(source_norm)
+    )
+    if not source_norm or not output_norm:
+        return False
+    if source_norm == output_norm and not english_music_source and len(source_norm.split()) < 4:
         return False
     protected = {term.lower().strip() for term in (protected_terms or set()) if term}
     if source_norm in protected or output_norm in protected:
         return False
     source_words = [word.lower() for word in WORD_RE.findall(source_norm)]
     output_words = [word.lower() for word in WORD_RE.findall(output_norm)]
-    if len(source_words) < 4 or len(output_words) < 4:
+    if not english_music_source and (len(source_words) < 4 or len(output_words) < 4):
         return False
     dictionary = english_dictionary or set(ENGLISH_COMMON)
     source_hits = sum(word in dictionary for word in source_words)
@@ -1247,6 +1290,11 @@ def high_confidence_untranslated_dialogue(event: Event, source: str, output: str
     if event.classification == "ROMAJI_PRESERVED":
         if not (sentence_signal and common_hits >= 1):
             return False
+    elif event.classification == "MUSIC_OR_KARAOKE":
+        # Only music explicitly recognized as English is retry-eligible.  The
+        # remaining karaoke/romaji classes keep their preservation contract.
+        if not english_music_source:
+            return False
     elif event.classification not in {"MAIN_DIALOGUE", "NARRATION_OR_THOUGHT", "SDH", "SONG_AMBIGUOUS"}:
         return False
     # Non-English source languages: residue is measured against the configured
@@ -1257,12 +1305,31 @@ def high_confidence_untranslated_dialogue(event: Event, source: str, output: str
         if source_residue_strong(residue, overlap_quick):
             return True
     if source_norm == output_norm:
+        if english_music_source:
+            return _looks_like_english_source_text(output_norm)
         # Full unchanged sentence: either broad dictionary coverage or several
         # English function words is required.  This catches clauses such as
         # “Switching to search mode” without catching names/short codes.
         if sentence_signal and len(source_words) >= 4 and common_hits >= 1:
             return True
         return (source_hits >= max(3, len(source_words) // 2) and common_hits >= 1) or common_hits >= 2
+    if english_music_source:
+        source_lyric_words, _, _ = _english_source_evidence(source_norm)
+        output_lyric_words, output_function_hits, output_content_hits = _english_source_evidence(output_norm)
+        source_word_set = set(source_lyric_words)
+        output_word_set = set(output_lyric_words)
+        overlap = len(source_word_set & output_word_set) / max(1, len(source_word_set))
+        output_hits = sum(
+            word in dictionary or word in ENGLISH_LYRIC_INDICATORS
+            for word in output_lyric_words
+        )
+        output_ratio = output_hits / max(1, len(output_lyric_words))
+        # A partial English copy is still suspicious, but require lexical
+        # overlap and at least two independent English signals to avoid
+        # retrying a legitimate short Portuguese translation.
+        return (
+            output_content_hits >= 2 or (output_content_hits >= 1 and output_function_hits >= 1)
+        ) and output_ratio >= 0.65 and overlap >= 0.60 and not re.search(r"[áàâãéêíóôõúç]", output_norm)
     overlap = len(set(source_words) & set(output_words)) / max(1, len(set(source_words)))
     output_ratio = output_hits / max(1, len(output_words))
     # A mostly-English response that retains most source words is a residual

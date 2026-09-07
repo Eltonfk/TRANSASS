@@ -28,12 +28,28 @@ KARAOKE_TRANSLATION_RETRY = "KARAOKE_TRANSLATION"
 
 _TAG_RE = re.compile(r"\{[^}]*\}")
 _STYLE_TRANSLATION_HINTS = ("english", " eng", " tl", "translation", "translated")
-_STYLE_SONG_HINTS = ("song", " op", " ed", "opening", "ending", "insert")
+_STYLE_SONG_RE = re.compile(r"(?<![a-z])(?:song|op|ed|opening|ending|insert)(?![a-z])", re.IGNORECASE)
 _ENGLISH_WORDS = {
     "a", "about", "all", "and", "are", "around", "be", "but", "can", "do",
     "for", "from", "have", "how", "i", "in", "is", "it", "my", "of", "on",
     "or", "that", "the", "this", "to", "we", "what", "when", "with", "you",
+    "don't", "i'm", "it's", "that's", "they're", "we're", "what's", "you're",
 }
+_ENGLISH_CONTENT_WORDS = {
+    "above", "after", "again", "answers", "around", "beyond", "burden",
+    "called", "carrying", "child", "cloud", "clouds", "day", "endlessly",
+    "everyone", "fate", "fair", "going", "headed", "happen", "hey", "know",
+    "leads", "lily", "light", "meetings", "moonlight", "now", "partings",
+    "passing", "pure", "reach", "repeating", "sacred", "say", "serene",
+    "shadow", "shine", "signpost", "sin", "somebody", "start", "star",
+    "starlight", "tell", "time", "tomorrow", "walking", "wanders", "way",
+    "wherever", "yeah", "benign", "how",
+}
+_ENGLISH_FUNCTION_CONTRACTIONS = {
+    "don't", "i'm", "it's", "that's", "they're", "we're", "what's", "you're",
+}
+_ENGLISH_SINGLETONS = {"hey", "yeah", "oh", "moonlight", "signpost", "tomorrow"}
+_ENGLISH_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)?", re.UNICODE)
 
 
 def _glossary_hints(text: str) -> list[dict[str, str]]:
@@ -67,22 +83,36 @@ def _is_drawing(text: str) -> bool:
     return bool(re.search(r"\\p[1-9]", text or "")) and not re.search(r"[A-Za-zÀ-ÿ]{2,}", visible(text))
 
 
+def _looks_like_english_song_text(text: str) -> bool:
+    """Recognize short English lyric content without release-specific IDs."""
+    words = [word.casefold().replace("’", "'") for word in _ENGLISH_TOKEN_RE.findall(text or "")]
+    if not words:
+        return False
+    function_hits = sum(word in _ENGLISH_WORDS or word in _ENGLISH_FUNCTION_CONTRACTIONS for word in words)
+    content_hits = sum(word in _ENGLISH_CONTENT_WORDS for word in words)
+    if len(words) == 1:
+        return words[0] in _ENGLISH_SINGLETONS
+    return content_hits >= 2 or (content_hits >= 1 and function_hits >= 1) or (
+        len(words) >= 4 and function_hits >= 2 and function_hits / len(words) >= 0.30
+    )
+
+
 def classify_song_translation(style: str, text: str) -> str | None:
     """Conservative generic discovery predicate; no release-specific IDs."""
     low = (style or "").casefold()
     clean = visible(text)
     if not clean or _is_drawing(text):
         return "SONG_EFFECT"
-    if not any(token in low for token in _STYLE_SONG_HINTS):
+    if not _STYLE_SONG_RE.search(low):
         return None
     if "romaji" in low or re.search(r"\b(ro|romanized)\b", low):
         return "SONG_ROMAJI"
     if any(token in low for token in _STYLE_TRANSLATION_HINTS):
         return "SONG_TRANSLATION"
-    # A Latin line with multiple common English words is eligible only when
-    # the style itself identifies a translation layer.  Otherwise preserve it.
-    words = [w.casefold() for w in re.findall(r"[A-Za-zÀ-ÿ]+", clean)]
-    if len(set(words) & _ENGLISH_WORDS) >= 2 and "translation" in low:
+    # OP/ED bottom styles are often named only by position (for example
+    # ``OP Bottom``), while their payload is already English.  The conservative
+    # lexical check makes those lines eligible without converting romaji.
+    if _looks_like_english_song_text(clean):
         return "SONG_TRANSLATION"
     return "SONG_UNKNOWN"
 
