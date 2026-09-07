@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -105,6 +106,19 @@ class LocalRuntime:
             host, actual_port = self._server.server_address[:2]
             self._url = f"http://{host}:{actual_port}/"
             return self._url
+        except OSError as error:
+            self.stop()
+            requested_port = "automática" if selected_port == 0 else str(selected_port)
+            if error.errno == errno.EADDRINUSE:
+                guidance = "Verifique se outra instância do Transass já está em execução."
+            elif error.errno in {errno.EACCES, errno.EPERM}:
+                guidance = "Verifique as permissões do sistema para abrir uma porta local."
+            else:
+                guidance = "Verifique a configuração de rede local."
+            raise RuntimeError(
+                f"Não foi possível reservar a porta local ({requested_port}). "
+                f"{guidance} Detalhe: {error}"
+            ) from error
         except Exception:
             self.stop()
             raise

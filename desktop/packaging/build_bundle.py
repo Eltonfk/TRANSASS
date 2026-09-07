@@ -3,10 +3,36 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 
 from media_tools import MediaToolsError, resolve_media_tools, write_manifest
+
+
+_REQUIRED_BUILD_MODULES = {
+    "PyInstaller": "PyInstaller",
+    "PySide6": "PySide6",
+    "keyring": "keyring",
+    "Flask": "flask",
+    "Werkzeug": "werkzeug",
+    "requests": "requests",
+    "pysubs2": "pysubs2",
+}
+
+
+def missing_build_dependencies() -> tuple[str, ...]:
+    """Return required modules missing from the environment running the build."""
+
+    missing = []
+    for label, module_name in _REQUIRED_BUILD_MODULES.items():
+        try:
+            available = importlib.util.find_spec(module_name) is not None
+        except (ImportError, ModuleNotFoundError):
+            available = False
+        if not available:
+            missing.append(label)
+    return tuple(missing)
 
 
 def main() -> int:
@@ -19,6 +45,13 @@ def main() -> int:
         help="directory containing audited ffmpeg/ffprobe executables",
     )
     args = parser.parse_args()
+    missing = missing_build_dependencies()
+    if missing:
+        parser.error(
+            "dependências do Desktop ausentes no ambiente de build: "
+            + ", ".join(missing)
+            + ". Instale requirements.lock e desktop/packaging/requirements-desktop.txt."
+        )
     root = Path(__file__).resolve().parents[2]
     dist = (root / args.dist).resolve() if not args.dist.is_absolute() else args.dist.resolve()
     work = root / "build" / "pyinstaller"

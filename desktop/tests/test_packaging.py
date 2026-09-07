@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -110,3 +111,25 @@ def test_bundle_uses_canonical_icon_on_windows():
     assert 'if os.name == "nt"' in builder
     assert 'transass_logo.png' in builder
     assert '"--icon"' in builder
+
+
+def test_bundle_checks_runtime_dependencies_before_pyinstaller():
+    builder = (ROOT / "desktop/packaging/build_bundle.py").read_text(encoding="utf-8")
+    assert "missing_build_dependencies" in builder
+    assert '"Werkzeug": "werkzeug"' in builder
+    assert 'requirements.lock e desktop/packaging/requirements-desktop.txt' in builder
+
+
+def test_frozen_launcher_supports_version_probe_without_qt():
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(ROOT / "desktop/src"), str(ROOT / "src/subtranslate"))
+    )
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "desktop/packaging/launcher_entry.py"), "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert result.stdout.strip() == "Transass 2.5.0"

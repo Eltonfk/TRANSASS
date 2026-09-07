@@ -41,3 +41,14 @@ sem executar uma tradução.
 O roteiro da Fase 6 está em `BETA_CHECKLIST.md`; o smoke automatizado pode ser
 executado com `python desktop/tests/run_beta_smoke.py` e não acessa a mídia real
 nem chama modelos.
+
+Depois de instalar as dependências de build, o bundle pode ser validado de
+forma completa com:
+
+```sh
+python desktop/packaging/build_bundle.py --dist build/desktop
+python desktop/tests/run_bundle_smoke.py build/desktop/Transass/Transass
+```
+
+O empacotador interrompe o processo antes do PyInstaller quando alguma
+dependência do runtime Desktop estiver ausente.

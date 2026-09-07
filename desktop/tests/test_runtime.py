@@ -1,11 +1,12 @@
+from pathlib import Path
 import sys
 from urllib.request import urlopen
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 import pytest
 
+import transass_desktop.runtime as runtime_module
 from transass_desktop.runtime import LocalRuntime
 from transass_desktop.paths import DesktopPaths
 
@@ -46,4 +47,19 @@ def test_runtime_serves_health_on_localhost(tmp_path):
         assert runtime.running
     finally:
         runtime.stop()
+    assert not runtime.running
+
+
+def test_runtime_reports_local_port_start_failure(monkeypatch, tmp_path):
+    runtime = runtime_for(tmp_path, core_root=Path(__file__).parents[2])
+
+    def fail_to_bind(*args, **kwargs):
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(runtime_module, "make_server", fail_to_bind)
+    with pytest.raises(RuntimeError, match="porta local") as error:
+        runtime.start(port=43127)
+
+    assert "43127" in str(error.value)
+    assert "outra instância" in str(error.value)
     assert not runtime.running

@@ -49,10 +49,25 @@ def test_paths_honor_compose_host_aliases(monkeypatch, tmp_path):
     assert paths.transport_config == state / "transport_config.json"
 
 def test_container_state_aliases_are_bypassed(monkeypatch, tmp_path):
-    monkeypatch.setenv("TRANSLATOR_WEB_STATE_DIR", "/app/state")
-    monkeypatch.setenv("STATE_DIR", "/app/state")
     monkeypatch.setenv("TRANSASS_DATA_DIR", str(tmp_path / "data"))
-    paths = default_paths()
-    assert os.fspath(paths.state_dir) != "/app/state"
-    assert paths.state_dir == tmp_path / "data" / "state"
-    assert paths.transport_config == tmp_path / "data" / "state" / "transport_config.json"
+    for alias in ("/app/state", "/docker/subtranslate/state/", "/docker/transass/state"):
+        monkeypatch.setenv("TRANSLATOR_WEB_STATE_DIR", alias)
+        monkeypatch.setenv("STATE_DIR", alias)
+        paths = default_paths()
+        assert paths.state_dir != Path(alias)
+        assert paths.state_dir == tmp_path / "data" / "state"
+        assert paths.transport_config == tmp_path / "data" / "state" / "transport_config.json"
+
+
+def test_docker_state_aliases_do_not_choose_desktop_data_root(monkeypatch, tmp_path):
+    monkeypatch.delenv("TRANSASS_DATA_DIR", raising=False)
+    monkeypatch.delenv("TRANSASS_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("TRANSLATOR_WEB_STATE_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+    for alias in ("/app/state/", "/docker/subtranslate/state", "/docker/transass/state/"):
+        monkeypatch.setenv("STATE_DIR", alias)
+        paths = default_paths()
+        assert paths.data_root == tmp_path / "xdg-data" / "transass"
+        assert paths.state_dir == paths.data_root / "state"

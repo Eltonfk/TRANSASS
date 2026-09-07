@@ -10,8 +10,25 @@ from pathlib import Path
 
 APP_NAME = "Transass"
 
-_CONTAINER_MEDIA_ALIASES = {"/shows", "/app/shows", "/app/shows/"}
-_CONTAINER_STATE_ALIASES = {"/app/state", "/app/state/"}
+_CONTAINER_MEDIA_ALIASES = frozenset({"/shows", "/app/shows"})
+_CONTAINER_STATE_ALIASES = frozenset(
+    {
+        "/app/state",
+        "/docker/subtranslate/state",
+        "/docker/transass/state",
+    }
+)
+
+
+def _normalized_path_value(value: str | os.PathLike[str]) -> str:
+    """Normalize environment paths before comparing Compose aliases."""
+
+    normalized = os.fspath(value).replace("\\", "/").rstrip("/")
+    return normalized or "/"
+
+
+def _is_container_alias(value: str | os.PathLike[str], aliases: frozenset[str]) -> bool:
+    return _normalized_path_value(value) in aliases
 
 
 def _default_data_root() -> Path:
@@ -19,7 +36,7 @@ def _default_data_root() -> Path:
     if explicit:
         return Path(explicit).expanduser()
     host_state = os.environ.get("STATE_DIR")
-    if host_state and not host_state.startswith("/app/"):
+    if host_state and not _is_container_alias(host_state, _CONTAINER_STATE_ALIASES):
         return Path(host_state).expanduser().parent
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / APP_NAME
@@ -44,10 +61,10 @@ class DesktopPaths:
         if self.state_root is not None:
             return Path(self.state_root).expanduser()
         configured = os.environ.get("TRANSLATOR_WEB_STATE_DIR")
-        if configured and configured not in _CONTAINER_STATE_ALIASES:
+        if configured and not _is_container_alias(configured, _CONTAINER_STATE_ALIASES):
             return Path(configured).expanduser()
         state_dir = os.environ.get("STATE_DIR")
-        if state_dir and state_dir not in _CONTAINER_STATE_ALIASES:
+        if state_dir and not _is_container_alias(state_dir, _CONTAINER_STATE_ALIASES):
             return Path(state_dir).expanduser()
         return self.data_root / "state"
 
@@ -69,10 +86,10 @@ class DesktopPaths:
             except (OSError, ValueError):
                 pass
         configured = os.environ.get("TRANSLATOR_BASE_LIBRARY")
-        if configured and configured not in _CONTAINER_MEDIA_ALIASES:
+        if configured and not _is_container_alias(configured, _CONTAINER_MEDIA_ALIASES):
             return Path(configured).expanduser()
         media_root = os.environ.get("MEDIA_ROOT")
-        if media_root and media_root not in _CONTAINER_MEDIA_ALIASES:
+        if media_root and not _is_container_alias(media_root, _CONTAINER_MEDIA_ALIASES):
             return Path(media_root).expanduser()
         return self.data_root / "media"
 
