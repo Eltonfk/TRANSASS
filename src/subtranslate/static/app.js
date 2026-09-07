@@ -37,6 +37,28 @@ async function autoClassifyFolder(folder){try{await api('/library/auto-classify'
 async function action(url){try{await api(url,{method:'POST'});await refresh(true)}catch(e){notify(e.message,'fail')}}
 function age(iso){if(!iso)return '—';const t=Date.parse(iso);if(!Number.isFinite(t))return esc(iso);const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return `há ${sec}s`;const min=Math.floor(sec/60);if(min<60)return `há ${min}min`;return `há ${Math.floor(min/60)}h ${min%60}min`}
 function duration(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(Number(sec)));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
+function statusCurrentJob(d){
+  const q=d.queue||{},active=new Set(['STARTING','TRANSLATING','VALIDATING','PUBLISHING']);
+  const fromJobs=Array.isArray(d.jobs)?d.jobs.find(job=>active.has(String(job?.status||'').toUpperCase())):null;
+  if(d.current_job)return d.current_job;
+  if(fromJobs)return fromJobs;
+  const progress=d.progress&&typeof d.progress==='object'?d.progress:{};
+  if(!(d.running||Number(q.running||0)>0))return null;
+  return {
+    name:progress.label||'Fila de tradução em andamento',
+    status:progress.phase||((Number(q.running||0)>0)?'TRANSLATING':'STARTING'),
+    stage:progress.phase,
+    total_units:progress.total_units??progress.total,
+    resolved_units:progress.resolved_units??progress.current??0,
+    current_event_id:progress.current_event_id,
+    calls:progress.calls,
+    retries:progress.retries,
+    retry_budget_used:progress.retry_budget_used,
+    retry_budget_total:progress.retry_budget_total,
+    elapsed_seconds:progress.elapsed_seconds,
+    last_activity_at:progress.last_activity_at,
+  };
+}
 function renderStatus(d){
   statusData=d;
   const q=d.queue||{};
@@ -46,7 +68,7 @@ function renderStatus(d){
   $('failCount').textContent=q.failed||0;
   $('skipCount').textContent=q.skipped||0;
   $('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;
-  const cur=d.current_job,t=cur||{},stage=t.stage==='SEMANTIC_RECONSTRUCTION'?'RECONSTRUÇÃO SEMÂNTICA':(t.stage||t.status);
+  const cur=statusCurrentJob(d),t=cur||{},stage=t.stage==='SEMANTIC_RECONSTRUCTION'?'RECONSTRUÇÃO SEMÂNTICA':(t.stage||t.status);
   $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:'Nenhum episódio em execução.';
   const total=t.total_units,resolved=t.resolved_units??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
   $('progressBar').style.width=pct+'%';
@@ -233,7 +255,7 @@ function renderEpisodes(){
 
 function localizeStatusPresentation(d){
  if(uiI18n.locale!=='qi-83')return;
- const q=d.queue||{},cur=d.current_job,t=cur||{};
+ const q=d.queue||{},cur=statusCurrentJob(d),t=cur||{};
  const stage=t.stage==='SEMANTIC_RECONSTRUCTION'?uiI18n.t('status.stageSemantic'):(t.stage||t.status||'');
  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:uiI18n.t('progress.none');
  const total=t.total_units,resolved=t.resolved_units??0,semantic=t.semantic_calls??0;

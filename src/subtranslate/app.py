@@ -2648,7 +2648,11 @@ def _selected_sources(folder: Path, values: object) -> list[Path]:
 def index():
     # Details are rendered by the human-friendly modal; the JSON endpoint
     # remains available to programmatic clients but is never a normal UI link.
-    body = PAGE.replace("__BASE_LIBRARY__", html.escape(str(BASE_LIBRARY))).replace('href="/library/records/${r.id}">Detalhes', 'data-details-record="${r.id}">Detalhes')
+    body = (
+        PAGE.replace("__BASE_LIBRARY__", html.escape(str(BASE_LIBRARY)))
+        .replace("__ASSET_VERSION__", WEB_ASSET_VERSION)
+        .replace('href="/library/records/${r.id}">Detalhes', 'data-details-record="${r.id}">Detalhes')
+    )
     return Response(body, mimetype="text/html", headers={"Cache-Control": "no-store"})
 
 
@@ -4253,6 +4257,9 @@ def library_classifications():
         return _library_error(error)
 
 
+WEB_ASSET_VERSION = hashlib.sha256(
+    (_WEB_ASSET_ROOT / "static" / "app.js").read_bytes()
+).hexdigest()[:12]
 PAGE = (_WEB_ASSET_ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 REVIEW_PAGE = (_WEB_ASSET_ROOT / "templates" / "review.html").read_text(encoding="utf-8")
 
