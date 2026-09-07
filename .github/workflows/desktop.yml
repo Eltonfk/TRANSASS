@@ -26,6 +26,24 @@ jobs:
         run: |
           python -m pip install -r requirements.lock
           python -m pip install -r desktop/packaging/requirements-desktop.txt
+      - name: Stage pinned media tools on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          media_bin="$RUNNER_TEMP/transass-media-bin"
+          python deploy/install_static_ffmpeg.py --dest "$media_bin"
+          echo "TRANSASS_MEDIA_BIN_DIR=$media_bin" >> "$GITHUB_ENV"
+      - name: Stage media tools on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $mediaBin = Join-Path $env:RUNNER_TEMP "transass-media-bin"
+          New-Item -ItemType Directory -Force -Path $mediaBin | Out-Null
+          foreach ($name in @("ffmpeg.exe", "ffprobe.exe")) {
+            $source = (Get-Command $name -CommandType Application -ErrorAction Stop).Source
+            Copy-Item -LiteralPath $source -Destination (Join-Path $mediaBin $name)
+          }
+          "TRANSASS_MEDIA_BIN_DIR=$mediaBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Generate Windows icon
         if: runner.os == 'Windows'
         run: python desktop/packaging/make_icon.py build/transass.ico

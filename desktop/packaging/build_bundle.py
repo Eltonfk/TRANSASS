@@ -6,10 +6,18 @@ import argparse
 import os
 from pathlib import Path
 
+from media_tools import MediaToolsError, resolve_media_tools, write_manifest
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist", type=Path, default=Path("build/desktop"))
+    parser.add_argument(
+        "--media-bin-dir",
+        type=Path,
+        default=None,
+        help="directory containing audited ffmpeg/ffprobe executables",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     dist = (root / args.dist).resolve() if not args.dist.is_absolute() else args.dist.resolve()
@@ -17,11 +25,17 @@ def main() -> int:
     dist.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
     sep = os.pathsep
+    media_bin_dir = args.media_bin_dir or os.environ.get("TRANSASS_MEDIA_BIN_DIR")
+    try:
+        media_tools = resolve_media_tools(media_bin_dir)
+    except MediaToolsError as error:
+        parser.error(str(error))
     datas = [
         (root / "src/subtranslate/templates", "templates"),
         (root / "src/subtranslate/static", "static"),
         (root / "src/subtranslate/transass_logo.png", "."),
         (root / "resources/glossaries", "glossaries"),
+        (root / "desktop/packaging/FFMPEG-LICENSE-NOTICE.txt", "licenses"),
     ]
     args_list = [
         "--noconfirm", "--clean", "--onedir", "--name", "Transass",
@@ -35,6 +49,8 @@ def main() -> int:
         args_list.extend(["--icon", str(root / "src/subtranslate/transass_logo.png")])
     for source, target in datas:
         args_list.extend(["--add-data", f"{source}{sep}{target}"])
+    for source in media_tools.values():
+        args_list.extend(["--add-binary", f"{source}{sep}bin"])
     # The core intentionally uses flat imports and several modules are loaded
     # only after a provider/pipeline is selected. Include the complete module
     # set so a frozen build does not silently lose a runtime branch.
@@ -45,6 +61,22 @@ def main() -> int:
     from PyInstaller.__main__ import run
 
     run(args_list)
+    bundle_root = dist / "Transass"
+    resource_root = next(
+        (
+            candidate
+            for candidate in (bundle_root / "_internal", bundle_root)
+            if (candidate / "bin").is_dir()
+        ),
+        None,
+    )
+    if resource_root is None:
+        raise RuntimeError("PyInstaller bundle has no resource bin directory")
+    write_manifest(
+        resource_root / "bin",
+        media_tools,
+        source="explicit-directory" if media_bin_dir else "PATH",
+    )
     return 0
 
 

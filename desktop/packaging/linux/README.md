@@ -11,6 +11,11 @@ Checklist da distribuição:
 - checksum e teste em Ubuntu e Linux Mint (workflow `desktop.yml`);
 - avaliar pacote `.deb` após o AppImage estar estável.
 
+O workflow prepara uma cópia estática pinada de `ffmpeg`/`ffprobe` em um
+diretório temporário e o builder a inclui em `bin/`, com SHA-256 em
+`bin/MEDIA_TOOLS.json`. Builds locais devem fornecer `TRANSASS_MEDIA_BIN_DIR`;
+sem os dois executáveis o build falha de forma explícita.
+
 Build local:
 
 ```sh

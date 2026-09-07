@@ -6,6 +6,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[2]
+sys.path.insert(0, str(ROOT / "desktop/packaging"))
+
+from media_tools import build_manifest, resolve_media_tools  # noqa: E402
 
 
 def test_checksum_manifest_is_reproducible(tmp_path):
@@ -17,6 +20,22 @@ def test_checksum_manifest_is_reproducible(tmp_path):
     line = (tmp_path / "bundle" / "SHA256SUMS").read_text(encoding="utf-8").strip()
     expected = hashlib.sha256(payload.read_bytes()).hexdigest()
     assert line == f"{expected}  Transass/hello.txt"
+
+
+def test_media_tools_manifest_records_both_executables(tmp_path):
+    media_bin = tmp_path / "media-bin"
+    media_bin.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        executable = media_bin / name
+        executable.write_bytes(name.encode("ascii"))
+        executable.chmod(0o755)
+
+    tools = resolve_media_tools(media_bin)
+    manifest = build_manifest(tools, source="test")
+
+    assert set(manifest["tools"]) == {"ffmpeg", "ffprobe"}
+    assert all(entry["sha256"] for entry in manifest["tools"].values())
+    assert manifest["license_notice"] == "licenses/FFMPEG-LICENSE-NOTICE.txt"
 
 
 def test_sbom_has_cyclonedx_shape(tmp_path):
@@ -81,7 +100,8 @@ def test_desktop_launcher_exposes_menu_visibility_and_help_links():
     assert 'id="tcGeminiModelsRefresh"' in page
     assert "testTransportConfig" in app_js
     assert "/onboarding/provider-test" in app_js
-    assert "/onboarding/provider-models?provider=gemini" in app_js
+    assert "/onboarding/provider-models?provider=" in app_js
+    assert "provider==='gemini'" in app_js
     assert "gemini-3.5-flash-lite" in app_js
 
 

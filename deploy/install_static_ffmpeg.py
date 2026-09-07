@@ -7,6 +7,7 @@ GPU/LLVM/voice-synthesis libraries that the extraction path never touches.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import os
@@ -29,7 +30,15 @@ WANTED = {"ffmpeg", "ffprobe"}
 DEST = "/usr/local/bin"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="install the pinned static ffmpeg pair")
+    parser.add_argument(
+        "--dest",
+        default=os.environ.get("TRANSASS_FFMPEG_DEST", DEST),
+        help="directory receiving ffmpeg and ffprobe (default: /usr/local/bin)",
+    )
+    args = parser.parse_args(argv)
+    destination = os.path.abspath(args.dest)
     data = urlopen(URL, timeout=300).read()
     digest = hashlib.sha256(data).hexdigest()
     if digest not in ALLOWED_SHA256:
@@ -49,9 +58,9 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        os.makedirs(DEST, exist_ok=True)
+        os.makedirs(destination, exist_ok=True)
         for member in picked:
-            target = os.path.join(DEST, member.name.rsplit("/", 1)[-1])
+            target = os.path.join(destination, member.name.rsplit("/", 1)[-1])
             with open(target, "wb") as dst:
                 dst.write(archive.extractfile(member).read())
             os.chmod(target, 0o755)

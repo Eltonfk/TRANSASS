@@ -1,0 +1,11 @@
+Transass Desktop — third-party media tools
+
+This bundle contains FFmpeg and ffprobe, third-party components used to
+inspect media and extract subtitle tracks. The exact license obligations are
+determined by the supplier build used for the release. The file
+bin/MEDIA_TOOLS.json records the SHA-256 of each bundled executable.
+
+Release maintainers must distribute the supplier's applicable license text
+and source-code offer, when required by that license, together with the
+artifacts. General FFmpeg licensing information is available at:
+https://ffmpeg.org/legal.html

@@ -12,9 +12,16 @@ Checklist da distribuição:
   estiverem disponíveis;
 - smoke test em Windows 10/11 sem Python ou Docker.
 
+O build exige `ffmpeg.exe` e `ffprobe.exe` em `TRANSASS_MEDIA_BIN_DIR` (ou no
+`PATH` em builds locais) e os coloca em `bin/`. O bundle grava os tamanhos e
+SHA-256 em `bin/MEDIA_TOOLS.json`; o aviso de licença fica em `licenses/`.
+Para uma distribuição oficial, os binários e os avisos/licenças do fornecedor
+devem ser revisados antes da assinatura.
+
 Build local (em um runner Windows com PySide6/PyInstaller/Inno Setup):
 
 ```powershell
+$env:TRANSASS_MEDIA_BIN_DIR = "C:\\caminho\\para\\media-bin"
 python desktop/packaging/build_bundle.py --dist build/desktop
 iscc desktop/packaging/windows/installer.iss
 python desktop/packaging/checksums.py build/desktop
