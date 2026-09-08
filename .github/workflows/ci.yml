@@ -43,7 +43,7 @@ jobs:
             tests/offline/test_subtranslate_readonly_probe.py \
             tests/offline/test_subtranslate_context_inspect.py \
             tests/offline/test_subtranslate_next_routing.py \
-            tests/offline/test_subtranslate_command_dispatch.py
+            tests/offline/test_subtranslate_command_dispatch.py \
             tests/offline/test_maintenance.py
 
       - name: Compile check
