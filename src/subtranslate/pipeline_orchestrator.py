@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pipeline_registry import PipelinePlan, UnsupportedPipelineError, get_pipeline_plan
+from v238_llama_policy import DEFAULT_QWEN_PHYSICAL_MAXIMUM
 
 
 class PipelineStageValidationError(RuntimeError):
@@ -33,6 +34,8 @@ class PipelineStageValidationError(RuntimeError):
             "structural_failure_count": len(result.get("structural_failures", [])) if isinstance(result.get("structural_failures", []), list) else 0,
             "song_units": result.get("song_units", 0),
             "translated_units": result.get("translated_units", 0),
+            "already_translated_units": result.get("already_translated_units", 0),
+            "already_translated_events": result.get("already_translated_events", 0),
         }
         super().__init__(json.dumps(self.details, sort_keys=True))
 
@@ -40,6 +43,7 @@ class PipelineStageValidationError(RuntimeError):
 GEMINI_PHYSICAL_CALL_FLOOR = 131
 GROQ_PHYSICAL_CALL_FLOOR = 192
 DEEPSEEK_PHYSICAL_CALL_FLOOR = 192
+QWEN_PHYSICAL_CALL_FLOOR = DEFAULT_QWEN_PHYSICAL_MAXIMUM
 
 
 def gemini_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
@@ -67,6 +71,25 @@ def deepseek_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]
     profile = profile if isinstance(profile, dict) else {}
     semantic = max(1, int(profile.get("retry_budget", 32) or 32))
     return semantic, max(DEEPSEEK_PHYSICAL_CALL_FLOOR, semantic)
+
+
+def qwen_operation_limits(value: Any = None) -> tuple[int, int]:
+    """Return the bounded physical budget for the local Qwen/Ollama path.
+
+    Qwen has no hosted profile with a separate semantic retry allowance.  The
+    physical ceiling therefore remains an explicit operator setting, with a
+    conservative default large enough for a long episode plus bounded
+    isolation/retry work.  A caller may still lower/raise it deliberately via
+    ``V238_QWEN_PHYSICAL_MAXIMUM`` or the execution context.
+    """
+    raw = value
+    if raw in (None, ""):
+        raw = os.environ.get("V238_QWEN_PHYSICAL_MAXIMUM", QWEN_PHYSICAL_CALL_FLOOR)
+    try:
+        configured = int(raw)
+    except (TypeError, ValueError):
+        configured = QWEN_PHYSICAL_CALL_FLOOR
+    return 0, max(1, configured)
 
 
 def _context(context: dict[str, Any] | None) -> dict[str, Any]:
@@ -106,8 +129,8 @@ def _build_v238_operation_budget(ctx: dict[str, Any]) -> Any:
     elif provider_name == "deepseek" and bool(deepseek_profile.get("enabled", False)):
         _semantic_retry_budget, physical_maximum = deepseek_operation_limits(deepseek_profile)
     else:
-        physical_maximum = int(
-            ctx.get("qwen_physical_maximum", os.environ.get("V238_QWEN_PHYSICAL_MAXIMUM", 131))
+        _semantic_retry_budget, physical_maximum = qwen_operation_limits(
+            ctx.get("qwen_physical_maximum")
         )
     return OperationCallBudget(
         qwen_physical_maximum=physical_maximum,
@@ -234,6 +257,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
         karaoke_kwargs: dict[str, Any] = {
             "model": ctx.get("model") or ctx.get("model_override"),
             "ollama_url": ctx.get("ollama_url"),
+            "original_source_path": source,
         }
         karaoke_provider = ctx.get("karaoke_translator")
         if callable(karaoke_provider):
@@ -271,7 +295,7 @@ def execute_pipeline_plan(plan_id: str, source_path: str | Path, output_path: st
             "retry_calls": base_retries,
             "karaoke": {
                 key: v230_result.get(key)
-                for key in ("song_units", "translated_units", "translated_events", "unsupported", "failures", "structural_failures", "ollama_calls", "provider_calls", "input_sha256", "output_sha256")
+                for key in ("song_units", "translated_units", "translated_events", "already_translated_units", "already_translated_events", "unsupported", "failures", "structural_failures", "ollama_calls", "provider_calls", "input_sha256", "output_sha256")
                 if key in v230_result
             },
             "metrics_measurements": {

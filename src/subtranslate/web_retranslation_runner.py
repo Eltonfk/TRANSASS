@@ -82,7 +82,10 @@ def _project_v238_summary(result: dict) -> dict:
     status = "COMPLETED" if ok else "FAILED"
     last_stage = stages[-1].get("id") if stages and isinstance(stages[-1], dict) else "FULL_TRANSLATION_V238"
     budget = result.get("operation_budget") if isinstance(result.get("operation_budget"), dict) else {}
-    qwen_max = int(budget.get("qwen_physical_maximum") or 131)
+    # Keep the presentation fallback aligned with the orchestrator's local
+    # Qwen/Ollama default.  A missing summary must not make the UI report a
+    # stale 131-call ceiling while the runtime is enforcing 256.
+    qwen_max = int(budget.get("qwen_physical_maximum") or 256)
     qwen_reserved = int(budget.get("qwen_reserved") or 0)
     calls = int(result.get("calls", 0) or 0)
     flags: dict = {}

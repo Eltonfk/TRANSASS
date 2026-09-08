@@ -121,7 +121,19 @@ class WebDurableResponseProvider(DurableResponseProvider):
             parsed = _decode_model_content(content)
             if isinstance(parsed, dict) and ("ownership_runs" in parsed or "owner_vector" in parsed):
                 return parsed
-            translation = parsed.get("translation") or parsed.get("text") or content
+            # Do not use ``or`` here: an explicitly empty translation is a
+            # provider contract failure, not a reason to return the raw JSON
+            # envelope as if it were translated text.
+            if isinstance(parsed, dict) and "translation" in parsed:
+                translation = parsed.get("translation")
+            elif isinstance(parsed, dict) and "text" in parsed:
+                translation = parsed.get("text")
+            else:
+                translation = content
+            if not isinstance(translation, str) or not translation.strip():
+                raise TransportBlocked(
+                    f"{provider_name.upper() or 'PROVIDER'}_EMPTY_TRANSLATION"
+                )
             return {"translation": translation}
         return client
 
@@ -174,6 +186,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
         # Karaoke tem contrato próprio: o programa é a autoridade pela
         # estrutura ASS, enquanto o modelo fornece somente a tradução lexical.
         is_karaoke = payload.get("operation") == "v230_karaoke_translation"
+        karaoke_attempt = int(payload.get("attempt", 1) or 1)
         user_content = text
         if is_karaoke:
             # A abertura/encerramento passa pelo provider selecionado, mas
@@ -187,6 +200,12 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 f"<ALVO>{text}</ALVO>\n"
                 f"<CONTEXTO_POSTERIOR>{payload.get('context_after') or ''}</CONTEXTO_POSTERIOR>"
             )
+            if karaoke_attempt > 1:
+                user_content = (
+                    "CORREÇÃO OBRIGATÓRIA: a tentativa anterior repetiu o texto-fonte. "
+                    "Não devolva nenhuma cópia literal; substitua as palavras inglesas por seu sentido em pt-BR.\n"
+                    + user_content
+                )
         system_content = (
             "Você é um tradutor profissional de legendas de anime para português do Brasil (pt-BR). "
             "Traduza o texto fornecido mantendo o sentido natural e adequado para legendas. "
@@ -209,7 +228,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
                     " A tentativa anterior repetiu a fonte ou violou a estrutura; "
                     "gere agora outra tradução em pt-BR."
                 )
-        return {
+        request = {
             "messages": [
                 {
                     "role": "system",
@@ -217,9 +236,26 @@ class WebDurableResponseProvider(DurableResponseProvider):
                 },
                 {"role": "user", "content": user_content},
             ],
-            "options": {"temperature": 0.0, "num_predict": 1024},
-            "format": "json",
+            # A primeira tentativa é determinística. Recuperações de cópia
+            # usam uma amostragem pequena para evitar que Qwen repita a mesma
+            # saída apesar do prompt de correção, sem afetar o caminho normal.
+            "options": {"temperature": 0.2 if is_karaoke and karaoke_attempt > 1 else 0.0, "num_predict": 1024},
+            "stream": False,
         }
+        if is_karaoke:
+            # V230 owns the ASS envelope and only needs one lexical line from
+            # the model.  Asking for JSON while the prompt requires plain
+            # text is contradictory and caused blank content on some Desktop
+            # provider/model combinations.  Keep this mode explicit so each
+            # transport can map it to its native plain-text contract.
+            request.update({
+                "response_mode": "text",
+                "think": False,
+                "keep_alive": ollama_keep_alive(),
+            })
+        else:
+            request["format"] = "json"
+        return request
 
     def _inject_api_key(self, section: dict) -> dict:
         """Injeta api_key da seção keys do transport_config (B1)."""

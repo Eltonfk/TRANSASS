@@ -25,10 +25,19 @@ APPROVED_PIPELINE = "v2_3_0"
 APPROVED_MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", V226_MODEL)
 KARAOKE_TRANSLATION_TIMING_UNSUPPORTED = "KARAOKE_TRANSLATION_TIMING_UNSUPPORTED"
 KARAOKE_TRANSLATION_RETRY = "KARAOKE_TRANSLATION"
+KARAOKE_DEFAULT_RETRY_LIMIT = 1
 
 _TAG_RE = re.compile(r"\{[^}]*\}")
 _STYLE_TRANSLATION_HINTS = ("english", " eng", " tl", "translation", "translated")
 _STYLE_SONG_RE = re.compile(r"(?<![a-z])(?:song|op|ed|opening|ending|insert)(?![a-z])", re.IGNORECASE)
+_NON_LYRIC_EVENT_METADATA_RE = re.compile(
+    r"(?<![a-z])(?:cast|staff|credits?|narrator|title|comment)(?![a-z])",
+    re.IGNORECASE,
+)
+_CREDIT_LABEL_RE = re.compile(
+    r"^(?:translation|translator|timing(?:/edits?)?|editing|typesetting|encoding|subtitles?|fansub)\s*:",
+    re.IGNORECASE,
+)
 _ENGLISH_WORDS = {
     "a", "about", "all", "and", "are", "around", "be", "but", "can", "do",
     "for", "from", "have", "how", "i", "in", "is", "it", "my", "of", "on",
@@ -115,6 +124,33 @@ def classify_song_translation(style: str, text: str) -> str | None:
     if _looks_like_english_song_text(clean):
         return "SONG_TRANSLATION"
     return "SONG_UNKNOWN"
+
+
+def classify_song_event(line: pysubs2.SSAEvent) -> str | None:
+    """Classify one ASS event while rejecting non-lyric style reuse.
+
+    Fansub scripts commonly reuse a karaoke style for cast, staff, episode
+    titles and commented timing notes.  Style alone therefore establishes a
+    candidate region, while ASS event metadata decides whether the event is
+    actually a lyric.
+    """
+    classification = classify_song_translation(line.style, line.text)
+    if classification != "SONG_TRANSLATION":
+        return classification
+    if line.is_comment:
+        return "SONG_NON_LYRIC"
+    metadata = f"{line.name or ''} {line.effect or ''}"
+    if _NON_LYRIC_EVENT_METADATA_RE.search(metadata):
+        return "SONG_NON_LYRIC"
+    clean = visible(line.text)
+    if _CREDIT_LABEL_RE.match(clean):
+        return "SONG_NON_LYRIC"
+    # Multiple role labels separated by ASS line breaks are cast credits, not
+    # a lyric merely because their shared style contains "Translation".
+    role_labels = re.findall(r"(?:^|\\N+)[^\\N:]{1,48}:", _TAG_RE.sub("", line.text or ""))
+    if len(role_labels) >= 2:
+        return "SONG_NON_LYRIC"
+    return classification
 
 
 def _has_syllabic_tags(text: str) -> bool:
@@ -241,7 +277,7 @@ def discover_song_units(subs: pysubs2.SSAFile) -> dict[str, Any]:
     classifications: dict[int, str] = {}
     unsupported: list[int] = []
     for idx, line in enumerate(subs):
-        cls = classify_song_translation(line.style, line.text)
+        cls = classify_song_event(line)
         if not cls:
             continue
         classifications[idx] = cls
@@ -250,6 +286,45 @@ def discover_song_units(subs: pysubs2.SSAFile) -> dict[str, Any]:
         if cls == "SONG_TRANSLATION":
             units[(line.style, visible(line.text))].append(idx)
     return {"units": units, "classifications": classifications, "unsupported": unsupported}
+
+
+def _normalized_visible(text: str) -> str:
+    return " ".join(visible(text).casefold().split())
+
+
+def _still_requires_song_translation(source_text: str, candidate_text: str) -> bool:
+    """Return whether a base-stage candidate still contains English source.
+
+    V2.3.8 already translates English music payloads during its full stage.
+    V2.3.0 uses the original event to discover the semantic song role, then
+    this content check prevents a second PT-BR -> PT-BR model call.  Exact
+    source copies are always pending; changed text is pending only when it
+    still looks English.
+    """
+    source_key = _normalized_visible(source_text)
+    candidate_key = _normalized_visible(candidate_text)
+    if not candidate_key:
+        return True
+    return candidate_key == source_key or _looks_like_english_song_text(visible(candidate_text))
+
+
+def _song_context(
+    subs: pysubs2.SSAFile,
+    classifications: dict[int, str],
+    indices: list[int],
+) -> tuple[str, str]:
+    """Return the closest source lyric lines around one canonical unit."""
+    first, last = min(indices), max(indices)
+    song_indices = sorted(
+        index for index, classification in classifications.items()
+        if classification == "SONG_TRANSLATION" and index not in indices
+    )
+    previous = [index for index in song_indices if index < first][-2:]
+    following = [index for index in song_indices if index > last][:2]
+    return (
+        " / ".join(visible(subs[index].text) for index in previous),
+        " / ".join(visible(subs[index].text) for index in following),
+    )
 
 
 def _ollama_translate(text: str, *, context_before: str = "", context_after: str = "", url: str | None = None, model: str | None = None) -> str:
@@ -279,61 +354,119 @@ def _ollama_translate(text: str, *, context_before: str = "", context_after: str
 
 def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
                                      translator: Callable[[str, str, str], str] | None = None,
-                                     *, model: str | None = None, ollama_url: str | None = None) -> dict[str, Any]:
+                                     *, model: str | None = None, ollama_url: str | None = None,
+                                     original_source_path: Path | None = None) -> dict[str, Any]:
     if output_path.exists():
         raise FileExistsError(output_path)
     subs = pysubs2.load(str(input_path))
     original_signatures = [_structural_signature(line) for line in subs]
-    discovered = discover_song_units(subs)
+    discovery_subs = subs
+    if original_source_path is not None:
+        discovery_subs = pysubs2.load(str(original_source_path))
+        if len(discovery_subs) != len(subs):
+            raise RuntimeError(json.dumps({
+                "reason": "V230_ORIGINAL_CANDIDATE_CARDINALITY_MISMATCH",
+                "original_events": len(discovery_subs),
+                "candidate_events": len(subs),
+            }, sort_keys=True))
+    discovered = discover_song_units(discovery_subs)
     translated_units = 0
     translated_events = 0
+    already_translated_units = 0
+    already_translated_events = 0
     calls = 0
     provider_calls = 0
     failures: list[dict[str, Any]] = []
-    for (style, canonical), indices in sorted(discovered["units"].items()):
-        if any(index in discovered["unsupported"] for index in indices):
-            failures.append({"style": style, "source": canonical, "event_indices": indices,
+    pending_unsupported: set[int] = set()
+    retry_limit = max(
+        KARAOKE_DEFAULT_RETRY_LIMIT,
+        int(getattr(translator, "karaoke_retry_limit", KARAOKE_DEFAULT_RETRY_LIMIT) or KARAOKE_DEFAULT_RETRY_LIMIT),
+    ) if translator else 0
+    for (style, source_canonical), indices in sorted(discovered["units"].items()):
+        pending_indices = list(indices)
+        completed_indices: list[int] = []
+        if original_source_path is not None:
+            pending_indices = []
+            for index in indices:
+                if _still_requires_song_translation(
+                    discovery_subs[index].text,
+                    subs[index].text,
+                ):
+                    pending_indices.append(index)
+                else:
+                    completed_indices.append(index)
+            already_translated_events += len(completed_indices)
+            if not pending_indices:
+                already_translated_units += 1
+                translated_units += 1
+                translated_events += len(indices)
+                continue
+
+        if any(index in discovered["unsupported"] for index in pending_indices):
+            pending_unsupported.update(
+                index for index in pending_indices
+                if index in discovered["unsupported"]
+            )
+            failures.append({"style": style, "source": source_canonical, "event_indices": pending_indices,
                              "reason": KARAOKE_TRANSLATION_TIMING_UNSUPPORTED})
             continue
+
+        pending_values = {visible(subs[index].text) for index in pending_indices}
+        canonical = next(iter(pending_values)) if len(pending_values) == 1 else source_canonical
+        context_before, context_after = _song_context(
+            discovery_subs,
+            discovered["classifications"],
+            indices,
+        )
         retry_translator = getattr(translator, "retry", None) if translator else None
         if translator:
-            value = translator(canonical, "", "")
+            value = translator(canonical, context_before, context_after)
             provider_calls += 1
         else:
-            value = _ollama_translate(canonical, model=model, url=ollama_url)
+            value = _ollama_translate(
+                canonical,
+                context_before=context_before,
+                context_after=context_after,
+                model=model,
+                url=ollama_url,
+            )
             calls += 1
-
-        source_copy = visible(value).casefold() == canonical.casefold()
-        if source_copy and callable(retry_translator):
-            value = retry_translator(canonical, "", "")
-            provider_calls += 1
+        retry_count = 0
+        rendered_by_index: dict[int, str | None] = {}
+        invalid_indices: list[int] = []
+        while True:
             source_copy = visible(value).casefold() == canonical.casefold()
-        rendered_by_index = {}
-        if not source_copy:
+            if source_copy:
+                if callable(retry_translator) and retry_count < retry_limit:
+                    value = retry_translator(canonical, context_before, context_after)
+                    provider_calls += 1
+                    retry_count += 1
+                    continue
+                failures.append({"style": style, "source": canonical, "event_indices": pending_indices,
+                                 "reason": "KARAOKE_TRANSLATION_SOURCE_COPY",
+                                 "attempts": retry_count + 1})
+                break
+
             rendered_by_index = {
                 index: _replace_payload(subs[index].text, value)
-                for index in indices
+                for index in pending_indices
             }
-            if any(rendered is None for rendered in rendered_by_index.values()) and callable(retry_translator):
-                value = retry_translator(canonical, "", "")
-                provider_calls += 1
-                source_copy = visible(value).casefold() == canonical.casefold()
-                if not source_copy:
-                    rendered_by_index = {
-                        index: _replace_payload(subs[index].text, value)
-                        for index in indices
-                    }
-        if source_copy:
-            failures.append({"style": style, "source": canonical, "event_indices": indices,
-                             "reason": "KARAOKE_TRANSLATION_SOURCE_COPY"})
-            continue
-        invalid_indices = [index for index, restored in rendered_by_index.items() if restored is None]
-        if invalid_indices:
-            failures.extend({"style": style, "source": canonical, "event_indices": [index],
-                             "reason": "STRUCTURAL_SEGMENT_COUNT_MISMATCH"}
-                            for index in invalid_indices)
+            invalid_indices = [index for index, restored in rendered_by_index.items() if restored is None]
+            if invalid_indices:
+                if callable(retry_translator) and retry_count < retry_limit:
+                    value = retry_translator(canonical, context_before, context_after)
+                    provider_calls += 1
+                    retry_count += 1
+                    continue
+                failures.extend({"style": style, "source": canonical, "event_indices": [index],
+                                 "reason": "STRUCTURAL_SEGMENT_COUNT_MISMATCH",
+                                 "attempts": retry_count + 1}
+                                for index in invalid_indices)
+            break
+        if source_copy or invalid_indices:
             continue
         translated_units += 1
+        translated_events += len(completed_indices)
         for index, restored in rendered_by_index.items():
             subs[index].text = restored
             translated_events += 1
@@ -348,8 +481,10 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
     return {"pipeline": APPROVED_PIPELINE, "model": model or APPROVED_MODEL,
             "mode": "KARAOKE_AUGMENTATION", "song_units": len(discovered["units"]),
             "translated_units": translated_units, "translated_events": translated_events,
+            "already_translated_units": already_translated_units,
+            "already_translated_events": already_translated_events,
             "ollama_calls": calls, "provider_calls": provider_calls,
-            "unsupported": len(discovered["unsupported"]),
+            "unsupported": len(pending_unsupported),
             "failures": failures, "structural_failures": structural_failures,
             "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
             "output_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest()}

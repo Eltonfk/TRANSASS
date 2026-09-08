@@ -229,6 +229,18 @@ class AppSafetyTests(unittest.TestCase):
         self.assertIn("event.key==='/'", script)
         self.assertIn("event.key==='Escape'", script)
 
+    def test_thermal_diagnostics_are_quiet_by_default_with_opt_in_detail(self):
+        page = self.client.get("/").get_data(as_text=True)
+        script = self._asset_text("/static/app.js")
+
+        self.assertIn('id="thermalNotice"', page)
+        self.assertIn('id="showThermalTelemetry"', page)
+        self.assertIn('data-i18n="diagnostics.thermalTelemetry"', page)
+        self.assertIn("function isRoutineThermalLog", script)
+        self.assertIn("function renderThermalNotice", script)
+        self.assertIn("function reloadDiagnosticLogs", script)
+        self.assertIn("showThermalTelemetry=false", script)
+
     def test_episode_metadata_refresh_is_throttled_without_slowing_queue_status(self):
         page = self.client.get("/").get_data(as_text=True)
         script = self._asset_text("/static/app.js")

@@ -119,39 +119,57 @@ transporte, o alternativo tenta automaticamente. Falhas de validação linguíst
 ou estrutural não trocam silenciosamente de motor; exigem revisão/retry
 seletivo.
 
-### Proteção térmica para Ollama em GPUs AMD
+### Proteção térmica para Ollama em Linux e Windows
 
-Quando o motor principal ou o fallback usa Ollama, o Transass monitora o
-sensor `amdgpu` do Linux enquanto a fila está executando. Por padrão, ele
-emite um alerta a **90 °C** e interrompe preventivamente a fila a **100 °C**,
-antes do limite crítico do hardware. A interrupção é registrada no histórico
-como `GPU_THERMAL_GUARD`; episódios ainda não iniciados são cancelados e o
-processo local recebe um encerramento controlado.
+Quando o motor principal ou o fallback usa Ollama, o Transass escolhe
+automaticamente o melhor provedor disponível nesta ordem: NVIDIA via
+`pynvml`/`nvidia-smi`, AMD Linux via `sysfs`/`rocm-smi` e, por fim, sensores do
+sistema via `psutil`. No Windows, quando drivers não expõem uma API Python,
+há uma tentativa opcional e tolerante de consultar zonas térmicas via
+PowerShell/WMI. Se nenhum sensor estiver disponível, o guardião entra em modo
+passivo, registra o motivo e libera a tradução.
 
 O Transass não comanda a ventoinha: a curva de fan continua sob controle do
-driver/firmware da GPU. A cada **2 segundos**, a telemetria registra no status
-temperatura, RPM da ventoinha e potência, permitindo observar se a refrigeração
-reduz a temperatura. No caminho in-process V2.3.8, ao atingir o alerta, o app
-entra em resfriamento cooperativo e não inicia novas chamadas ao modelo. Ele
-observa por até **30 segundos**; se a temperatura cair abaixo do ponto de
-retomada, a fila continua. Uma violação do limite crítico/emergencial
-informado pelo sensor interrompe imediatamente, sem essa janela, inclusive
-durante uma chamada já em andamento.
+driver/firmware da GPU. A telemetria registra temperatura, sensor, RPM e
+potência quando o fornecedor expõe esses dados. No caminho in-process V2.3.8,
+o guardião também observa a temperatura antes de cada chamada ao modelo. Ao
+atingir o limite configurado, a proteção preventiva do aplicativo pode ser
+suspensa por até **60 segundos**, conforme a configuração legada atual, para
+permitir a atuação do driver/firmware; se a temperatura persistir, a fila é
+interrompida.
+
+Para integrações novas, o módulo oferece um backoff com histerese:
+
+```python
+from gpu_thermal_guard import ThermalGuard
+
+guard = ThermalGuard.create_auto()
+for batch in subtitle_batches:
+    guard.wait_if_hot()
+    response = ollama_client.translate(batch)
+```
+
+O `ThermalGuard` padrão inicia o backoff a **95 °C**, só libera abaixo de
+**85 °C**, considera **105 °C** crítico e espera no máximo **300 segundos**.
+Uma falha ou ausência de sensor nunca interrompe o job.
 
 O mecanismo não altera o modelo nem desativa o Ollama. Ele apenas evita que
 uma tradução em lote mantenha a GPU aquecendo até o desligamento de proteção
-do kernel. Se o sensor AMD não estiver disponível, o app informa isso no log e
-mantém o comportamento normal. Os limites podem ser ajustados no ambiente:
+do kernel. Se nenhum sensor compatível estiver disponível, o app informa isso
+no log e mantém o comportamento normal. Os limites podem ser ajustados no
+ambiente:
 
 ```env
 TRANSASS_GPU_THERMAL_GUARD=1
 TRANSASS_GPU_THERMAL_WARN_C=90
 TRANSASS_GPU_THERMAL_STOP_C=100
-TRANSASS_GPU_THERMAL_INTERVAL_S=2
+TRANSASS_GPU_THERMAL_INTERVAL_S=1
 # Leituras consecutivas acima do limite preventivo; padrão: 2.
 TRANSASS_GPU_THERMAL_CONFIRMATIONS=2
 # Janela de observação para a curva de fan; padrão: 30 segundos.
 TRANSASS_GPU_THERMAL_COOLING_WINDOW_S=30
+# Suspensão temporária da proteção preventiva após atingir o limite; padrão: 60s.
+TRANSASS_GPU_THERMAL_TRIP_OVERRIDE_S=60
 # Ponto de retomada; vazio usa alerta - 5°C (90 -> 85°C).
 TRANSASS_GPU_THERMAL_RESUME_C=
 ```

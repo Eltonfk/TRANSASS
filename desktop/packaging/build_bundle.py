@@ -19,6 +19,7 @@ _REQUIRED_BUILD_MODULES = {
     "Werkzeug": "werkzeug",
     "requests": "requests",
     "pysubs2": "pysubs2",
+    "psutil": "psutil",
 }
 
 
@@ -93,6 +94,10 @@ def main() -> int:
             args_list.extend(["--hidden-import", module.stem])
     for module in ("PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore"):
         args_list.extend(["--hidden-import", module])
+    # gpu_thermal_guard loads psutil defensively through importlib so the
+    # core remains usable in minimal environments; explicitly include it in
+    # frozen desktop builds where runtime discovery cannot see site-packages.
+    args_list.extend(["--hidden-import", "psutil"])
     args_list.append(str(root / "desktop/packaging/launcher_entry.py"))
     from PyInstaller.__main__ import run
 

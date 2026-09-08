@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "subtranslate"))
 
 import web_execution_context as c1  # noqa: E402
@@ -93,6 +95,18 @@ def test_c1_profiles_reach_orchestrator_with_provider_specific_budgets():
         assert all("api_key" not in ctx[key] for key in ("gemini_profile", "groq_profile", "deepseek_profile"))
 
 
+def test_c1_qwen_budget_matches_docker_default_without_fallback(monkeypatch):
+    monkeypatch.delenv("V238_QWEN_PHYSICAL_MAXIMUM", raising=False)
+    ctx = c1.build_v238_execution_context(
+        job={"id": "job-qwen"},
+        transport_config={"primary": {"provider": "ollama", "model": "qwen3.5:9b"}, "fallback": None},
+        source_language="inglês",
+        operation_id="op-qwen",
+    )
+    budget = orchestrator._build_v238_operation_budget(ctx)
+    assert budget.snapshot()["qwen_physical_maximum"] == 256
+
+
 # ---------------------------------------------------------------------------
 # C2: WebDurableResponseProvider
 # ---------------------------------------------------------------------------
@@ -139,6 +153,10 @@ def test_c2_projects_karaoke_request_with_context_and_target_delimiters():
     assert "<ALVO>Moonlight signpost</ALVO>" in content
     assert "<CONTEXTO_ANTERIOR>linha anterior</CONTEXTO_ANTERIOR>" in content
     assert "<CONTEXTO_POSTERIOR>linha posterior</CONTEXTO_POSTERIOR>" in content
+    assert chat["response_mode"] == "text"
+    assert chat["stream"] is False
+    assert chat["think"] is False
+    assert "format" not in chat
 
 
 def test_c2_karaoke_retry_prompt_rejects_source_copy_and_model_structure():
@@ -189,6 +207,33 @@ def test_c2_deepseek_karaoke_uses_selected_network_endpoint(monkeypatch, tmp_pat
     assert calls[0][0] == "https://api.deepseek.com/v1/chat/completions"
     assert calls[0][1]["model"] == "deepseek-chat"
     assert calls[0][1]["messages"][-1]["content"].startswith("Traduza somente")
+    assert "response_format" not in calls[0][1]
+    assert calls[0][1]["thinking"] == {"type": "disabled"}
+
+
+def test_c2_rejects_empty_provider_content_with_provider_diagnostic(monkeypatch, tmp_path):
+    from transport_providers import TransportBlocked
+
+    def fake_http_post(_url, _headers, _request, delay=0.0):
+        return json.dumps({
+            "choices": [{
+                "message": {"content": "", "reasoning_content": ""},
+                "finish_reason": "length",
+            }],
+        }).encode("utf-8")
+
+    monkeypatch.setattr(c2, "_http_post", fake_http_post)
+    provider = c2.WebDurableResponseProvider(
+        {"primary": {"provider": "deepseek", "model": "deepseek-chat", "api_key": "secret"}},
+        mode="LIVE_CAPTURED",
+        capture_root=tmp_path,
+    )
+    with pytest.raises(TransportBlocked, match="OPENAI_COMPAT_EMPTY_CONTENT:finish_reason=length"):
+        provider.translate({
+            "operation": "v230_karaoke_translation",
+            "text": "Moonlight signpost",
+            "model": "deepseek-chat",
+        }, capture_id="karaoke-empty")
 
 
 def test_c2_inject_api_key():

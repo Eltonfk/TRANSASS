@@ -18,9 +18,15 @@ services:
     mem_limit: 512m
     cpus: 1.0
     env_file:
-      - path: .env
+      # compose.yaml fica em deploy/; o .env operacional fica na raiz do
+      # projeto. Mantê-lo explícito evita perder chaves e demais overrides.
+      - path: ../.env
         required: false
     environment:
+      # MEDIA_ROOT/STATE_DIR no .env são caminhos do host; dentro do
+      # container o serviço deve usar exclusivamente os pontos montados.
+      MEDIA_ROOT: /shows
+      STATE_DIR: /app/state
       TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v2_3_8}
       TRANSLATOR_SOURCE_LANGUAGE: ${TRANSLATOR_SOURCE_LANGUAGE:-inglês}
       TRANSLATOR_OLLAMA_URL: ${TRANSLATOR_OLLAMA_URL:-http://host.docker.internal:11434}
@@ -32,7 +38,9 @@ services:
       TRANSLATOR_CONTEXT_NEIGHBORS: ${TRANSLATOR_CONTEXT_NEIGHBORS:-1}
       TRANSLATOR_CONTEXT_MAX_CHARS: ${TRANSLATOR_CONTEXT_MAX_CHARS:-360}
       TRANSLATOR_MIN_FILE_AGE_SECONDS: ${TRANSLATOR_MIN_FILE_AGE_SECONDS:-600}
+      TRANSASS_GPU_THERMAL_INTERVAL_S: ${TRANSASS_GPU_THERMAL_INTERVAL_S:-1}
       TRANSASS_GPU_THERMAL_COOLING_WINDOW_S: ${TRANSASS_GPU_THERMAL_COOLING_WINDOW_S:-30}
+      TRANSASS_GPU_THERMAL_TRIP_OVERRIDE_S: ${TRANSASS_GPU_THERMAL_TRIP_OVERRIDE_S:-60}
       TRANSASS_GPU_THERMAL_RESUME_C: ${TRANSASS_GPU_THERMAL_RESUME_C:-}
       TRANSLATOR_BASE_LIBRARY: /shows
       ANIME_LIBRARY_ROOTS: /shows
@@ -43,8 +51,8 @@ services:
     volumes:
       # Aponte MEDIA_ROOT para a pasta com seus vídeos/séries e STATE_DIR para
       # onde o app deve guardar o estado (Library, filas, config de motor).
-      - ${MEDIA_ROOT:-./shows}:/shows:rw
-      - ${STATE_DIR:-./state}:/app/state:rw
+      - "${MEDIA_ROOT:?MEDIA_ROOT deve ser definido no .env (use --env-file .env)}:/shows:rw"
+      - "${STATE_DIR:?STATE_DIR deve ser definido no .env (use --env-file .env)}:/app/state:rw"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777
     ports:

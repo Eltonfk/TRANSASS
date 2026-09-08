@@ -23,7 +23,7 @@
 | Princípio | Descrição |
 |-----------|-----------|
 | **P1: Fail-closed** | Qualquer violação de contrato → aborta execução, não degrada silenciosamente |
-| **P2: Exactly-once** | Cada `operation_id` resulta em ≤131 calls Qwen e ≤1 call Llama por fase; budget enforçado no provider via `reserve()` |
+| **P2: Exactly-once** | Cada `operation_id` resulta no máximo no orçamento físico configurado para Qwen/Ollama (256 por padrão) e ≤1 call Llama por fase; budget enforçado no provider via `reserve()` |
 | **P3: Durabilidade** | Escrita atômica + completion marker + reconciliação; nenhum estado parcial persistido |
 | **P4: Linha de vida única** | `operation_id` rastreia: request → provider → stage → materialização → archive |
 | **P5: Separação de responsabilidades** | Web layer = orquestração/UI/state; Runtime V2.3.8 = execução pura, determinística, testável |
@@ -180,6 +180,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
             # se o modelo retornar JSON, decodificar e extrair translation/text.
             content = transport.extract_content(body)
             parsed = _decode_model_content(content)  # json.loads se JSON
+            # V230 uses the plain-text branch; normal V238 uses JSON.
             translation = parsed.get("translation") or parsed.get("text") or content
             return {"translation": translation}
         return client
@@ -214,6 +215,13 @@ class WebDurableResponseProvider(DurableResponseProvider):
         fallback = self._transport_config.get("fallback") or {}
         return fallback or {"provider": "ollama", "model": "qwen3.5:9b"}
 ```
+
+For `operation == "v230_karaoke_translation"`, the implementation emits
+`response_mode: "text"`, omits `format: "json"`, and sets `think: false`.
+The transport removes this internal hint from the Ollama wire payload, maps it
+to `text/plain` for Gemini, and maps `think: false` to DeepSeek's native
+`thinking: {"type": "disabled"}`.  This keeps the karaoke provider contract
+consistent with the V230 rule that only the lexical translation is model-owned.
 
 ### 3.3 Regras de Comportamento
 
@@ -252,7 +260,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
 | `llama_unload()` | Callback que libera GPU |
 | `llama_model_tag` | **`llama3.1:8b`** (NÃO qwen3.5:9b) — `v238_llama_policy.py:23` |
 | `llama_model_digest` | **`46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e`** — `v238_llama_policy.py:24` |
-| `OperationCallBudget` | `qwen_physical_maximum=131`, `llama_generation_maximum=1` (`v238_llama_policy.py:47-49`) |
+| `OperationCallBudget` | `qwen_physical_maximum=256` por padrão (ou `V238_QWEN_PHYSICAL_MAXIMUM`), `llama_generation_maximum=1` (`pipeline_orchestrator.py`) |
 
 > `CanonicalLlamaProvider.__init__` levanta `V238_LLAMA_MODEL_AUTHORITY_MISMATCH` para qualquer tag/digest diferente (`v238_llama_policy.py:102-103`).
 
@@ -360,7 +368,7 @@ Sem essa projeção, o job fica preso em `VALIDATING` com progresso 0/0.
 
 | Camada | Garantia | Como |
 |--------|----------|------|
-| **Provider (FULL_TRANSLATION_V238)** | ≤131 calls Qwen + ≤1 call Llama por `operation_id` | `OperationCallBudget.reserve()` (`v238_llama_policy.py:55-82`) |
+| **Provider (FULL_TRANSLATION_V238)** | ≤ orçamento físico Qwen/Ollama configurado (256 por padrão) + ≤1 call Llama por `operation_id` | `OperationCallBudget.reserve()` (`v238_llama_policy.py:55-82`) |
 | **Karaoke V230 (etapa separada)** | Usa o provider selecionado, com captura/budget duráveis; chamadas diretas ao Ollama ficam apenas no adapter legado | `pipeline_orchestrator.py:152-164`; `app.py`; `web_durable_provider.py` |
 | **Orchestrator** | Não re-executa stage se `output.exists()` | `pipeline_orchestrator.py:129-130` (FileExistsError) |
 | **Web Layer** | Não submete job duplicado | `_existing_output` (`app.py:1634`) + fila ativa (`:1632`) |

@@ -1022,7 +1022,7 @@ def _job_uses_ollama(transport_config: dict) -> bool:
 
 
 def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
-    """Start the AMD thermal guard for jobs that can call local Ollama."""
+    """Start the vendor-neutral thermal guard for jobs that can call Ollama."""
     try:
         from transport_config_store import load_transport_config
 
@@ -1040,6 +1040,10 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             info["warning_c"] = config.warning_c
             info["stop_c"] = config.stop_c
             info["trip_confirmations"] = config.trip_confirmations
+            info["trip_override_window_s"] = config.trip_override_window_s
+            info["override_elapsed_s"] = round(guard.override_elapsed_s, 1)
+            info["override_remaining_s"] = round(guard.override_remaining_s, 1)
+            info["override_reason"] = guard.override_reason
             if error:
                 info["error"] = error
             job["thermal_guard"] = info
@@ -1051,6 +1055,11 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 + (
                     f" · resfriamento cooperativo iniciado por até {config.cooling_window_s:.0f}s"
                     if status == "WARNING" else ""
+                )
+                + (
+                    f" · proteção preventiva do app suspensa por {config.trip_override_window_s:.0f}s; "
+                    "driver/firmware permanece no controle"
+                    if status == "OVERRIDE" else ""
                 ),
                 level="error" if status == "TRIPPED" else "summary",
                 job_id=job.get("id"),
@@ -1065,23 +1074,28 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
         with state_condition:
             info = snapshot.as_dict(guard_config)
             previous = job.get("thermal_guard") if isinstance(job.get("thermal_guard"), dict) else {}
-            observing = bool(thermal_guard.cooling_active)
-            status = "TRIPPED" if thermal_guard.tripped else ("COOLING_OBSERVATION" if observing else "MONITORING")
+            observing = bool(guard.cooling_active)
+            overriding = bool(guard.override_active)
+            status = "TRIPPED" if guard.tripped else ("TEMPORARY_OVERRIDE" if overriding else ("COOLING_OBSERVATION" if observing else "MONITORING"))
             info.update({
                 "status": status,
                 "warning_c": guard_config.warning_c,
                 "stop_c": guard_config.stop_c,
-                "cooling_resume_c": thermal_guard.cooling_resume_c(guard_config),
+                "cooling_resume_c": guard.cooling_resume_c(guard_config),
                 "interval_s": guard_config.interval_s,
                 "trip_confirmations": guard_config.trip_confirmations,
                 "cooling_window_s": guard_config.cooling_window_s,
-                "cooling_elapsed_s": round(thermal_guard.cooling_elapsed_s, 1),
-                "consecutive_over_stop": thermal_guard.consecutive_over_stop,
-                "trip_reason": thermal_guard.trip_reason,
+                "trip_override_window_s": guard_config.trip_override_window_s,
+                "cooling_elapsed_s": round(guard.cooling_elapsed_s, 1),
+                "override_elapsed_s": round(guard.override_elapsed_s, 1),
+                "override_remaining_s": round(guard.override_remaining_s, 1),
+                "override_reason": guard.override_reason,
+                "consecutive_over_stop": guard.consecutive_over_stop,
+                "trip_reason": guard.trip_reason,
                 "fan_control": "hardware_driver",
             })
-            info["cooling_over_stop_elapsed_s"] = round(thermal_guard.over_stop_elapsed_s, 1)
-            if thermal_guard.tripped and previous.get("error"):
+            info["cooling_over_stop_elapsed_s"] = round(guard.over_stop_elapsed_s, 1)
+            if guard.tripped and previous.get("error"):
                 info["error"] = previous["error"]
             job["thermal_guard"] = info
             state["thermal_guard"] = info
@@ -1092,31 +1106,50 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             fan = f"ventoinha={snapshot.fan_rpm:.0f} RPM" if snapshot.fan_rpm is not None else "ventoinha=indisponível"
             power = f"potência={snapshot.power_w:.1f} W" if snapshot.power_w is not None else "potência=indisponível"
             window = (
-                f" · resfriamento={thermal_guard.cooling_elapsed_s:.1f}/{guard_config.cooling_window_s:.0f}s"
-                if observing else ""
+                f" · proteção suspensa={guard.override_remaining_s:.1f}s restantes"
+                if overriding else (
+                    f" · resfriamento={guard.cooling_elapsed_s:.1f}/{guard_config.cooling_window_s:.0f}s"
+                    if observing else ""
+                )
             )
+            if previous.get("status") == "TEMPORARY_OVERRIDE" and status == "MONITORING":
+                _append_log(
+                    f"Proteção térmica GPU: proteção preventiva reativada — temperatura abaixo de "
+                    f"{guard.cooling_resume_c(guard_config):.0f}°C; chamadas liberadas",
+                    level="summary",
+                    job_id=job.get("id"),
+                )
             if previous.get("status") == "COOLING_OBSERVATION" and status == "MONITORING":
                 _append_log(
                     f"Proteção térmica GPU: resfriamento concluído — temperatura abaixo de "
-                    f"{thermal_guard.cooling_resume_c(guard_config):.0f}°C; retomando chamadas",
+                    f"{guard.cooling_resume_c(guard_config):.0f}°C; retomando chamadas",
                     level="summary",
                     job_id=job.get("id"),
                 )
             _append_log(
-                f"Telemetria GPU: {temperature} · {fan} · {power}{window}",
-                level="technical",
+                f"Telemetria térmica: {temperature} · {fan} · {power}{window}",
+                level="thermal",
                 job_id=job.get("id"),
             )
             state_condition.notify_all()
+
+    def on_override(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
+        record("OVERRIDE", snapshot)
 
     def on_trip(snapshot: ThermalSnapshot, guard_config: ThermalGuardConfig) -> None:
         with state_lock:
             state["thermal_stop_requested"] = True
             state["cancel_requested"] = True
             job["_thermal_trip"] = True
-            if thermal_guard.trip_reason == "hardware_critical":
+            if guard.trip_reason == "thermal_override_expired":
+                thermal_error = (
+                    f"GPU permaneceu acima do limite após tolerância de "
+                    f"{guard_config.trip_override_window_s:.0f}s; "
+                    "job interrompido preventivamente"
+                )
+            elif guard.trip_reason == "hardware_critical":
                 thermal_error = "GPU atingiu o limite crítico de hardware; job interrompido imediatamente"
-            elif thermal_guard.trip_reason == "cooling_window_expired":
+            elif guard.trip_reason == "cooling_window_expired":
                 thermal_error = (
                     f"GPU não resfriou em {guard_config.cooling_window_s:.0f}s após o alerta térmico; "
                     "job interrompido preventivamente"
@@ -1133,7 +1166,13 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             if process is not None:
                 _send_process_group_signal(process, signal.SIGTERM)
 
-    guard = GpuThermalGuard(on_warning=on_warning, on_trip=on_trip, on_sample=on_sample, config=config)
+    guard = GpuThermalGuard(
+        on_warning=on_warning,
+        on_trip=on_trip,
+        on_sample=on_sample,
+        on_override=on_override,
+        config=config,
+    )
     active = guard.start()
     snapshot = guard.latest
     if not active and snapshot is not None:
@@ -1145,14 +1184,18 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 "warning_c": config.warning_c,
                 "stop_c": config.stop_c,
                 "cooling_resume_c": guard.cooling_resume_c(config),
+                "trip_override_window_s": config.trip_override_window_s,
+                "override_elapsed_s": round(guard.override_elapsed_s, 1),
+                "override_remaining_s": round(guard.override_remaining_s, 1),
+                "override_reason": guard.override_reason,
                 "trip_reason": guard.trip_reason,
                 "error": job.get("thermal_error"),
             }
             state["thermal_guard"] = job["thermal_guard"]
             if status == "UNAVAILABLE":
                 _append_log(
-                    "Proteção térmica GPU: sensor AMD indisponível; tradução liberada sem monitoramento térmico",
-                    level="error",
+                    "Proteção térmica: nenhum sensor compatível disponível; tradução liberada em modo passivo",
+                    level="warning",
                     job_id=job.get("id"),
                 )
             _persist_locked()
@@ -1170,14 +1213,18 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
             )
             job["thermal_guard"] = {
                 **(snapshot.as_dict(config) if snapshot else {}),
-                "status": "COOLING_OBSERVATION" if guard.cooling_active else "MONITORING",
+                "status": "TEMPORARY_OVERRIDE" if guard.override_active else ("COOLING_OBSERVATION" if guard.cooling_active else "MONITORING"),
                 "warning_c": config.warning_c,
                 "stop_c": config.stop_c,
                 "cooling_resume_c": guard.cooling_resume_c(config),
                 "interval_s": config.interval_s,
                 "trip_confirmations": config.trip_confirmations,
                 "cooling_window_s": config.cooling_window_s,
+                "trip_override_window_s": config.trip_override_window_s,
                 "cooling_elapsed_s": round(guard.cooling_elapsed_s, 1),
+                "override_elapsed_s": round(guard.override_elapsed_s, 1),
+                "override_remaining_s": round(guard.override_remaining_s, 1),
+                "override_reason": guard.override_reason,
                 "fan_control": "hardware_driver",
             }
             state["thermal_guard"] = job["thermal_guard"]
@@ -1187,6 +1234,7 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
                 f"leitura inicial={initial_reading}, "
                 f"resfriamento cooperativo a partir de={config.warning_c:.0f}°C, "
                 f"janela de resfriamento={config.cooling_window_s:.0f}s, "
+                f"tolerância após limite={config.trip_override_window_s:.0f}s, "
                 f"retomada abaixo de={guard.cooling_resume_c(config):.0f}°C, "
                 f"intervalo={config.interval_s:.1f}s, confirmação={config.trip_confirmations} leitura(s)",
                 level="summary",
@@ -1241,6 +1289,13 @@ def _is_transport_error(exc: Exception) -> bool:
     LlamaPolicyError, RuntimeError de schema) NÃO são de transporte.
     """
     import requests
+    try:
+        from transport_providers import TransportBlocked
+    except ImportError:
+        TransportBlocked = ()  # type: ignore[assignment]
+
+    if TransportBlocked and isinstance(exc, TransportBlocked):
+        return True
 
     if isinstance(exc, requests.exceptions.RequestException):
         return True
@@ -1744,13 +1799,24 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
     def translate_karaoke(text: str, context_before: str, context_after: str) -> str:
         return _call_karaoke_provider(text, context_before, context_after, attempt=1)
 
+    karaoke_retry_attempts: dict[tuple[str, str, str], int] = {}
+
     def retry_karaoke(text: str, context_before: str, context_after: str) -> str:
-        return _call_karaoke_provider(text, context_before, context_after, attempt=2)
+        key = (text, context_before, context_after)
+        next_retry = karaoke_retry_attempts.get(key, 0) + 1
+        karaoke_retry_attempts[key] = next_retry
+        return _call_karaoke_provider(
+            text, context_before, context_after, attempt=1 + next_retry
+        )
 
     # V230 invokes this optional hook only after a source-copy or structural
     # rejection. It remains on the same selected provider and never becomes
     # an implicit Ollama fallback.
     translate_karaoke.retry = retry_karaoke
+    # Qwen/Ollama can deterministically echo a short lyric even after one
+    # correction prompt. Allow two distinct recovery calls; each receives a
+    # new attempt identity and remains on the selected primary provider.
+    translate_karaoke.karaoke_retry_limit = 2
     ctx["karaoke_translator"] = translate_karaoke
     # O pipeline V2.3.8 roda in-process; a consulta cooperativa pausa antes da
     # próxima chamada/retry para que o driver/firmware tenha tempo de resfriar.

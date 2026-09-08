@@ -22,6 +22,7 @@ FALLBACK_CANDIDATE_ONLY = "FALLBACK_CANDIDATE_ONLY"
 REVIEW_VERDICTS = frozenset({"REVIEWER_NO_OBJECTION", "REVIEWER_FLAGGED", "REVIEWER_UNRESOLVED"})
 LLAMA_MODEL_TAG = "llama3.1:8b"
 LLAMA_MODEL_DIGEST = "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
+DEFAULT_QWEN_PHYSICAL_MAXIMUM = 256
 
 
 class LlamaPolicyError(RuntimeError):
@@ -44,7 +45,7 @@ class HardCallBudget:
 class OperationCallBudget:
     """Shared per-operation reservation ledger for every model transport."""
 
-    def __init__(self, *, qwen_physical_maximum: int = 131, llama_generation_maximum: int = 1) -> None:
+    def __init__(self, *, qwen_physical_maximum: int = DEFAULT_QWEN_PHYSICAL_MAXIMUM, llama_generation_maximum: int = 1) -> None:
         self.qwen_physical_maximum = int(qwen_physical_maximum)
         self.llama_generation_maximum = int(llama_generation_maximum)
         self.total_reserved = 0
@@ -70,7 +71,11 @@ class OperationCallBudget:
             self.llama_reserved += 1
         else:
             if self.qwen_reserved >= self.qwen_physical_maximum:
-                raise LlamaPolicyError("V238_SHARED_QWEN_PHYSICAL_CALL_BUDGET_EXCEEDED")
+                raise LlamaPolicyError(
+                    "V238_SHARED_QWEN_PHYSICAL_CALL_BUDGET_EXCEEDED:"
+                    f"reserved={self.qwen_reserved}:maximum={self.qwen_physical_maximum}:"
+                    f"model={str(model_tag)[:120]}:phase={token}"
+                )
             self.qwen_reserved += 1
         self.total_reserved += 1
         reservation = {
@@ -305,4 +310,4 @@ def review_suspect_qwen_outputs(outputs: Iterable[Mapping[str, Any]], reviewer: 
     return verdicts
 
 
-__all__ = ["ALLOWED_REASON_CODES", "FALLBACK_CANDIDATE_ONLY", "LLAMA_MODEL_TAG", "LLAMA_MODEL_DIGEST", "HardCallBudget", "OperationCallBudget", "CanonicalLlamaProvider", "LlamaPolicyError", "eligible_units", "run_single_fallback_phase", "review_suspect_qwen_outputs", "enforce_v238_runtime_context"]
+__all__ = ["ALLOWED_REASON_CODES", "FALLBACK_CANDIDATE_ONLY", "LLAMA_MODEL_TAG", "LLAMA_MODEL_DIGEST", "DEFAULT_QWEN_PHYSICAL_MAXIMUM", "HardCallBudget", "OperationCallBudget", "CanonicalLlamaProvider", "LlamaPolicyError", "eligible_units", "run_single_fallback_phase", "review_suspect_qwen_outputs", "enforce_v238_runtime_context"]

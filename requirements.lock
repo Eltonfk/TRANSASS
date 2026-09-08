@@ -12,6 +12,7 @@ Jinja2==3.1.6
 MarkupSafe==3.0.3
 packaging==26.3
 pysubs2==1.8.1
+psutil==7.0.0
 requests==2.34.2
 urllib3==2.7.0
 Werkzeug==3.1.8

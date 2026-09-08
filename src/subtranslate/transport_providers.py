@@ -288,6 +288,13 @@ class OllamaTransport(BaseTransport):
 
     def build_request(self, canonical_payload: dict[str, Any]) -> dict[str, Any]:
         request = dict(canonical_payload)
+        # ``response_mode`` is an internal canonical hint.  Ollama accepts a
+        # JSON ``format`` but has no portable text-mode field, so remove the
+        # hint before sending and make the no-thinking policy explicit for
+        # short karaoke calls.
+        if request.pop("response_mode", None) == "text":
+            request.pop("format", None)
+            request["think"] = False
         if self.model:
             request["model"] = self.model
         request["stream"] = False
@@ -301,6 +308,13 @@ class OllamaTransport(BaseTransport):
         content = message.get("content")
         if not isinstance(content, str):
             raise TransportBlocked("OLLAMA_RESPONSE_CONTENT_MISSING")
+        if not content.strip():
+            done_reason = str(envelope.get("done_reason") or "unknown")
+            thinking = bool(str(message.get("thinking") or "").strip())
+            raise TransportBlocked(
+                "OLLAMA_EMPTY_CONTENT:"
+                f"done_reason={done_reason}:thinking_present={str(thinking).lower()}"
+            )
         return content
 
 
@@ -344,6 +358,14 @@ class OpenAICompatTransport(BaseTransport):
         content = (choices[0].get("message") or {}).get("content")
         if not isinstance(content, str):
             raise TransportBlocked("OPENAI_COMPAT_RESPONSE_CONTENT_MISSING")
+        if not content.strip():
+            message = choices[0].get("message") or {}
+            finish_reason = str(choices[0].get("finish_reason") or "unknown")
+            reasoning = bool(str(message.get("reasoning_content") or "").strip())
+            raise TransportBlocked(
+                "OPENAI_COMPAT_EMPTY_CONTENT:"
+                f"finish_reason={finish_reason}:reasoning_present={str(reasoning).lower()}"
+            )
         return content
 
 
@@ -470,6 +492,10 @@ class GeminiTransport(BaseTransport):
         messages = _messages_of(canonical_payload)
         system_texts = [m["content"] for m in messages if m["role"] == "system"]
         user_messages = [m for m in messages if m["role"] != "system"]
+        plain_text = (
+            canonical_payload.get("response_mode") == "text"
+            or canonical_payload.get("gemini_plain_text")
+        )
         request: dict[str, Any] = {
             "contents": [{"role": m["role"], "parts": [{"text": m["content"]}]}
                          for m in user_messages],
@@ -478,7 +504,7 @@ class GeminiTransport(BaseTransport):
                 # Gemini truncates at maxOutputTokens; the canonical 1024 is
                 # too small for 8-event batches with long translations.
                 "maxOutputTokens": max(int(options.get("num_predict", 1024)), 8192),
-                "responseMimeType": "text/plain" if canonical_payload.get("gemini_plain_text") else "application/json",
+                "responseMimeType": "text/plain" if plain_text else "application/json",
             },
         }
         if system_texts:
@@ -489,7 +515,7 @@ class GeminiTransport(BaseTransport):
         # prompt remains present for providers without structured output; the
         # schema is an additional Gemini-only constraint.
         response_schema = canonical_payload.get("format")
-        if isinstance(response_schema, dict) and not canonical_payload.get("gemini_plain_text"):
+        if isinstance(response_schema, dict) and not plain_text:
             request["generationConfig"]["responseSchema"] = _gemini_schema(response_schema)
         return request
 
@@ -519,6 +545,22 @@ class DeepseekTransport(OpenAICompatTransport):
     @staticmethod
     def default_base_url() -> str:
         return "https://api.deepseek.com/v1"
+
+    def build_request(self, canonical_payload: dict[str, Any]) -> dict[str, Any]:
+        """Map the app's no-thinking policy to DeepSeek's native field.
+
+        DeepSeek V4 enables thinking by default.  The subtitle contracts need
+        the visible answer, not a reasoning trace; with a small completion
+        budget the model can otherwise spend the whole response on reasoning
+        and return an empty ``message.content``.  Honor an explicit
+        ``think=True`` for callers that intentionally opt into it, while the
+        translation providers default to the deterministic disabled mode.
+        """
+        request = super().build_request(canonical_payload)
+        request["thinking"] = {
+            "type": "enabled" if canonical_payload.get("think") is True else "disabled"
+        }
+        return request
 
 
 _PROVIDERS = {

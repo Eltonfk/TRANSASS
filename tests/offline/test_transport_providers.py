@@ -50,6 +50,28 @@ def test_ollama_passthrough_and_extract():
     assert t.extract_content(body) == "{\"translations\": []}"
 
 
+def test_ollama_karaoke_plain_text_mode_removes_json_contract_and_thinking():
+    t = tp.OllamaTransport(model="qwen3.5:9b")
+    request = t.build_request({
+        "messages": [{"role": "user", "content": "linha"}],
+        "options": {"temperature": 0.0, "num_predict": 1024},
+        "format": "json",
+        "response_mode": "text",
+    })
+    assert "format" not in request
+    assert "response_mode" not in request
+    assert request["think"] is False
+
+
+def test_ollama_empty_content_is_blocked_with_reason():
+    t = tp.OllamaTransport(model="qwen3.5:9b")
+    with pytest.raises(tp.TransportBlocked, match="OLLAMA_EMPTY_CONTENT:done_reason=length"):
+        t.extract_content(json.dumps({
+            "done_reason": "length",
+            "message": {"content": "", "thinking": ""},
+        }).encode())
+
+
 def test_openai_compat_wire_format_and_auth():
     t = tp.OpenAICompatTransport(model="llama-3.3-70b-versatile",
                                  base_url="https://api.groq.com/openai/v1",
@@ -131,6 +153,13 @@ def test_gemini_wire_format_and_extract():
     assert t.extract_content(body) == "RESPOSTA"
 
 
+def test_gemini_plain_text_mode_does_not_send_json_schema():
+    t = tp.GeminiTransport(model="gemini-3.5-flash-lite", api_key="AIza_test")
+    request = t.build_request({**CANONICAL, "response_mode": "text"})
+    assert request["generationConfig"]["responseMimeType"] == "text/plain"
+    assert "responseSchema" not in request["generationConfig"]
+
+
 def test_gemini_error_and_block_are_blocked():
     t = tp.GeminiTransport(model="gemini-2.0-flash")
     with pytest.raises(tp.TransportBlocked, match="GEMINI_ERROR"):
@@ -175,6 +204,18 @@ def test_deepseek_transport_enforces_shared_delay_floor():
     )
     assert isinstance(t, tp.DeepseekTransport)
     assert t.delay_between_calls == tp.DEEPSEEK_MIN_DELAY_SECONDS
+
+
+def test_deepseek_transport_disables_default_thinking_for_translation():
+    t = tp.DeepseekTransport(model="deepseek-v4-flash", api_key="sk-test")
+    request = t.build_request(CANONICAL)
+    assert request["thinking"] == {"type": "disabled"}
+
+
+def test_deepseek_transport_honors_explicit_thinking_opt_in():
+    t = tp.DeepseekTransport(model="deepseek-v4-flash", api_key="sk-test")
+    request = t.build_request({**CANONICAL, "think": True})
+    assert request["thinking"] == {"type": "enabled"}
 
 
 def test_cloud_transport_resolves_api_key_from_environment(monkeypatch):

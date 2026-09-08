@@ -101,6 +101,12 @@ def test_gemini_retry_budget_is_separate_from_physical_call_ceiling():
     assert orchestrator.gemini_operation_limits({"retry_budget": 200}) == (200, 200)
 
 
+def test_qwen_default_physical_budget_is_aligned_with_docker_and_invalid_env_is_safe(monkeypatch):
+    monkeypatch.delenv("V238_QWEN_PHYSICAL_MAXIMUM", raising=False)
+    assert orchestrator.qwen_operation_limits() == (0, 256)
+    assert orchestrator.qwen_operation_limits("not-a-number") == (0, 256)
+
+
 def test_split_isolation_does_not_consume_retry_budget():
     config = frozen_pipeline.Config("http://local.invalid", retry_budget_calls=1)
     runner = frozen_pipeline.Runner([], {}, config, {})
