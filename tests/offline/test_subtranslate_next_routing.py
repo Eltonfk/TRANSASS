@@ -413,7 +413,7 @@ class ProbeBootstrapIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.agent_text = (AGENTS_DIR / "subtranslate-orchestrator.md").read_text(encoding="utf-8")
-        cls.command = f"python3 {ROOT / '.opencode/tools/subtranslate_readonly_probe.py'}"
+        cls.command = "python3 .opencode/tools/subtranslate_readonly_probe.py"
 
     def test_orchestrator_uses_probe_as_bootstrap(self):
         self.assertIn("## PROBE_BOOTSTRAP", self.agent_text)

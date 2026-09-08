@@ -6,7 +6,7 @@ permission:
   edit: deny
   bash:
     "*": deny
-    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_readonly_probe.py": allow
+    "python3 .opencode/tools/subtranslate_readonly_probe.py": allow
   task: deny
   webfetch: deny
   websearch: deny

@@ -6,8 +6,8 @@ permission:
   bash:
     "*": ask
     "ls *": deny
-    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_context_inspect.py --summary": allow
-    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b5_preflight.py --plan": allow
+    "python3 .opencode/tools/subtranslate_context_inspect.py --summary": allow
+    "python3 .opencode/tools/subtranslate_b5_preflight.py --plan": allow
 ---
 
 Voce e o agente principal de implementacao do Subtranslate.

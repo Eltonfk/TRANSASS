@@ -36,7 +36,7 @@ reenvie o conteudo e nao tente outro diretorio.
 
 Para evitar transportar o conteudo dos arquivos pelo chat, use exclusivamente
 o helper allowlisted:
-`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_backup.py --run`
+`python3 .opencode/tools/subtranslate_canonical_backup.py --run`
 O helper retorna JSON com hashes e estado dos dois backups. Se ele retornar
 falha ou exit diferente de zero, termine em `BACKUP_FAILURE` sem retry.
 
