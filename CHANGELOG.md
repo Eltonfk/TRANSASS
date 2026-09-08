@@ -4,6 +4,46 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.5.1] - 2026-09-07
+
+### Adicionado
+- Aplicativo Desktop nativo para Linux e Windows, com janela Qt própria,
+  onboarding, diretórios persistentes por usuário e diagnóstico integrado.
+- AppImage e instalador Windows reproduzíveis no CI, com ferramentas de mídia,
+  checksums, SBOM e smoke tests do bundle e da instalação real.
+- Thermal Guard multiplataforma e agnóstico de fornecedor, com NVIDIA, AMD,
+  Intel/fallback do sistema, histerese e degradação passiva quando o hardware
+  não fornece telemetria.
+- Selos visuais no acervo para distinguir a legenda publicada, a versão do
+  pipeline e o resultado mais recente.
+
+### Alterado
+- Diagnóstico térmico ficou discreto: o estado normal não ocupa a tela; alertas,
+  backoff e falhas continuam registrados quando importam.
+- Tradução em lotes aplica backoff antes de chamadas locais ao Ollama, permitindo
+  que a refrigeração alcance a temperatura segura sem perder o progresso.
+- Seleção de provedor e orçamento físico respeitam execução sem fallback,
+  inclusive Qwen e DeepSeek no Desktop/AppImage.
+- Karaokê de OP/ED compara conteúdo em vez de confiar apenas no nome da faixa:
+  texto inglês rotulado como japonês pode ser traduzido corretamente para pt-BR.
+
+### Corrigido
+- Episódio atual e progresso da fila voltam a aparecer durante a tradução;
+  Caixa de entrada, Acervo e Revisão não ficam presos em carregamento infinito.
+- Retraduções publicam e versionam a nova legenda sem confundir o objeto anterior
+  com o resultado atual.
+- Tratamento de karaokê evita abortar o episódio inteiro quando apenas versos
+  idênticos, créditos ou segmentos vazios exigem preservação legítima.
+- Persistência de configuração, lock de instância, caminhos de dados e erros de
+  porta agora funcionam com as diferenças reais entre Windows e POSIX.
+- Desktop sem fallback não tenta resolver o hostname Docker `ollama` quando usa
+  um provedor remoto.
+
+### Documentação
+- Documentação ativa reescrita e indexada; planos já implementados e handoffs
+  temporários foram removidos. O museu histórico continua no arquivo — sem
+  permitir que um fóssil configure sua instalação por acidente.
+
 ## [2.5.0] - 2026-09-03
 
 ### Adicionado

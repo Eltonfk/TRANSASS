@@ -16,13 +16,15 @@ Não tratar `main`, snapshots, diretórios de review, produção Docker, Library
 
 No início de toda tarefa relevante, reconcilie:
 
-1. `@authority/PROJECT_STATE.json` — estado factual/canônico corrente.
-2. `@authority/HANDOFF_CHATGPT.md` — cronologia e decisões anteriores.
-3. Git da candidata — branch, HEAD, status e diff.
-4. `@main` — baseline principal, somente quando comparação for necessária.
-5. Testes e artefatos persistidos — evidência técnica.
+1. Git da candidata — branch, HEAD, status e diff.
+2. Código e documentação ativa deste repositório.
+3. Testes e artefatos persistidos — evidência técnica.
+4. `main` — baseline principal, somente quando a comparação for necessária.
+5. Estado operacional externo — somente quando o usuário o colocar em escopo.
 
-Se essas fontes entrarem em conflito de forma material, pare em fail-closed e reporte a divergência. Não escolha silenciosamente uma interpretação.
+Handoffs temporários e arquivos de estado de outras ferramentas não são fonte
+canônica deste repositório. Se as fontes válidas entrarem em conflito de forma
+material, pare em fail-closed e reporte a divergência.
 
 O histórico pode conter estados com nomes como `CHATGPT_AUTHORIZATION_REQUIRED`.
 Esses nomes históricos devem ser preservados como evidência, mas NÃO constituem autorização para o OpenCode.
@@ -94,11 +96,10 @@ Não reescrever artefatos históricos apenas para fazê-los concordar com conclu
 
 Quando uma evidência anterior estiver incorreta, preservar a evidência original e registrar a correção de forma aditiva conforme as convenções do projeto.
 
-Não editar `PROJECT_STATE.json` ou `HANDOFF_CHATGPT.md` externos a partir deste workspace sem uma autorização específica de migração documental.
+## Runtime evidence posterior ao repositório
 
-## Runtime evidence posterior ao estado canônico
-
-Se runtime evidence posterior ao `PROJECT_STATE.json` provar calls, transports, mutations, blockers ou resultados materialmente ausentes do estado canônico:
+Se runtime evidence provar calls, transports, mutations, blockers ou resultados
+materialmente ausentes do Git e da documentação ativa:
 
 - considerar o estado canônico stale para continuação operacional;
 - preservar o estado anterior como histórico;

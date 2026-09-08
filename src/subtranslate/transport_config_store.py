@@ -192,7 +192,13 @@ def _effective_ollama_base_url(engine: dict[str, Any] | None) -> str | None:
 
 
 def _fsync_dir(path: Path) -> None:
-    fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+    # Windows has no O_DIRECTORY and does not expose POSIX directory fsync.
+    # The file itself is flushed before os.replace; directory durability is a
+    # best-effort strengthening available only on platforms that support it.
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    fd = os.open(str(path), os.O_RDONLY | directory_flag)
     try:
         os.fsync(fd)
     finally:

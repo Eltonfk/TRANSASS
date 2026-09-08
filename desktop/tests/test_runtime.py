@@ -1,3 +1,4 @@
+import errno
 from pathlib import Path
 import sys
 from urllib.request import urlopen
@@ -54,7 +55,7 @@ def test_runtime_reports_local_port_start_failure(monkeypatch, tmp_path):
     runtime = runtime_for(tmp_path, core_root=Path(__file__).parents[2])
 
     def fail_to_bind(*args, **kwargs):
-        raise OSError(98, "Address already in use")
+        raise OSError(errno.EADDRINUSE, "Address already in use")
 
     monkeypatch.setattr(runtime_module, "make_server", fail_to_bind)
     with pytest.raises(RuntimeError, match="porta local") as error:

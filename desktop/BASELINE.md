@@ -1,5 +1,7 @@
 # Transass Desktop — baseline
 
+> Documento histórico do ponto de partida. Não descreve a versão corrente.
+
 Esta pasta inicia a linha Desktop a partir do snapshot web `v2.5.0`.
 
 | Campo | Valor |

@@ -18,7 +18,8 @@ Ao participar, você concorda com o [Código de Conduta](CODE_OF_CONDUCT.md).
 5. **Rode a suíte offline** antes de abrir o PR:
 
 ```sh
-PYTHONPATH=src/subtranslate python3 -m pytest tests/offline
+PYTHONPATH=.:src/subtranslate python3 -m pytest tests/offline
+PYTHONPATH=.:src/subtranslate:desktop/src python3 -m pytest desktop/tests
 ```
 
 6. Abra um **Pull Request** usando o template.
@@ -26,7 +27,8 @@ PYTHONPATH=src/subtranslate python3 -m pytest tests/offline
 ## Padrões do projeto
 
 - **Imports planos**: os módulos de `src/subtranslate/` usam imports flat
-  (`from pipeline_registry import ...`); rode com `PYTHONPATH=src/subtranslate`.
+  (`from pipeline_registry import ...`); rode com
+  `PYTHONPATH=.:src/subtranslate`.
 - **Fail-closed**: em caso de dúvida sobre segurança, durabilidade ou estado,
   prefira bloquear a operação a relaxar validação.
 - **Evidência > ausência de erro**: não declare PASS sem provar o que foi
@@ -40,6 +42,8 @@ PYTHONPATH=src/subtranslate python3 -m pytest tests/offline
 
 - `tests/offline/` — suítes determinísticas, sem rede, sem modelo (obrigatórias
   no CI).
+- `desktop/tests/` — runtime, persistência, empacotamento e integração da janela
+  Desktop.
 - `tests/model/` — testes que exigem modelo/GPU; nunca parte do CI padrão.
 
 ## Reportando bugs

@@ -27,6 +27,12 @@ jobs:
           python -m pip install -r requirements.lock
           python -m pip install -r requirements-test.lock
           python -m pip install -r desktop/packaging/requirements-desktop.txt
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Test Desktop runtime
         run: |
           python -m pytest desktop/tests -q
@@ -73,6 +79,33 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: iscc desktop/packaging/windows/installer.iss
+      - name: Smoke test Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath Output -Filter "Transass-Setup-*.exe" |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "Instalador do Transass não foi gerado"
+          }
+          $installDir = Join-Path $env:RUNNER_TEMP "TransassInstalled"
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installDir"
+          ) -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "Instalação silenciosa falhou com código $($install.ExitCode)"
+          }
+          python desktop/tests/run_bundle_smoke.py (Join-Path $installDir "Transass.exe")
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+            throw "Desinstalador não foi criado"
+          }
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          ) -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "Desinstalação silenciosa falhou com código $($uninstall.ExitCode)"
+          }
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:

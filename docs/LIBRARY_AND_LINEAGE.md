@@ -1,16 +1,23 @@
-# Library and lineage
+# Acervo e lineage
 
-Lineage is provenance, not version ancestry. Every subtitle-record lineage edge
-must stay inside one media episode (`LINEAGE_EPISODE_BOUNDARY_INVARIANT`).
+O acervo registra fontes, candidatos, revisões e publicações. Lineage descreve
+proveniência, não uma árvore de versões decorativa.
 
-For a successful V2.3.0 plan:
+```text
+SOURCE
+  └─ TRANSLATED_FROM → estágio V238
+       └─ KARAOKE_AUGMENTED_FROM → resultado final
+            └─ PUBLISHED_AS → sidecar .pt-BR.ass
+```
 
-`SOURCE → V226 DURABLE STAGE → V230 FINAL`
+Uma retradução adiciona `RETRANSLATED_FROM`. Toda aresta deve permanecer no
+mesmo episódio (`LINEAGE_EPISODE_BOUNDARY_INVARIANT`); cruzar episódios falha
+fechado.
 
-The V2.2.6 stage has `TRANSLATED_FROM → SOURCE`. The final V2.3.0 record has
-`TRANSLATED_FROM → SOURCE` and `KARAOKE_AUGMENTED_FROM → exact V226 stage`.
-Retranslation adds `RETRANSLATED_FROM` as a separate provenance dimension.
+Os selos visuais do acervo distinguem pipeline, versão publicada, candidato e
+estado de revisão. Publicar uma retradução substitui o sidecar anterior de
+forma controlada, mas preserva os registros e hashes que explicam a troca.
 
-Persistent Library state is external to this repository. The versioned
-`resources/glossaries/` files are image resources; persistent glossary state is
-operational state and must not be conflated with them.
+O banco, a memória aprovada, o glossário operacional e as capturas ficam em
+`STATE_DIR`. `resources/glossaries/` contém apenas recursos versionados da
+aplicação.

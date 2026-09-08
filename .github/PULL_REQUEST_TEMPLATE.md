@@ -12,7 +12,8 @@
 
 ## Testes
 
-- [ ] Suíte offline passando: `PYTHONPATH=src/subtranslate python3 -m pytest tests/offline`
+- [ ] Suíte offline passando: `PYTHONPATH=.:src/subtranslate python3 -m pytest tests/offline`
+- [ ] Suíte Desktop passando: `PYTHONPATH=.:src/subtranslate:desktop/src python3 -m pytest desktop/tests`
 - [ ] Testes novos adicionados (quando aplicável)
 - [ ] Compilação: `python3 -m compileall -q src/subtranslate`
 

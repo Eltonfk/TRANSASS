@@ -69,5 +69,8 @@ def test_docker_state_aliases_do_not_choose_desktop_data_root(monkeypatch, tmp_p
     for alias in ("/app/state/", "/docker/subtranslate/state", "/docker/transass/state/"):
         monkeypatch.setenv("STATE_DIR", alias)
         paths = default_paths()
-        assert paths.data_root == tmp_path / "xdg-data" / "transass"
+        if sys.platform == "win32":
+            assert paths.data_root == Path(os.environ["LOCALAPPDATA"]) / "Transass"
+        else:
+            assert paths.data_root == tmp_path / "xdg-data" / "transass"
         assert paths.state_dir == paths.data_root / "state"

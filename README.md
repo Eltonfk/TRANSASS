@@ -1,160 +1,101 @@
 # Transass
 
 <p align="center">
-  <img src="src/subtranslate/transass_logo.png" alt="TransASS — Translation Assistant" width="360">
+  <img src="src/subtranslate/transass_logo.png" alt="Transass — Translation Assistant" width="360">
 </p>
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-882%20offline%20passing-brightgreen.svg)](tests/offline)
-[![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg)](deploy/Dockerfile)
+[![CI](https://github.com/Eltonfk/TRANSASS/actions/workflows/ci.yml/badge.svg)](https://github.com/Eltonfk/TRANSASS/actions/workflows/ci.yml)
+[![Desktop](https://github.com/Eltonfk/TRANSASS/actions/workflows/desktop.yml/badge.svg)](https://github.com/Eltonfk/TRANSASS/actions/workflows/desktop.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Transass** traduz legendas de anime para português do Brasil.
+O **Transass** traduz legendas `.ass` e `.ssa` para português do Brasil,
+preserva a estrutura visual e mantém evidência suficiente para explicar o que
+aconteceu quando um modelo decide improvisar jazz.
 
-Sobre o nome: **Trans** é de *translation* — aqui a gente troca o **idioma**,
-não o gênero (respeitamos todos, inclusive os zumbis). E **ass**? ... é bunda.
-Não pergunte, foi o que o dono escolheu. O que importa é o que ele faz:
+O nome junta *translation* com o formato ASS. A coincidência anatômica foi
+aceita pelo comitê de uma pessoa só.
 
-- Traduz episódios inteiros de `.ass`/`.ssa` com **durabilidade forense**:
-  cada lote tem ledger, tentativa física e cobertura derivada — **zero retries
-  silenciosos** (se falhou, você vai saber).
-- **Motor de tradução escolhível**: Ollama local (GPU ou CPU), Gemini (grátis),
-  Groq, DeepSeek ou qualquer API OpenAI-compatível (OpenRouter, LM Studio...).
-- **Fallback automático**: se o motor principal ficar indisponível por falha de
-  transporte, o alternativo tenta sozinho — como um plano B, mas sem drama.
-- **Interface web** com fila segura, Biblioteca com lineage, revisão humana e
-  publicação direta no Jellyfin (`.pt-BR.ass` ao lado dos vídeos).
+> Versão do aplicativo: **2.5.1**. O identificador `v2_3_8` é o pipeline
+> canônico; ele não é a versão exibida ao usuário.
 
-> Antes chamado de *Subtranslate*, o projeto foi renomeado para **Transass**.
+## O que ele faz
 
-> **Versão:** o produto está alinhado em `2.5.0`. O identificador `v2_3_8`
-> mantido na configuração nomeia o pipeline canônico e não a versão do
-> aplicativo.
+- traduz episódios e temporadas com fila persistente e progresso em tempo real;
+- usa Ollama local, Gemini, Groq, DeepSeek, NVIDIA NIM ou endpoint
+  OpenAI-compatible;
+- permite fallback opcional apenas para falhas de transporte;
+- reconhece faixas cujo rótulo está errado pelo conteúdo real da legenda;
+- traduz letras OP/ED em inglês sem confundir elenco, créditos e timecodes com
+  karaokê;
+- preserva tags, estilos, tempos, camadas e quebras ASS;
+- publica `.pt-BR.ass`, mantém acervo com lineage e oferece revisão humana;
+- monitora temperatura em Linux e Windows sem assumir que toda GPU é NVIDIA;
+- roda como aplicativo nativo no Linux/Windows ou como serviço Docker.
 
-## ✨ Funcionalidades
+## Instalação rápida
 
-- **Tradução integral de temporadas** — pipeline V238 com lotes determinísticos
-  e evidência forense por chamada (exactly-once, zero retry silencioso).
-- **Motor de tradução escolhível** — `ollama` (local/GPU), `gemini` (Google),
-  `groq`, `deepseek`, `nvidia` ou `openai_compat` (OpenRouter, LM Studio,
-  vLLM, llama.cpp).
-- **Fallback automático** — se o motor principal ficar indisponível por falha
-  de transporte, o motor alternativo configurado tenta automaticamente
-  (evidência própria por tentativa).
-- **Interface web** — fila segura de episódios, auditoria, Biblioteca com
-  lineage, revisão humana, glossário versionado e memória de tradução.
-- **Publicação no Jellyfin** — legendas `.pt-BR.ass` ao lado dos vídeos com a
-  nomenclatura correta.
-- **Segurança por design** — API keys nunca expostas pela API, armazenadas com
-  permissão `600` em arquivo host-local; path traversal bloqueado.
-- **Idioma de origem configurável** — detecta **todos os idiomas** das legendas
-  (sidecars e faixas internas do MKV) e deixa você **selecionar no app** qual
-  legenda/idioma traduzir para português do Brasil (inglês por padrão; ex.:
-  espanhol, japonês, francês). Karaokê/signs/songs preservados por design.
+### Aplicativo Desktop
 
-## 🚀 Início rápido
+Baixe o artefato da [release mais recente](https://github.com/Eltonfk/TRANSASS/releases/latest):
 
-> 📖 Guia completo (requisitos, instalação, desinstalação, solução de
-> problemas, FAQ): **[docs/INSTALLATION.md](docs/INSTALLATION.md)**
+- Linux x86_64: `Transass-x86_64.AppImage`;
+- Windows x64: `Transass-Setup-2.5.1.exe`.
 
-### Requisitos mínimos
+O Desktop abre a interface dentro da própria janela. Existe um servidor Flask
+local nos bastidores, mas ele fica em `127.0.0.1`; o navegador não é convidado
+para a festa.
 
-- **Docker** 24+ (caminho recomendado) **ou** Python 3.11+
-- 4 GB RAM · 2 GB disco · CPU 2+ núcleos
-- **GPU opcional** — sem GPU, use CPU (mais lento) ou uma API gratuita (Gemini)
-
-### Com Docker (recomendado)
+### Docker
 
 ```sh
 git clone https://github.com/Eltonfk/TRANSASS.git
 cd TRANSASS
-cp .env.example .env          # ajuste MEDIA_ROOT, STATE_DIR e GEMINI_API_KEY se usar Gemini
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.0 .
+cp .env.example .env
+# Edite MEDIA_ROOT e STATE_DIR antes de continuar.
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.1 .
 docker compose --env-file .env -f deploy/compose.yaml up -d
-# UI em http://localhost:5050 (ou http://<IP>:5050 na rede local)
 ```
 
-> **Nota:** o clone baixa ~11M — `.opencode/node_modules` (63M) fica só local e é ignorado via `.opencode/.gitignore` — e o `docker build` só copia 8 itens (`src/`, `deploy/`, `resources/glossaries`, `requirements.lock`, `.env.example`). A imagem final tem 324M.
+A interface estará em `http://localhost:5050`.
 
-### Sem Docker (desenvolvimento)
+## Desenvolvimento e testes
 
 ```sh
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.lock
-PYTHONPATH=src/subtranslate python3 src/subtranslate/app.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.lock -r requirements-test.lock
+PYTHONPATH=.:src/subtranslate python3 -m pytest tests/offline -q
 ```
 
-### Testes offline
+Os testes que chamam modelos ficam em `tests/model/` e nunca entram no gate
+offline por acidente.
 
-```sh
-PYTHONPATH=src/subtranslate python3 -m pytest tests/offline
+## Mapa do repositório
+
+```text
+src/subtranslate/   núcleo, web app, pipelines e providers
+desktop/            janela Qt, empacotamento e testes Desktop
+deploy/             Dockerfile, Compose e ffmpeg estático
+resources/          glossários versionados
+tests/offline/      suíte determinística sem modelo/rede
+tests/model/        probes opt-in com modelo real
+docs/               documentação operacional e técnica
 ```
 
-## ⚙️ Configuração do motor de tradução
+## Documentação
 
-Na UI, o botão **⚙ Motor** configura o motor principal + fallback opcional.
-Equivalente em arquivo (`transport_config.json` no state dir):
+Comece pelo [índice da documentação](docs/README.md). Os atalhos mais usados:
 
-```json
-{
-  "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
-  "fallback": {"provider": "gemini", "model": "gemini-3.5-flash-lite"},
-  "keys": {"gemini": "SUA_API_KEY"}
-}
-```
-
-| Provider | Exemplo de modelo | Key (env ou arquivo) |
-|---|---|---|
-| `ollama` | `qwen3.5:9b` | — |
-| `openai_compat` | `meta-llama/llama-3.1-8b-instruct` | `OPENAI_API_KEY` / `OPENROUTER_API_KEY` |
-| `groq` | `openai/gpt-oss-20b` | `GROQ_API_KEY` |
-| `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
-| `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
-| `nvidia` | `meta/llama-3.1-8b-instruct` | `NVIDIA_API_KEY` |
-
-> 🔒 **Nunca** coloque keys em arquivos versionados. O `.gitignore` bloqueia
-> `*api_key*`, `.env` e `secrets/`.
-
-## 📁 Estrutura
-
-```
-src/subtranslate/        # núcleo do pipeline (imports planos, PYTHONPATH)
-  app.py                 # interface web (Flask)
-  pipeline_v2_1_3.py     # pipeline canônico + Client durável
-  pipeline_registry.py   # registro de pipelines (legacy, v2_3_8)
-  transport_providers.py # motores plugáveis (ollama/openai_compat/gemini/groq/deepseek)
-  transport_config_store.py # persistência segura da config de motor
-  v238_*.py              # módulos do pipeline V238 (materializador, stages)
-  anime_subtitle_library.py # biblioteca com lineage e dedupe SHA-256
-tests/offline/           # suítes offline determinísticas (882 testes)
-deploy/                  # Dockerfile + compose.yaml + ffmpeg estático
-resources/glossaries/    # glossários PT-BR por série
-docs/                    # instalação, arquitetura, pipelines, testes
-docs/archive/            # histórico de planejamento (roadmaps, gaps)
-```
-
-## 📚 Documentação
-
-- [Instalação e desinstalação](docs/INSTALLATION.md)
-- [Arquitetura](docs/ARCHITECTURE.md)
-- [Pipelines](docs/PIPELINES.md)
+- [Instalação](docs/INSTALLATION.md)
 - [Configuração](docs/CONFIGURATION.md)
 - [Operações](docs/OPERATIONS.md)
-- [Segurança](docs/SECURITY.md)
+- [Arquitetura](docs/ARCHITECTURE.md)
+- [Pipelines](docs/PIPELINES.md)
+- [Desktop](docs/DESKTOP.md)
 - [Testes](docs/TESTING.md)
-- [Recovery e rollback](docs/RECOVERY_AND_ROLLBACK.md)
-- [Biblioteca e lineage](docs/LIBRARY_AND_LINEAGE.md)
+- [Segurança](SECURITY.md)
 
-## 🤝 Contribuindo
+## Contribuição e licença
 
-Veja [CONTRIBUTING.md](CONTRIBUTING.md) e o
-[Código de Conduta](CODE_OF_CONDUCT.md).
-
-## 🔒 Segurança
-
-Encontrou uma vulnerabilidade? Veja [SECURITY.md](SECURITY.md) para a política
-de divulgação responsável.
-
-## 📄 Licença
-
-[MIT](LICENSE)
+Leia [CONTRIBUTING.md](CONTRIBUTING.md) e o
+[Código de Conduta](CODE_OF_CONDUCT.md). O projeto usa a licença [MIT](LICENSE).

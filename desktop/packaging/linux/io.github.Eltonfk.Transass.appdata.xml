@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Eltonfk.Transass</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Transass</name>
+  <summary>Tradução de legendas de anime para português do Brasil</summary>
+  <developer id="io.github.eltonfk">
+    <name>Eltonfk</name>
+  </developer>
+  <description>
+    <p>
+      O Transass traduz legendas ASS/SSA preservando estrutura, estilos,
+      karaokê, histórico de publicação e evidência operacional.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.Eltonfk.Transass.desktop</launchable>
+  <provides>
+    <binary>Transass</binary>
+  </provides>
+  <url type="homepage">https://github.com/Eltonfk/TRANSASS</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="2.5.1" date="2026-09-07"/>
+  </releases>
+</component>

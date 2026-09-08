@@ -4,7 +4,8 @@
 
 | Versão | Suporte |
 |---|---|
-| 2.4.x | ✅ Ativa |
+| 2.5.x | ✅ Ativa |
+| 2.4.x | ⚠️ Correções críticas, quando aplicável |
 | < 2.4 | ❌ Sem suporte |
 
 ## Reportando vulnerabilidades
@@ -24,8 +25,9 @@ desejado.
 
 ## Modelo de segurança
 
-- **API keys**: armazenadas em arquivo host-local (`transport_config.json`,
-  permissão `600`), **nunca** expostas pela API (apenas `keys_configured`).
+- **API keys**: no Desktop, o armazenamento seguro do sistema é preferido;
+  quando indisponível, o fallback é um arquivo host-local com acesso restrito.
+  A API expõe somente se uma chave está configurada, nunca o segredo.
 - **Rede**: o app web é projetado para uso em **rede local** (bind LAN). Não
   exponha à internet sem autenticação/reverse proxy.
 - **Path traversal**: endpoints de arquivo validam caminhos contra raízes

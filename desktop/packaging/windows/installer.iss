@@ -1,6 +1,6 @@
 #define AppName "Transass"
 ; Keep this value aligned with pyproject.toml, src/subtranslate/_version.py and the Desktop shell.
-#define AppVersion "2.5.0"
+#define AppVersion "2.5.1"
 #define AppExeName "Transass.exe"
 
 [Setup]

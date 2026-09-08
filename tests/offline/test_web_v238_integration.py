@@ -6,6 +6,7 @@ transports and in-memory configs only.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +20,16 @@ import web_execution_context as c1  # noqa: E402
 import web_durable_provider as c2  # noqa: E402
 import transport_config_store as c4  # noqa: E402
 import pipeline_orchestrator as orchestrator  # noqa: E402
+
+
+def test_transport_config_directory_fsync_is_optional_on_windows(monkeypatch, tmp_path):
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+    opened = []
+    monkeypatch.setattr(os, "open", lambda *_args, **_kwargs: opened.append(True))
+
+    c4._fsync_dir(tmp_path)
+
+    assert opened == []
 
 
 # ---------------------------------------------------------------------------

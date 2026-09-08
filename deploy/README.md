@@ -1,19 +1,20 @@
-# Production layout candidate
+# Docker
 
-This directory describes the future controlled-deploy layout. It is not the
-live production configuration and it is not an authorization to deploy.
-
-`compose.yaml` consumes a versioned image and keeps media and operational state
-outside the image. Python source, tests, documentation, glossaries, and the
-historical review workspace are not bind-mounted. The real `/docker/subtranslate`
-tree remains the live authority until P2C4 and an explicit controlled-deploy
-decision.
-
-Validate the file with a safe environment before any future deployment:
+`Dockerfile` produz a imagem versionada e `compose.yaml` executa o Transass sem
+montar código-fonte. Apenas mídia e estado entram como volumes.
 
 ```sh
+cp .env.example .env
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.1 .
 docker compose --env-file .env -f deploy/compose.yaml config
+docker compose --env-file .env -f deploy/compose.yaml up -d
+curl -fsS http://127.0.0.1:5050/health
 ```
 
-The `.env` file and persistent state are host-local operational data and must
-never be committed to Git.
+O contêiner é read-only, remove capabilities, usa usuário não-root e grava
+somente em `/shows`, `/app/state` e `/tmp`. O arquivo `.env` e os volumes são
+estado do operador e não pertencem ao Git.
+
+Ollama normalmente roda no host e é alcançado por
+`host.docker.internal:11434`. O Compose adiciona o alias necessário no Linux;
+não crie um contêiner chamado `ollama` só para satisfazer um hostname antigo.

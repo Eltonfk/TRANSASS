@@ -1,5 +1,8 @@
 # Resumo histórico — linha V2.3.8 e origem do Transass Web
 
+> Registro histórico. Para o comportamento atual, consulte o `CHANGELOG.md` e
+> `docs/README.md`.
+
 Release de contexto (sem código novo). Resume os marcos anteriores à v2.4.7
 para quem chega agora ao projeto.
 
@@ -16,9 +19,8 @@ para quem chega agora ao projeto.
   `DurableResponseProvider` com modos LIVE_CAPTURED / OFFLINE_REPLAY /
   TEST_FAKE, orçamento de chamadas por operação, capturas duráveis e replay
   determinístico.
-- Prova de execução feita por gates dedicados (B4/B5) com tooling próprio —
-  o caminho web ainda não está conectado a esse runtime (planejamento em
-  andamento, com gate e auditoria próprios).
+- Prova de execução feita por gates dedicados (B4/B5) com tooling próprio. A
+  integração posterior com o caminho web está documentada no changelog atual.
 - **Pipelines registrados**: legacy → v2_1_2 … v2_2_6 → v2_3_0 → v2_3_8,
   todos com archive e lineage na biblioteca.
 
@@ -34,8 +36,7 @@ para quem chega agora ao projeto.
   fail-closed preservando versões antigas; memória de tradução aprovada;
   glossário por série.
 
-## Estado atual
+## Continuação histórica
 
-Ver CHANGELOG.md — série 2.4.x levou multi-idioma, auto-classificação e o
-pipeline v2_3_0 ao uso real pela web, com correções de seleção, faixas
-embutidas e idioma de retradução validadas em produção.
+A série 2.4.x levou multi-idioma, auto-classificação e o pipeline v2_3_0 ao uso
+real pela web. As versões seguintes estão registradas no `CHANGELOG.md`.

@@ -49,14 +49,19 @@ def test_sbom_has_cyclonedx_shape(tmp_path):
 
 def test_distribution_manifests_preserve_user_data():
     installer = (ROOT / "desktop/packaging/windows/installer.iss").read_text(encoding="utf-8")
-    linux_entry = (ROOT / "desktop/packaging/linux/transass.desktop").read_text(encoding="utf-8")
+    linux_entry = (
+        ROOT / "desktop/packaging/linux/io.github.Eltonfk.Transass.desktop"
+    ).read_text(encoding="utf-8")
     assert "PrivilegesRequired=lowest" in installer
     assert "{localappdata}\\Transass" in installer
     assert "Exec=Transass" in linux_entry
     assert "Icon=transass" in linux_entry
+    assert "Categories=AudioVideo;" in linux_entry
     appimage_builder = (ROOT / "desktop/packaging/linux/build_appimage.sh").read_text(encoding="utf-8")
     assert 'usr/share/icons/hicolor/256x256/apps/transass.png' in appimage_builder
     assert 'cp "$root/src/subtranslate/transass_logo.png"' in appimage_builder
+    assert 'io.github.Eltonfk.Transass.appdata.xml' in appimage_builder
+    assert 'Bundle desatualizado' in appimage_builder
 
 
 def test_desktop_launcher_exposes_menu_visibility_and_help_links():
@@ -138,4 +143,4 @@ def test_frozen_launcher_supports_version_probe_without_qt():
         text=True,
         env=environment,
     )
-    assert result.stdout.strip() == "Transass 2.5.0"
+    assert result.stdout.strip() == "Transass 2.5.1"

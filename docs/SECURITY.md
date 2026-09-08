@@ -1,15 +1,19 @@
-# Security boundaries
+# Limites de segurança
 
-- Secrets and real credentials stay outside Git and reports.
-- Real DBs, media, state, sidecars and production jobs stay outside Git.
-- Path traversal and cross-episode lineage fail closed.
-- Unknown pipeline IDs fail closed.
-- Model-required tests are explicit and isolated.
-- `.gitignore` excludes state, databases, credentials, caches and local output
+- segredos e credenciais reais ficam fora do Git;
+- mídia, bancos, sidecars e estado operacional ficam fora da imagem;
+- caminhos são confinados às raízes autorizadas;
+- lineage não cruza episódios;
+- IDs de pipeline desconhecidos falham fechados;
+- testes com modelos são opt-in;
+- diagnósticos removem chaves e caminhos absolutos.
 
-Na linha Desktop, API keys são encaminhadas ao cofre do sistema quando o
-backend `keyring` está disponível. Em ambientes headless/Docker, permanece o
-arquivo compatível com modo `600`; a API expõe apenas indicadores booleanos de
-credencial configurada. O endpoint de diagnóstico remove keys e caminhos
-absolutos antes do download.
-  without globally ignoring legitimate fixture subtitle files.
+No Desktop, API keys usam o keyring do sistema quando disponível. Em ambiente
+headless/Docker, o arquivo compatível recebe permissão restrita; a API devolve
+somente indicadores de configuração.
+
+O serviço web não possui autenticação para exposição pública. Restrinja-o à
+máquina/LAN ou coloque autenticação e TLS num reverse proxy. A internet é um
+lugar maravilhoso, mas não precisa conhecer sua biblioteca de anime.
+
+Para divulgação de vulnerabilidades, siga a política em `../SECURITY.md`.

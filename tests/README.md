@@ -1,24 +1,20 @@
 # Test boundaries
 
-`tests/offline/` is the canonical default suite. It must not call Ollama,
-external HTTP or production state. Run it with:
+`tests/offline/` é a suíte canônica padrão. Ela não pode chamar Ollama, HTTP
+externo nem estado de produção. Execute na raiz:
 
 ```sh
-PYTHONPATH=src/subtranslate pytest -c pytest.ini tests/offline \
-  --deselect=tests/offline/test_p2b1_architecture.py::DispatchTests::test_v230_calls_v226_then_v230 \
-  --deselect=tests/offline/test_p2b1a_closure.py::ContractAndControlPlaneTests::test_normal_archive_receives_final_v230_output
+PYTHONPATH=.:src/subtranslate python3 -m pytest tests/offline -q
 ```
 
-The two exact deselections preserve historical tests without presenting their
-superseded mocks as current-contract failures:
+O `pytest.ini` exclui por padrão testes marcados como `historical` e `stress`.
+Eles continuam disponíveis de forma explícita:
 
-1. `DispatchTests.test_v230_calls_v226_then_v230` supplies only a V230 stage
-   marker, not the explicit eligibility dictionary required by the current
-   V2.3.0 gate.
-2. `ContractAndControlPlaneTests.test_normal_archive_receives_final_v230_output`
-   supplies an archive result with no stage contract, superseded by durable
-   two-stage output handling.
+```sh
+PYTHONPATH=.:src/subtranslate python3 -m pytest -m historical tests/offline
+PYTHONPATH=.:src/subtranslate python3 -m pytest -m stress tests/offline
+```
 
-They were copied byte-identically and were not edited or deleted. Model probes
-in `tests/model/` require a separately authorized environment and are excluded
-from the offline default.
+Probes em `tests/model/` exigem modelo/ambiente autorizado e ficam fora da
+validação offline. O teste que diz “offline” e liga para a internet está apenas
+tentando ganhar um nome artístico; trate como bug.
