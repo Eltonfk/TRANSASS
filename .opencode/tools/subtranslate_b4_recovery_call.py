@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE_ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY_ROOT = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review")
 PROJECT_STATE = AUTHORITY_ROOT / "PROJECT_STATE.json"
 RUNTIME_ROOT = AUTHORITY_ROOT / "runtime-evidence/V238_E07_R6C_B4_RECOVERY"

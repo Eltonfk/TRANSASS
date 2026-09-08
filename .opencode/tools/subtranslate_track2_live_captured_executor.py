@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE_ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = CANDIDATE_ROOT / "src/subtranslate/web_retranslation_runner.py"
 EXECUTOR_ID = "TRACK2_LIVE_CAPTURED_EXECUTOR_V1"
 PIPELINE = "v2_3_8"

@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import pathlib
 
-ORCHESTRATOR = pathlib.Path(
-    "/home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/agents/subtranslate-orchestrator.md"
-)
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+ORCHESTRATOR = ROOT / ".opencode" / "agents" / "subtranslate-orchestrator.md"
 
 
 def _content() -> str:

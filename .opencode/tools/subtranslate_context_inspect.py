@@ -14,7 +14,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-CANDIDATE = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE = Path(__file__).resolve().parents[2]
 PROBE_PATH = CANDIDATE / ".opencode/tools/subtranslate_readonly_probe.py"
 AUTHORITY_PROJECT_STATE = Path(
     "/home/palhacinho/codex-projects/anime-subtitle-translator-review/PROJECT_STATE.json"

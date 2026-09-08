@@ -47,7 +47,7 @@ WEB_PORT=5050
 Construa e inicie:
 
 ```sh
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.2 .
+docker build --pull=false -f deploy/Dockerfile -t transass:v2.5.2 .
 docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 

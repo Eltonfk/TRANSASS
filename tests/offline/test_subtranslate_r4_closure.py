@@ -63,7 +63,7 @@ R4_CLOSURE_EVIDENCE_SET = [
         "authority_role": "POST_EXECUTION_CLOSURE_AUDIT",
     },
     {
-        "path/source": "/home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_readonly_probe.py",
+        "path/source": str(ROOT / ".opencode/tools/subtranslate_readonly_probe.py"),
         "identity": {"source_commit": COMMIT, "source_tree": TREE, "family_id": FAMILY, "operation_id": OPERATION},
         "timestamp/ordering_data": "fresh probe after canonical reconciliation",
         "hash/fingerprint": {"target_post_sha256": POST_HASH},

@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-CANDIDATE_ROOT = "/home/palhacinho/codex-projects/subtranslate-v238-candidate"
+CANDIDATE_ROOT = str(Path(__file__).resolve().parents[2])
 AUTHORITY_ROOT = "/home/palhacinho/codex-projects/anime-subtitle-translator-review"
 RUNTIME_PARENT = os.path.join(AUTHORITY_ROOT, "runtime-evidence")
 SCHEMA_VERSION = "0.4.1"

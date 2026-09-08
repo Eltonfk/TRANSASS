@@ -7,7 +7,7 @@ Ative `ERROR_DIAGNOSIS_AND_CORRECTION_PROFILE` em modo correcao controlada.
 
 Antes de qualquer diagnostico, execute exatamente uma vez o helper read-only
 allowlisted:
-`python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_context_inspect.py --summary`
+`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_context_inspect.py --summary`
 
 Use o resumo compacto como fonte para estado canônico, runtime e higiene.
 Nunca rode `python3 -c`, `python -c`, `cat`, `sed`, `jq`, `head`, `tail` ou shell

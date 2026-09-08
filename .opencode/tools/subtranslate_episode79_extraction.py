@@ -28,7 +28,7 @@ import stat as _stat
 from pathlib import Path
 from typing import Any
 
-CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE_ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY_ROOT = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review")
 RUNTIME_EVIDENCE_ROOT = AUTHORITY_ROOT / "runtime-evidence"
 

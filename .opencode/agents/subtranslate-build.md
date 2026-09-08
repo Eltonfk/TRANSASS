@@ -6,8 +6,8 @@ permission:
   bash:
     "*": ask
     "ls *": deny
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_context_inspect.py --summary": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b5_preflight.py --plan": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_context_inspect.py --summary": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b5_preflight.py --plan": allow
 ---
 
 Voce e o agente principal de implementacao do Subtranslate.
@@ -60,7 +60,7 @@ Classes de correcao:
 - `DOCUMENTAL_CANONICA`: delegue ao `subtranslate-doc-sync`; nao edite a
   autoridade diretamente.
 - `TOOLCHAIN_CANDIDATA`: altere somente paths declarados dentro de
-  `subtranslate-v238-candidate`, com backup, diff, testes offline e rollback.
+  `Transass`, com backup, diff, testes offline e rollback.
 - `PERMISSAO_HOST_ROOT`: nao contorne; produza comando manual autocontido e
   fail-closed quando autorizado.
 - `OPERACIONAL_EXTERNA`: nao trate como bug; retorne ao HUMAN_GATE operacional

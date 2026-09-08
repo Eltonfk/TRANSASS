@@ -52,7 +52,7 @@ git clone https://github.com/Eltonfk/TRANSASS.git
 cd TRANSASS
 cp .env.example .env
 # Edite MEDIA_ROOT e STATE_DIR antes de continuar.
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.2 .
+docker build --pull=false -f deploy/Dockerfile -t transass:v2.5.2 .
 docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 

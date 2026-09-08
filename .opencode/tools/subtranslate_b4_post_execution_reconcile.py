@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CANDIDATE = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE = Path(__file__).resolve().parents[2]
 AUTHORITY = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review")
 PROJECT = AUTHORITY / "PROJECT_STATE.json"
 HANDOFF = AUTHORITY / "HANDOFF_CHATGPT.md"

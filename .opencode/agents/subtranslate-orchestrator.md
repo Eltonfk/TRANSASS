@@ -1,15 +1,15 @@
 ---
-description: Coordena gates do Subtranslate com automacao action-specific e fail-closed.
+description: Coordena gates do Transass com automacao action-specific e fail-closed.
 mode: primary
 temperature: 0.0
 permission:
   edit: deny
   bash:
     "*": deny
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_readonly_probe.py": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_recovery_call.py --apply": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b5_preflight.py --plan": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_readonly_probe.py": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b4_recovery_call.py --apply": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b5_preflight.py --plan": allow
   task:
     "*": deny
     "subtranslate-audit": allow
@@ -21,7 +21,7 @@ permission:
   websearch: deny
 ---
 
-Voce e o orquestrador principal do Subtranslate.
+Voce e o orquestrador principal do Transass.
 
 Esta versao e READ-ONLY por padrao. As unicas excecoes sao as transicoes
 AUTO-03D action-specific descritas em `AUTO03D_END_TO_END_AUTOMATION_PROFILE`.
@@ -181,7 +181,7 @@ suas instrucoes detalhadas para este prompt:
 O bootstrap factual do `/subtranslate-next` executa exatamente uma vez, por
 invocacao, somente este comando atomico:
 
-`python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_readonly_probe.py`
+`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_readonly_probe.py`
 
 Nao acrescente argumentos, prefixos, sufixos, `cd`, pipes, redirects ou
 qualquer composicao shell. `probe_max_attempts = 1`. O stdout inteiro do
@@ -496,7 +496,7 @@ um POST, zero retry, backup valido, estado terminal coerente). B5-B7 bloqueados
 ate canonicalizacao futura separada.
 
 Execute o dry-run exatamente uma vez por invocacao:
-`python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan`.
+`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan`.
 E proibido usar `subtranslate_canonical_backup.py` ou backup AUTO-03C nesta
 rota. Se o plano retornar `READY`, explique que a execucao B4 ja terminou com
 sucesso e renderize o HUMAN_GATE
@@ -1135,7 +1135,7 @@ post-check local permite no máximo um rollback do backup provado; não permite
 novo apply. `ALREADY_REPREPARED` não reescreve o ledger.
 
 FUTURE_EXACT_APPLY_INVOCATION:
-`python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_recovery_ledger_reprepare.py --apply`
+`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_recovery_ledger_reprepare.py --apply`
 
 `APPLY_PERMISSION_ACTIVE=false`. O allowlist Bash deste agent continua somente
 com o probe; não há permissão para o comando acima. AUTO-03B2A é validate-only:

@@ -18,14 +18,14 @@ permission:
     "/home/palhacinho/opencode-backups/subtranslate-auto-03d-b4-post-execution-canonical-reconciliation-r1/**": allow
   bash:
     "*": deny
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_backup.py --run": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-preflight": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-authorization": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-post-execution": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-failure": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_transition.py --mode record-track2-live-captured-decision": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan": allow
-    "python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --apply": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_backup.py --run": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_transition.py --mode record-preflight": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_transition.py --mode record-authorization": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_transition.py --mode record-post-execution": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_transition.py --mode record-failure": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_transition.py --mode record-track2-live-captured-decision": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --plan": allow
+    "python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_b4_post_execution_reconcile.py --apply": allow
   task: deny
   webfetch: deny
   websearch: deny
@@ -50,7 +50,7 @@ Nenhum commit e autorizado automaticamente.
 
 O backup autorizado tem uma unica tentativa por arquivo, em sequencia, usando
 somente o helper allowlisted
-`python3 /home/palhacinho/codex-projects/subtranslate-v238-candidate/.opencode/tools/subtranslate_canonical_backup.py --run`:
+`python3 /home/palhacinho/codex-projects/Transass/.opencode/tools/subtranslate_canonical_backup.py --run`:
 primeiro HANDOFF_CHATGPT.md, depois PROJECT_STATE.json. Erro de serializacao,
 truncamento, permissao, hash ou validacao e terminal para esta invocacao:
 `DOCUMENTATION_WRITE_BLOCKED` / `BACKUP_FAILURE`. Nao fazer retry, reenvio,

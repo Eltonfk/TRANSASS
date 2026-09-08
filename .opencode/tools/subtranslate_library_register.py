@@ -16,7 +16,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE_ROOT = Path(__file__).resolve().parents[2]
 SRC = CANDIDATE_ROOT / "src/subtranslate"
 LIBRARY_ROOT = Path("/docker/subtranslate/state/anime-subtitle-library")
 MEDIA_ROOT = Path("/Tank/data/Shows")

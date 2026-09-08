@@ -26,7 +26,7 @@ from typing import Any, Mapping
 
 sys.dont_write_bytecode = True
 
-CANDIDATE_ROOT = Path("/home/palhacinho/codex-projects/subtranslate-v238-candidate")
+CANDIDATE_ROOT = Path(__file__).resolve().parents[2]
 AUTHORITY_ROOT = Path("/home/palhacinho/codex-projects/anime-subtitle-translator-review")
 RUNTIME_PARENT = AUTHORITY_ROOT / "runtime-evidence"
 BACKUP_ROOT = Path("/home/palhacinho/opencode-backups")

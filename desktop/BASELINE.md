@@ -17,7 +17,7 @@ artefato de release ou estado de produção foi alterado.
 
 ## Política de versão
 
-`pyproject.toml`, `src/subtranslate/_version.py` e o shell Desktop usam
+`pyproject.toml`, `src/subtranslate/_version.py` e o shell Desktop do Transass usam
 `2.5.0` como versão pública do produto. O identificador `v2_3_8` permanece
 somente para o pipeline canônico e para a branch de origem; a tag histórica
 `v2.5.0` não é reescrita.

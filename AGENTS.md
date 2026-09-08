@@ -1,25 +1,27 @@
-# Subtranslate — Constituição Operacional dos Agentes
+# Transass — Constituição Operacional dos Agentes
 
 ## Workspace autorizado
 
-O workspace gravável desta linha de desenvolvimento é:
+O workspace canônico desta linha de desenvolvimento é:
 
-`/home/palhacinho/codex-projects/subtranslate-v238-candidate`
+`/home/palhacinho/codex-projects/Transass`
 
 Branch esperada:
 
-`candidate/v2.3.8`
+`main`
 
-Não tratar `main`, snapshots, diretórios de review, produção Docker, Library ou state real como áreas de desenvolvimento.
+Não tratar snapshots históricos, produção Docker, Library ou state real como
+áreas de desenvolvimento. O repositório remoto canônico é
+`https://github.com/Eltonfk/TRANSASS`.
 
 ## Fonte de verdade
 
 No início de toda tarefa relevante, reconcilie:
 
-1. Git da candidata — branch, HEAD, status e diff.
+1. Git do repositório canônico — branch, HEAD, status e diff.
 2. Código e documentação ativa deste repositório.
 3. Testes e artefatos persistidos — evidência técnica.
-4. `main` — baseline principal, somente quando a comparação for necessária.
+4. tags/releases — baseline publicado, somente quando a comparação for necessária.
 5. Estado operacional externo — somente quando o usuário o colocar em escopo.
 
 Handoffs temporários e arquivos de estado de outras ferramentas não são fonte
@@ -56,11 +58,11 @@ Não executar sem autorização explícita do usuário na sessão corrente:
 
 Autorização para analisar ou editar código da candidata não implica autorização para qualquer operação acima.
 
-## Trabalho permitido na candidata
+## Trabalho permitido no repositório canônico
 
 Quando a tarefa solicitar implementação:
 
-- trabalhar somente na candidata;
+- trabalhar somente no repositório canônico `Transass`;
 - fazer mudanças pequenas e rastreáveis;
 - preservar comportamento fail-closed;
 - preservar lineage, durabilidade e exactly-once onde aplicáveis;
@@ -88,7 +90,8 @@ Nunca executar automaticamente:
 
 `git commit` só deve ocorrer quando a tarefa ou o usuário autorizar claramente o commit.
 
-Não modificar a worktree `main` a partir desta candidata.
+Alterações em `main` exigem autorização explícita na sessão corrente e devem
+ser pequenas, testadas e rastreáveis.
 
 ## Estado e documentação histórica
 
