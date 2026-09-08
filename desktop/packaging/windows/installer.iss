@@ -9,6 +9,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 DefaultDirName={localappdata}\Transass
 DefaultGroupName=Transass
+OutputDir=..\..\..\Output
 OutputBaseFilename=Transass-Setup-{#AppVersion}
 SetupIconFile="..\..\..\build\transass.ico"
 PrivilegesRequired=lowest

@@ -54,6 +54,7 @@ def test_distribution_manifests_preserve_user_data():
     ).read_text(encoding="utf-8")
     assert "PrivilegesRequired=lowest" in installer
     assert "{localappdata}\\Transass" in installer
+    assert "OutputDir=..\\..\\..\\Output" in installer
     assert "Exec=Transass" in linux_entry
     assert "Icon=transass" in linux_entry
     assert "Categories=AudioVideo;" in linux_entry
