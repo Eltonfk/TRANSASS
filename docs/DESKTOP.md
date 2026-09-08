@@ -16,7 +16,7 @@ Windows x64. Ambos contêm Python, QtWebEngine, núcleo do tradutor,
 ## Artefatos
 
 - `Transass-x86_64.AppImage`
-- `Transass-Setup-2.5.1.exe`
+- `Transass-Setup-2.5.2.exe`
 - bundle Windows `build/desktop/Transass/Transass.exe`
 - `SHA256SUMS` e `sbom.cdx.json`
 

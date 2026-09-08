@@ -2,7 +2,7 @@
 
 O CI gera checksums e SBOM, mas não assina sem certificados protegidos.
 
-- Windows: assinar `Transass.exe`, `Transass-Setup-2.5.1.exe` e desinstalador
+- Windows: assinar `Transass.exe`, `Transass-Setup-2.5.2.exe` e desinstalador
   com `signtool` e SHA-256.
 - Linux: assinar o AppImage e publicar a assinatura ao lado de `SHA256SUMS`.
 

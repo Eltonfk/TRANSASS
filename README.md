@@ -15,7 +15,7 @@ aconteceu quando um modelo decide improvisar jazz.
 O nome junta *translation* com o formato ASS. A coincidência anatômica foi
 aceita pelo comitê de uma pessoa só.
 
-> Versão do aplicativo: **2.5.1**. O identificador `v2_3_8` é o pipeline
+> Versão do aplicativo: **2.5.2**. O identificador `v2_3_8` é o pipeline
 > canônico; ele não é a versão exibida ao usuário.
 
 ## O que ele faz
@@ -39,7 +39,7 @@ aceita pelo comitê de uma pessoa só.
 Baixe o artefato da [release mais recente](https://github.com/Eltonfk/TRANSASS/releases/latest):
 
 - Linux x86_64: `Transass-x86_64.AppImage`;
-- Windows x64: `Transass-Setup-2.5.1.exe`.
+- Windows x64: `Transass-Setup-2.5.2.exe`.
 
 O Desktop abre a interface dentro da própria janela. Existe um servidor Flask
 local nos bastidores, mas ele fica em `127.0.0.1`; o navegador não é convidado
@@ -52,7 +52,7 @@ git clone https://github.com/Eltonfk/TRANSASS.git
 cd TRANSASS
 cp .env.example .env
 # Edite MEDIA_ROOT e STATE_DIR antes de continuar.
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.1 .
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.2 .
 docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 

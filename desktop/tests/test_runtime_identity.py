@@ -6,10 +6,27 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).parents[2] / "src" / "subtranslate"))
 
 from transass_desktop.paths import DesktopPaths
+
+
+@pytest.fixture(autouse=True)
+def isolate_path_environment(monkeypatch):
+    """Keep imports of the Flask app from leaking host paths between tests."""
+
+    for key in (
+        "MEDIA_ROOT",
+        "STATE_DIR",
+        "TRANSLATOR_BASE_LIBRARY",
+        "TRANSLATOR_WEB_STATE_DIR",
+        "ANIME_SUBTITLE_LIBRARY_ROOT",
+        "TRANSLATOR_FAILURE_LEDGER_ROOT",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def test_desktop_public_version_matches_core_version():

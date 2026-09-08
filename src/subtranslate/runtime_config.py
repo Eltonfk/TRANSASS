@@ -36,10 +36,13 @@ def execution_identity(transport_config: dict | None = None) -> dict[str, str]:
     configuration_hash = os.environ.get("CONFIGURATION_HASH") or hashlib.sha256(
         json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    build_commit = os.environ.get("CANDIDATE_COMMIT") or os.environ.get("TRANSASS_BUILD_COMMIT")
+    if not build_commit or build_commit == "unknown":
+        build_commit = f"release-{version}"
     return {
         "prompt_schema_hash": prompt_schema_hash,
         "configuration_hash": configuration_hash,
-        "candidate_commit": os.environ.get("CANDIDATE_COMMIT") or f"release-{version}",
+        "candidate_commit": build_commit,
         "candidate_image_id": os.environ.get("CANDIDATE_IMAGE_ID") or f"transass-{version}-local",
     }
 

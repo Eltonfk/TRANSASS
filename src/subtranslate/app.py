@@ -3016,7 +3016,13 @@ def health():
 def version():
     from _version import __version__
 
-    return jsonify({"version": __version__})
+    identity = execution_identity({"pipeline": _effective_pipeline()})
+    return jsonify({
+        "version": __version__,
+        "pipeline": _effective_pipeline(),
+        "candidate_commit": identity["candidate_commit"],
+        "candidate_image_id": identity["candidate_image_id"],
+    })
 
 
 @app.route("/transport-config", methods=["GET"])

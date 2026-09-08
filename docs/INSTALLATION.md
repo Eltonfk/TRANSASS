@@ -16,7 +16,7 @@ as variáveis `TRANSASS_DATA_DIR`/`TRANSASS_CONFIG_DIR` definirem outro local.
 
 ## Desktop Windows
 
-1. Baixe `Transass-Setup-2.5.1.exe` da release.
+1. Baixe `Transass-Setup-2.5.2.exe` da release.
 2. Execute o instalador para o usuário atual.
 3. Abra **Transass** pelo menu Iniciar.
 4. Escolha a pasta dos episódios e configure o motor.
@@ -47,7 +47,7 @@ WEB_PORT=5050
 Construa e inicie:
 
 ```sh
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.1 .
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.2 .
 docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 

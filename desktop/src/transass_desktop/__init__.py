@@ -5,4 +5,4 @@ try:
     from _version import __version__
 except (ImportError, AttributeError):
     # Keep the Desktop shell importable in isolated tooling environments.
-    __version__ = "2.5.1"
+    __version__ = "2.5.2"

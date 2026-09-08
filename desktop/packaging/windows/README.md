@@ -4,7 +4,7 @@ O build Windows precisa de um host/runner Windows x64; PyInstaller não faz
 cross-build de Windows no Linux. O workflow oficial instala o pacote FFmpeg
 9.0.1 com versão fixada, prepara `ffmpeg.exe` e `ffprobe.exe`, cria
 `Transass.exe`, executa o smoke congelado e empacota
-`Transass-Setup-2.5.1.exe` com Inno Setup.
+`Transass-Setup-2.5.2.exe` com Inno Setup.
 
 ```powershell
 $env:TRANSASS_MEDIA_BIN_DIR = "C:\caminho\para\media-bin"

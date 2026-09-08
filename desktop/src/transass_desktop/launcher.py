@@ -67,7 +67,7 @@ def main() -> int:
     try:
         from _version import __version__  # type: ignore[import-not-found]
     except (ImportError, AttributeError):
-        __version__ = "2.5.1"
+        __version__ = "2.5.2"
     application.setApplicationVersion(str(__version__))
     icon_candidates = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -166,7 +166,7 @@ def main() -> int:
 
     def handle_page_loaded(loaded: bool) -> None:
         if loaded:
-            window.statusBar().showMessage(f"Transass · interface carregada em {url}")
+            window.statusBar().showMessage(f"Transass {__version__} · pronto")
         else:
             window.statusBar().showMessage(
                 "Transass · não foi possível carregar a interface local"
@@ -175,11 +175,11 @@ def main() -> int:
     web_view.loadFinished.connect(handle_page_loaded)
     web_view.setUrl(QUrl(url))
     window.setCentralWidget(web_view)
-    window.statusBar().showMessage(f"Transass · servidor local em {url}")
+    window.statusBar().showMessage(f"Transass {__version__} · iniciando interface…")
 
     menu_bar = window.menuBar()
     file_menu = menu_bar.addMenu("Arquivo")
-    choose_action = file_menu.addAction("Escolher pasta de mídia…")
+    choose_action = file_menu.addAction("Alterar biblioteca de mídia…")
 
     def choose_media_folder() -> None:
         selected = choose_directory(window, initial=paths.media_root)
@@ -189,7 +189,11 @@ def main() -> int:
         paths.selected_media_folder_file.write_text(
             str(selected) + "\n", encoding="utf-8"
         )
-        QMessageBox.information(window, "Pasta selecionada", "A pasta será usada na próxima abertura do Transass.")
+        QMessageBox.information(
+            window,
+            "Biblioteca de mídia alterada",
+            "A nova pasta será usada depois que o Transass for reiniciado.",
+        )
 
     choose_action.triggered.connect(choose_media_folder)
 
@@ -255,7 +259,9 @@ def main() -> int:
         lambda: QMessageBox.information(
             window,
             "Atalhos de teclado",
-            "Ctrl+Shift+M — mostrar ou ocultar a barra de menus",
+            "Ctrl+Shift+M — mostrar ou ocultar a barra de menus\n"
+            "/ — abrir a tradução e focar a busca de episódios\n"
+            "Esc — fechar o diálogo aberto",
         )
     )
     about_action.triggered.connect(
@@ -302,14 +308,14 @@ def main() -> int:
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
 
-        title = QLabel("Chaves API para motores online")
+        title = QLabel("Chaves de API para motores online")
         title.setObjectName("tutorialTitle")
         layout.addWidget(title)
         intro = QLabel(
             "Crie a chave no site oficial do provedor e cole-a em "
             "⚙ Motor. O Transass mantém a credencial localmente e não a "
             "exibe na interface. Nunca publique a chave em repositórios, "
-            "prints ou mensagens."
+            "capturas de tela ou mensagens."
         )
         intro.setObjectName("tutorialIntro")
         intro.setWordWrap(True)

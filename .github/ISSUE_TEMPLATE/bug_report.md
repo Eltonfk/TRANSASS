@@ -21,7 +21,7 @@ O que deveria acontecer.
 O que aconteceu (inclua logs/erros relevantes).
 
 **Ambiente**
-- Versão do Transass: (ex.: 2.5.1)
+- Versão do Transass: (ex.: 2.5.2)
 - SO: (ex.: Ubuntu 24.04)
 - Docker: (sim/não)
 - Motor de tradução: (ollama/gemini/openai_compat)

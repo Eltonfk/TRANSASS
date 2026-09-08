@@ -44,6 +44,7 @@ jobs:
             tests/offline/test_subtranslate_context_inspect.py \
             tests/offline/test_subtranslate_next_routing.py \
             tests/offline/test_subtranslate_command_dispatch.py
+            tests/offline/test_maintenance.py
 
       - name: Compile check
         run: |
@@ -56,4 +57,8 @@ jobs:
 
       - name: Build image
         run: |
-          docker build --pull=false -f deploy/Dockerfile -t transass:ci .
+          echo "TRANSASS_BUILD_VERSION=$(PYTHONPATH=src/subtranslate python3 -c 'from _version import __version__; print(__version__)')" >> "$GITHUB_ENV"
+          docker build --pull=false \
+            --build-arg TRANSASS_BUILD_VERSION="${TRANSASS_BUILD_VERSION}" \
+            --build-arg TRANSASS_BUILD_COMMIT="${GITHUB_SHA}" \
+            -f deploy/Dockerfile -t transass:ci .

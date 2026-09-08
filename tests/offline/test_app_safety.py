@@ -50,6 +50,16 @@ class AppSafetyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {"status": "ok"})
 
+    def test_version_endpoint_exposes_safe_runtime_provenance(self):
+        response = self.client.get("/version")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["version"], "2.5.2")
+        self.assertIn("pipeline", payload)
+        self.assertTrue(payload["candidate_commit"])
+        self.assertTrue(payload["candidate_image_id"])
+
     def test_brand_logo_endpoint_serves_bundled_asset(self):
         response = self.client.get("/transass-logo.png")
 

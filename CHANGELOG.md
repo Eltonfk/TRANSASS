@@ -4,6 +4,23 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [2.5.2] - 2026-09-08
+
+### Adicionado
+- Ferramenta de manutenção com retenção segura e dry-run por padrão para
+  temporários, runs órfãos, staging, ledgers antigos e backups de configuração.
+- Testes determinísticos para garantir que a higienização preserve mídia,
+  acervo e traduções em andamento.
+
+### Alterado
+- Docker e Compose passam a incluir a rotina de manutenção e suas janelas de
+  retenção configuráveis.
+- Interface e documentação revisadas para a operação do release 2.5.2.
+
+### Segurança
+- A limpeza exige `--apply`, recusa execução enquanto houver job ativo e
+  bloqueia alvos fora do diretório de estado.
+
 ## [2.5.1] - 2026-09-07
 
 ### Adicionado

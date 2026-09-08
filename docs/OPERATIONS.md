@@ -15,11 +15,35 @@ entra no relatório.
 ## Atualizar Docker
 
 ```sh
-docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.1 .
+docker build --pull=false -f deploy/Dockerfile -t subtranslate:v2.5.2 .
 docker compose --env-file .env -f deploy/compose.yaml up -d --force-recreate
 ```
 
 Depois confirme `/health`, acesso à mídia e persistência do acervo.
+
+## Higienização do estado
+
+A retenção trata somente artefatos gerados pelo runtime. Ela não remove mídia,
+legendas publicadas, acervo, glossário, SQLite ou a configuração do motor.
+Primeiro gere um relatório; a operação é dry-run por padrão:
+
+```sh
+python3 scripts/transass_maintenance.py --state-dir /caminho/para/STATE_DIR --json
+```
+
+Em um contêiner em execução:
+
+```sh
+docker exec --user 1000 transass \
+  python3 scripts/transass_maintenance.py --state-dir /app/state --json
+```
+
+Depois de conferir os candidatos e fazer um backup do estado, a remoção pode
+ser solicitada explicitamente com `--apply`. A ferramenta recusa a operação se
+houver tradução ativa, protege referências duráveis e bloqueia caminhos fora do
+state. O Compose permite ajustar `TRANSASS_RETENTION_RUN_DAYS`,
+`TRANSASS_RETENTION_STAGING_DAYS`, `TRANSASS_RETENTION_TRANSIENT_HOURS`,
+`TRANSASS_RETENTION_FAILURE_LEDGER_JOBS` e `TRANSASS_RETENTION_CONFIG_BACKUPS`.
 
 ## Diagnóstico
 

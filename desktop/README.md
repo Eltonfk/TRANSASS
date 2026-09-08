@@ -1,6 +1,6 @@
 # Transass Desktop
 
-O Desktop 2.5.1 incorpora a interface Flask numa janela PySide6/QtWebEngine e
+O Desktop 2.5.2 incorpora a interface Flask numa janela PySide6/QtWebEngine e
 compartilha o mesmo núcleo do Docker.
 
 ```text

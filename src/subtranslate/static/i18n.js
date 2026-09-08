@@ -25,6 +25,11 @@
     "nav.library": "▣ Acervo e revisão",
     "nav.memory": "✦ Memória aprovada",
     "nav.diagnostics": "⌨ Diagnóstico",
+    "nav.translate.label": "Traduzir",
+    "nav.inbox.label": "Caixa de entrada",
+    "nav.library.label": "Acervo",
+    "nav.memory.label": "Memória",
+    "nav.diagnostics.label": "Diagnóstico",
     "workflow.step1": "Escolha uma temporada",
     "workflow.step2": "Selecione os episódios",
     "workflow.step3": "Tradução em andamento",
@@ -39,7 +44,7 @@
     "step.2": "Passo 2",
     "step.3": "Passo 3",
     "origin.title": "Origem",
-    "origin.subtitle": "Encontre a temporada que vai ganhar uma bunda… digo, uma legenda nova.",
+    "origin.subtitle": "Escolha a temporada que vai ganhar uma legenda nova.",
     "origin.currentPath": "Caminho atual",
     "origin.subfolders": "Subpastas",
     "origin.openFolder": "Abrir pasta",
@@ -48,7 +53,7 @@
     "origin.activeSeason": "Temporada ativa",
     "origin.noneLoaded": "Nenhuma carregada",
     "queue.title": "Fila de tradução",
-    "queue.subtitle": "Resumo honesto: se algo der ruim, a fila conta. Sem retry ninja.",
+    "queue.subtitle": "Tudo pronto para traduzir — e, se algo der ruim, a fila entrega o boletim.",
     "queue.completed": "concluídos",
     "queue.waiting": "na fila",
     "queue.running": "em execução",
@@ -92,12 +97,22 @@
     "episodes.more": "Carregar mais episódios",
     "status.alreadyTranslated": "Já traduzido",
     "status.notStarted": "Não iniciado",
+    "status.waiting": "Na fila",
+    "status.starting": "Iniciando",
+    "status.translating": "Traduzindo",
+    "status.validating": "Validando",
+    "status.publishing": "Publicando",
+    "status.paused": "Pausada",
+    "status.failed": "Falhou",
+    "status.completed": "Concluído",
+    "status.skippedCurrent": "Ignorado · versão atual validada",
+    "status.blockedAfterFailure": "Não iniciado após falha",
     "status.sourceLibrary": "✓ Biblioteca",
-    "status.sourceSidecar": "✓ Sidecar",
-    "status.sourceInternal": "✓ Track interna",
+    "status.sourceSidecar": "✓ Legenda externa",
+    "status.sourceInternal": "✓ Faixa interna",
     "status.sourcePgs": "⚠ PGS — OCR não suportado",
     "status.sourceAmbiguous": "⚠ Fonte ambígua",
-    "status.sourceError": "⚠ Metadata da fonte",
+    "status.sourceError": "⚠ Metadados da fonte",
     "status.sourceMissing": "✕ Fonte não encontrada",
     "status.auditClean": "✓ sem problemas",
     "status.auditProblems": "⚠ problemas",
@@ -110,8 +125,8 @@
     "status.progress": "Unidades base",
     "status.baseCalls": "Chamadas base",
     "status.semanticCalls": "Chamadas semânticas",
-    "status.retries": "Retries",
-    "status.budget": "Budget",
+    "status.retries": "Tentativas",
+    "status.budget": "Limite de tentativas",
     "status.time": "Tempo",
     "status.lastActivity": "Última atividade",
     "status.failure": "Falha",
@@ -134,23 +149,24 @@
     "inbox.ready": "Pronto para publicar",
     "inbox.review": "Precisa de revisão",
     "inbox.failed": "Falhou",
-    "inbox.noneCandidate": "Nenhum candidato aguardando.",
+    "inbox.noneCandidate": "Nada esperando. Até o robô entregou no prazo.",
     "inbox.nonePending": "Nada pendente.",
     "inbox.noneRecentFailure": "Nenhuma falha recente.",
     "inbox.loading": "Carregando caixa de entrada…",
     "inbox.unavailable": "Não foi possível carregar a caixa de entrada.",
-    "library.kicker": "Biblioteca persistente",
+    "library.kicker": "Acervo persistente",
     "library.title": "Acervo e versões",
     "library.subtitle": "Compare, revise e publique sem apagar o que veio antes.",
     "library.loading": "Carregando acervo…",
-    "library.none": "Nenhuma série anime catalogada.",
+    "library.none": "Nenhuma série de anime catalogada.",
     "library.unavailable": "Não foi possível carregar o acervo.",
     "library.detailLoading": "Carregando episódios e versões…",
     "library.detailUnavailable": "Não foi possível carregar os detalhes desta série.",
     "memory.kicker": "Conhecimento controlado",
-    "memory.title": "Memória aprovada",
+    "memory.title": "Memória e glossário",
     "memory.subtitle": "Sincronizada automaticamente após cada aprovação humana. O robô não vota na própria prova.",
-    "memory.none": "Nenhuma memória ativa.",
+    "memory.none": "Nenhuma correção aprovada ainda. O robô continua sem cola.",
+    "memory.openGlossary": "Abrir glossário",
     "memory.loading": "Carregando memória…",
     "memory.unavailable": "Não foi possível carregar a memória local.",
     "diagnostics.kicker": "Transparência operacional",
@@ -159,21 +175,23 @@
     "diagnostics.download": "Baixar diagnóstico",
     "diagnostics.clear": "Limpar visualização",
     "diagnostics.thermalTelemetry": "mostrar leituras térmicas",
+    "diagnostics.empty": "Tudo quieto. Suspeito, mas saudável.",
     "dialog.library": "Biblioteca",
     "dialog.versionDetails": "Detalhes da versão",
     "dialog.close": "Fechar",
     "dialog.loading": "Carregando…",
     "dialog.configuration": "Configuração",
     "dialog.translationMotor": "Motor de tradução",
-    "dialog.motorIntro": "Um principal, um plano B e zero key passeando pelo navegador.",
+    "dialog.motorIntro": "Um motor principal, um plano B e nenhuma chave de API passeando pelo navegador.",
     "dialog.sourceLanguage": "Idioma padrão da legenda fonte",
     "dialog.destinationHint": "O destino é sempre português do Brasil.",
     "dialog.primaryMotor": "Motor principal",
-    "dialog.fallback": "Fallback opcional",
-    "dialog.noFallback": "— sem fallback —",
-    "dialog.fallbackHint": "O fallback só entra quando o principal falha e deixa evidência própria.",
-    "dialog.keysNote": "As keys ficam somente no servidor, em arquivo local com permissão 600. Campo vazio mantém a key atual.",
+    "dialog.fallback": "Motor alternativo",
+    "dialog.noFallback": "— sem motor alternativo —",
+    "dialog.fallbackHint": "O motor alternativo só entra quando o principal falha e deixa evidência própria.",
+    "dialog.keysNote": "As chaves de API ficam armazenadas localmente e nunca são devolvidas ao navegador. Campo vazio mantém a chave atual.",
     "dialog.testMotor": "Testar motor",
+    "dialog.saveAndTest": "Salvar e testar",
     "dialog.save": "Salvar configuração",
     "dialog.firstOpen": "Primeira abertura",
     "dialog.prepare": "Vamos preparar o Transass",
@@ -182,7 +200,7 @@
     "dialog.checkingMotor": "Verificando o motor…",
     "dialog.configureMotor": "Configurar motor",
     "dialog.finish": "Concluir",
-    "dialog.preflight": "Preflight",
+    "dialog.preflight": "Pré-verificação",
     "dialog.beforeTranslate": "Confira antes de traduzir",
     "dialog.preflightIntro": "Nenhuma chamada foi feita ainda. É só a conta do que vem pela frente.",
     "dialog.startTranslation": "Iniciar tradução",
@@ -193,8 +211,8 @@
     "aria.filterEpisodes": "Filtrar episódios",
     "placeholder.sourceLanguage": "ex.: inglês, espanhol, japonês",
     "placeholder.primaryModel": "Modelo, ex.: qwen3.5:9b",
-    "placeholder.fallbackModel": "Modelo do fallback",
-    "placeholder.baseUrl": "Base URL · somente para OpenAI-compatível"
+    "placeholder.fallbackModel": "Modelo alternativo",
+    "placeholder.baseUrl": "URL-base · somente para OpenAI-compatível"
   };
 
   const qi83 = {
@@ -214,6 +232,11 @@
     "nav.library": "📚🍌",
     "nav.memory": "🧠🍌",
     "nav.diagnostics": "⌨️🐒",
+    "nav.translate.label": "🐒💬➡️🍌",
+    "nav.inbox.label": "📥🍌",
+    "nav.library.label": "📚🍌",
+    "nav.memory.label": "🧠🍌",
+    "nav.diagnostics.label": "⌨️🐒",
     "workflow.step1": "🐒👉📁",
     "workflow.step2": "🐒👉📄",
     "workflow.step3": "🐒💬➡️🍌",
@@ -279,6 +302,16 @@
     "episodes.more": "🐒➡️🍌",
     "status.alreadyTranslated": "🍌✅",
     "status.notStarted": "🐒❓",
+    "status.waiting": "🐒🕐",
+    "status.starting": "▶️🐒",
+    "status.translating": "🐒🔨",
+    "status.validating": "🧐🐒",
+    "status.publishing": "📦➡️",
+    "status.paused": "⏸️🐒",
+    "status.failed": "🐒💥",
+    "status.completed": "✅🍌",
+    "status.skippedCurrent": "🙈✅",
+    "status.blockedAfterFailure": "⛔🐒",
     "status.sourceLibrary": "📚✅",
     "status.sourceSidecar": "📄✅",
     "status.sourceInternal": "💬✅",
@@ -337,12 +370,14 @@
     "memory.none": "🙈",
     "memory.loading": "🐒⏳🧠",
     "memory.unavailable": "🐒💥🧠",
+    "memory.openGlossary": "📚🍌",
     "diagnostics.kicker": "🦍🔍",
     "diagnostics.title": "⌨️🐒",
     "diagnostics.subtitle": "🐒💥➡️📜",
     "diagnostics.download": "📥🍌",
     "diagnostics.clear": "🙈",
     "diagnostics.thermalTelemetry": "🌡️👀",
+    "diagnostics.empty": "🙈",
     "dialog.library": "📚🍌",
     "dialog.versionDetails": "🔍🍌",
     "dialog.close": "❌",
@@ -358,6 +393,7 @@
     "dialog.fallbackHint": "🐒🔄💥",
     "dialog.keysNote": "🔐🐒",
     "dialog.testMotor": "🧪🐒",
+    "dialog.saveAndTest": "💾🧪🐒",
     "dialog.save": "💾🍌",
     "dialog.firstOpen": "🐒👋🍌",
     "dialog.prepare": "🐒👉⚙️",
@@ -375,14 +411,45 @@
     "aria.sourcePath": "Caminho atual",
     "aria.sourceLanguage": "Idioma de origem da legenda",
     "aria.filterEpisodes": "Filtrar episódios",
-    "placeholder.sourceLanguage": "ex.: inglês, espanhol, japonês",
-    "placeholder.primaryModel": "Modelo, ex.: qwen3.5:9b",
-    "placeholder.fallbackModel": "Modelo do fallback",
-    "placeholder.baseUrl": "Base URL · somente para OpenAI-compatível"
+    "placeholder.sourceLanguage": "💬❓",
+    "placeholder.primaryModel": "🧠🐒",
+    "placeholder.fallbackModel": "🔄🧠",
+    "placeholder.baseUrl": "🐒🔌"
   };
 
   const dictionaries = { [FALLBACK]: ptBR, "qi-83": qi83 };
   let current = FALLBACK;
+
+  // QtWebEngine does not guarantee a color-emoji font on Linux bundles.
+  // QI 83 therefore stays intentionally icon-only while using a compact
+  // monochrome alphabet available in the fonts already shipped by Qt.
+  const qi83Icons = new Map([
+    ["🐒", "◉"], ["🦍", "◉"], ["🍌", "◒"], ["💬", "▱"],
+    ["🔄", "↻"], ["🔁", "↺"], ["⚙", "⚙"], ["🧠", "◆"],
+    ["🔌", "⌁"], ["✅", "✓"], ["📍", "◈"], ["📥", "⇩"],
+    ["📚", "▤"], ["⌨", "⌨"], ["👉", "›"], ["📁", "□"],
+    ["📂", "□"], ["📋", "▤"], ["⬅", "←"], ["⏳", "◴"], ["🧮", "▦"],
+    ["📄", "▱"], ["🔨", "⚒"], ["❓", "?"], ["➡", "→"],
+    ["🕐", "◷"], ["💥", "!"], ["⛔", "■"], ["🙈", "○"],
+    ["🎉", "★"], ["⏸", "Ⅱ"], ["▶", "▶"], ["☠", "×"],
+    ["🧪", "◇"], ["🔍", "⌕"], ["🔎", "⌕"], ["🎬", "▸"],
+    ["📦", "▧"], ["🤏", "◇"], ["🖼", "▣"], ["🧐", "◎"],
+    ["🔀", "⇄"], ["📊", "▥"], ["⏱", "◴"], ["📜", "≡"],
+    ["🌡", "△"], ["👀", "◎"], ["🔐", "◆"], ["💾", "▣"],
+    ["👋", "◇"], ["✨", "✦"], ["❌", "×"]
+  ]);
+
+  function iconizeQi83(value) {
+    let source = String(value)
+      .replaceAll("1️⃣", "①").replaceAll("2️⃣", "②").replaceAll("3️⃣", "③")
+      .replaceAll("🇧🇷", "◇");
+    const rendered = Array.from(source).map((character) => {
+      if (qi83Icons.has(character)) return qi83Icons.get(character);
+      if (/^[\s·—→←✓⚠✕◐]$/.test(character)) return character;
+      return "";
+    }).join("").replace(/\s+/g, " ").trim();
+    return rendered || "◇";
+  }
 
   function normalize(locale) {
     return Object.prototype.hasOwnProperty.call(dictionaries, locale) ? locale : FALLBACK;
@@ -394,7 +461,14 @@
 
   function t(key, vars) {
     const value = dictionaries[current]?.[key] ?? dictionaries[FALLBACK]?.[key] ?? key;
-    return interpolate(value, vars);
+    const interpolated = interpolate(value, vars);
+    if (current === "qi-83" && key.startsWith("aria.")) {
+      return interpolate(dictionaries[FALLBACK]?.[key] ?? key, vars);
+    }
+    if (current === "qi-83" && Object.prototype.hasOwnProperty.call(qi83, key)) {
+      return iconizeQi83(interpolated);
+    }
+    return interpolated;
   }
 
   function apply(root = document) {
@@ -416,7 +490,10 @@
       const value = t(element.dataset.i18nAriaLabel, vars);
       if (element.getAttribute("aria-label") !== value) element.setAttribute("aria-label", value);
     });
-    if (root === document) document.documentElement.lang = current === "qi-83" ? "pt-BR" : current;
+    if (root === document) {
+      document.documentElement.lang = current === "qi-83" ? "pt-BR" : current;
+      document.documentElement.dataset.locale = current;
+    }
     const selector = document.getElementById("uiLanguageSelect");
     if (selector && selector.value !== current) selector.value = current;
   }

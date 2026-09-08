@@ -144,4 +144,4 @@ def test_frozen_launcher_supports_version_probe_without_qt():
         text=True,
         env=environment,
     )
-    assert result.stdout.strip() == "Transass 2.5.1"
+    assert result.stdout.strip() == "Transass 2.5.2"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transass"
-version = "2.5.1"
+version = "2.5.2"
 description = "Serviço de tradução de legendas de anime com pipeline canônico, durabilidade forense e motor de tradução escolhível."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,7 +43,7 @@ py-modules = [
     "production_v2_2_5_adapter", "production_v2_2_6_adapter",
     "production_v2_3_0_adapter", "production_v2_3_8_adapter",
     "queue_helpers", "runtime_config", "runtime_paths", "credential_store",
-    "state_migration", "diagnostics", "translation_memory",
+    "state_migration", "diagnostics", "maintenance", "translation_memory",
     "transport_config_store", "transport_providers", "v233_styled_spans",
     "v235_visual_glyph_program", "v236_durable_response_capture",
     "v237_temporal_transform", "v238_base_materializer",
