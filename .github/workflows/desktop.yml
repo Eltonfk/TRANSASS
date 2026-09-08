@@ -8,6 +8,7 @@ on:
 jobs:
   bundle:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -48,11 +49,17 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          choco install ffmpeg --version=9.0.1 -y --no-progress
           $mediaBin = Join-Path $env:RUNNER_TEMP "transass-media-bin"
           New-Item -ItemType Directory -Force -Path $mediaBin | Out-Null
+          $toolsRoot = Join-Path $env:ChocolateyInstall "lib\ffmpeg\tools"
           foreach ($name in @("ffmpeg.exe", "ffprobe.exe")) {
-            $source = (Get-Command $name -CommandType Application -ErrorAction Stop).Source
-            Copy-Item -LiteralPath $source -Destination (Join-Path $mediaBin $name)
+            $source = Get-ChildItem -LiteralPath $toolsRoot -Filter $name -Recurse -File |
+              Select-Object -First 1
+            if ($null -eq $source) {
+              throw "$name não foi encontrado após instalar o pacote FFmpeg"
+            }
+            Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $mediaBin $name)
           }
           "TRANSASS_MEDIA_BIN_DIR=$mediaBin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Generate Windows icon
