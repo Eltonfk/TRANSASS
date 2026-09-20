@@ -14,6 +14,11 @@ from v238_base_materializer import CanonicalV226LiveMaterializer
 from v238_base_materializer import BaseTranslationMaterializerError
 from v238_full_translation_stage import reconcile_atomic_stage_output
 from production_v2_3_8_adapter import _validate_base_presentation_envelope
+from v238_semantic_style_ownership import (
+    extract_semantic_style_ownership,
+    identity_ownership_mapping,
+    render_target_ownership,
+)
 
 
 ASS = """[Script Info]
@@ -421,6 +426,17 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
             self.assertEqual(calls[0]["execution_context"]["operation_budget"], "budget-object")
             self.assertEqual(calls[0]["execution_context"]["model_digest"], "qwen-digest")
             self.assertEqual(result["checkpoint_created"], 1)
+
+    def test_identity_ownership_renders_styled_spans_with_asterisk_tags(self):
+        """Identity mapping must render properly when override blocks contain Aegisub/karaoke asterisks."""
+        source_text = r"{\blur2.25\3c&H6DD7E1&}Y{*\3c&H72D6DB&}o{*\3c&H77D5D5&}u {*\3c&H80D2C8&}t{*\3c&H85D1C2&}a{\3c&H8AD0BC&}u"
+        program, details = extract_semantic_style_ownership(source_text, program_id="test", envelope_id=0)
+        self.assertTrue(details.get("valid"))
+        mapping, trace = identity_ownership_mapping(program, program.source_visible_text)
+        rendered, validation = render_target_ownership(source_text, program.source_visible_text, program, mapping, line_break_template=source_text)
+        self.assertTrue(validation.get("valid"))
+        self.assertIsNotNone(rendered)
+        self.assertNotIn("{*}", rendered)
 
 
 if __name__ == "__main__":

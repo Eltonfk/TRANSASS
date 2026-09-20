@@ -102,6 +102,24 @@ def _style_token_rows(raw: str) -> list[tuple[str, str, tuple[int, int]]]:
     return rows
 
 
+def semantic_style_token_sequence(source_ass: str) -> tuple[tuple[str, str], ...]:
+    """Return the ordered semantic ASS tokens carried by an event.
+
+    Translation can legitimately move an inline token to a different visible
+    offset when the target language changes word lengths.  The token itself,
+    its property and its order remain part of the presentation contract.  A
+    position-independent sequence lets callers prove that contract without
+    mistaking a valid reflow for a dropped style token.
+    """
+    sequence: list[tuple[str, str]] = []
+    _plain, tags = _tag_occurrences(source_ass or "")
+    for tag in tags:
+        for name, value, _span in _style_token_rows(tag.raw):
+            if name in SEMANTIC_STYLE_PROPERTIES:
+                sequence.append((name, value))
+    return tuple(sequence)
+
+
 def _reset_state(state: dict[str, str], base_state: dict[str, str], name: str) -> None:
     if name in base_state:
         state[name] = base_state[name]
@@ -352,7 +370,7 @@ def _remove_inline_semantic_tokens(source_ass: str) -> str:
             body = raw[1:-1]
             for token in reversed(list(STYLE_TOKEN_RE.finditer(body))):
                 body = body[: token.start()] + body[token.end() :]
-            if body:
+            if body.strip("* \t"):
                 out.append("{" + body + "}")
         cursor = match.end()
     out.append((source_ass or "")[cursor:])

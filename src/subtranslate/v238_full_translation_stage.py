@@ -20,6 +20,7 @@ from typing import Any, Mapping
 import pysubs2
 
 import pipeline_v2_1_3 as pipeline
+from ass_structure import break_count, hard_space_count, visible_text
 from v233_styled_spans import extract_semantic_styled_spans
 from v235_visual_glyph_program import extract_visual_glyph_program, reconstruct_visual_glyph_envelope
 from v237_temporal_transform import preserve_temporal_transform_envelope
@@ -38,7 +39,7 @@ from pipeline_v2_1_3 import preserve_source_punctuation_profile
 STAGE_ID = "FULL_TRANSLATION_V238"
 PIPELINE_ID = "v2_3_8"
 _TAG_RE = re.compile(r"\{[^{}]*\}")
-_KARAOKE_TAG_RE = re.compile(r"\\(?:k|K|kf|ko)\d+")
+_KARAOKE_TAG_RE = re.compile(r"\\(?:kt|kf|ko|k)\d+", re.IGNORECASE)
 
 
 def _sha256(path: Path) -> str:
@@ -192,7 +193,7 @@ def reconcile_atomic_stage_output(source: str | Path, output: str | Path, *, con
 
 
 def _plain(value: str) -> str:
-    return _TAG_RE.sub("", value or "").replace(r"\N", " ").replace(r"\h", " ").strip()
+    return visible_text(value or "", line_break=" ").strip()
 
 
 def _safe_existing_envelope(source: str, target: str) -> bool:
@@ -206,9 +207,9 @@ def _safe_existing_envelope(source: str, target: str) -> bool:
     """
     if not isinstance(target, str):
         return False
-    if source.count(r"\N") != target.count(r"\N"):
+    if break_count(source) != break_count(target):
         return False
-    if source.count(r"\h") != target.count(r"\h"):
+    if hard_space_count(source) != hard_space_count(target):
         return False
     if target.count("{") != target.count("}"):
         return False
@@ -339,7 +340,7 @@ def _render_event(
     # expected number of breaks; otherwise use the deterministic source
     # re-enveloping (which restores breaks omitted by a model).
     line_break_template = (
-        target_text if target_text.count(r"\N") == source_text.count(r"\N") else base
+        target_text if break_count(target_text) == break_count(source_text) else base
     )
     details: dict[str, Any] = {"event_id": event_id, "path": "SOURCE_PAYLOAD"}
     if punctuation_changed:
@@ -415,6 +416,22 @@ def _render_event(
                     return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
                 return rendered, {"event_id": event_id, "path": "VISUAL_GLYPH", "trace": trace}
             return _fallback_envelope(source_text, target_text, base), {"event_id": event_id, "path": "REVIEWED_VISUAL_BASE_PRESERVATION"}
+        # Dense per-grapheme colour sequences are visual state, not semantic
+        # spans.  Detect them before the semantic ownership request so a
+        # translated word cannot inherit model-positioned colour tags.
+        counters["visual_detector"] += 1
+        visual_program, visual_details = extract_visual_glyph_program(
+            source_text, program_id=f"event-{event_id}", envelope_id=event_id
+        )
+        if visual_program is not None and visual_details.get("valid") and _plain(target_text) != _plain(source_text):
+            counters["visual_reconstruction"] += 1
+            rendered, trace = reconstruct_visual_glyph_envelope(
+                source_text, _plain(target_text), program=visual_program, base_rebuilder=rc4_replace_source_payload
+            )
+            if rendered is None:
+                raise ResponseProviderError("V238_VISUAL_GLYPH_RECONSTRUCTION_FAILED")
+            details.update({"path": "VISUAL_GLYPH", "trace": trace})
+            return rendered, details
         program, program_details = extract_semantic_style_ownership(
             source_text, program_id=f"event-{event_id}", envelope_id=event_id
         )
@@ -428,7 +445,9 @@ def _render_event(
                     line_break_template=source_text,
                 )
                 if rendered is None or not validation.get("valid"):
-                    raise ResponseProviderError("V238_IDENTITY_OWNERSHIP_RENDER_FAILED")
+                    counters["semantic_ownership_fallback"] = counters.get("semantic_ownership_fallback", 0) + 1
+                    details.update({"path": "SEMANTIC_OWNERSHIP_IDENTITY_FALLBACK", "span_issues": span_issues, "validation": validation})
+                    return _fallback_envelope(source_text, target_text, base), details
                 details.update({"path": "SEMANTIC_OWNERSHIP_IDENTITY", "span_issues": span_issues, "trace": identity_trace})
                 counters["semantic_ownership_render"] += 1
                 return rendered, details
@@ -488,21 +507,6 @@ def _render_event(
             details.update({"path": "SEMANTIC_OWNERSHIP", "span_issues": span_issues, "validation": validation})
             return rendered, details
 
-        # Visual glyph ownership is a separate deterministic envelope.  It is
-        # attempted only when its detector proves a total glyph program.
-        counters["visual_detector"] += 1
-        visual_program, visual_details = extract_visual_glyph_program(
-            source_text, program_id=f"event-{event_id}", envelope_id=event_id
-        )
-        if visual_program is not None and visual_details.get("valid") and _plain(target_text) != _plain(source_text):
-            counters["visual_reconstruction"] += 1
-            rendered, trace = reconstruct_visual_glyph_envelope(
-                source_text, _plain(target_text), program=visual_program, base_rebuilder=rc4_replace_source_payload
-            )
-            if rendered is None:
-                raise ResponseProviderError("V238_VISUAL_GLYPH_RECONSTRUCTION_FAILED")
-            details.update({"path": "VISUAL_GLYPH", "trace": trace})
-            return rendered, details
     return _fallback_envelope(source_text, target_text, base), details
 
 
@@ -523,7 +527,11 @@ def execute_v238_stage(
     provider = _provider(context)
     operation_budget = context.get("operation_budget")
     if operation_budget is not None and callable(getattr(provider, "attach_operation_budget", None)):
-        provider.attach_operation_budget(operation_budget, phase="V238_SEMANTIC")
+        provider.attach_operation_budget(
+            operation_budget,
+            phase="V238_SEMANTIC",
+            provider=str(context.get("provider") or "").strip().casefold() or None,
+        )
     metrics_before = copy.deepcopy(getattr(provider, "metrics", {}))
     model = context.get("model") or context.get("model_override")
     mode = provider.mode
@@ -634,10 +642,8 @@ def validate_v238_candidate(source: str | Path, candidate: str | Path) -> dict[s
     source_path, candidate_path = Path(source), Path(candidate)
     if not source_path.is_file() or not candidate_path.is_file():
         raise FileNotFoundError("V2.3.8 source and candidate files are required")
-    _source_subs_loaded, source_events, _source_profile = pipeline.load_events(source_path, {})
-    _candidate_subs_loaded, candidate_events, _candidate_profile = pipeline.load_events(candidate_path, {})
-    source_subs = pysubs2.load(str(source_path), format="ass")
-    candidate_subs = pysubs2.load(str(candidate_path), format="ass")
+    source_subs, source_events, _source_profile = pipeline.load_events(source_path, {})
+    candidate_subs, candidate_events, _candidate_profile = pipeline.load_events(candidate_path, {})
     if len(source_events) != len(candidate_events) or len(source_subs.events) != len(candidate_subs.events):
         raise ValueError("V2.3.8 candidate event cardinality mismatch")
     for source_event, target_event in zip(source_events, candidate_events):
