@@ -82,6 +82,80 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
             ), encoding="utf-8")
             _validate_base_presentation_envelope(source, base)
 
+    def test_base_validation_allows_reflowed_per_character_style_gradient(self):
+        """A translated sign may move, but must not alter, its style tokens."""
+        with tempfile.TemporaryDirectory(prefix="v238-style-gradient-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&H000000&}A{\c&H111111&}B{\c&H222222&}C{\c&H444444&}D",
+            ), encoding="utf-8")
+            base.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&H000000&}{\c&H111111&}{\c&H222222&}ABC{\c&H444444&}D",
+            ), encoding="utf-8")
+            _validate_base_presentation_envelope(source, base)
+
+    def test_base_validation_rejects_changed_style_token_during_reflow(self):
+        with tempfile.TemporaryDirectory(prefix="v238-style-gradient-invalid-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&H000000&}A{\c&H111111&}B{\c&H222222&}C{\c&H444444&}D",
+            ), encoding="utf-8")
+            base.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&H000000&}{\c&H111111&}{\c&H333333&}ABC{\c&H444444&}D",
+            ), encoding="utf-8")
+            with self.assertRaises(Exception) as raised:
+                _validate_base_presentation_envelope(source, base)
+            self.assertIn("V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH", str(raised.exception))
+
+    def test_base_validation_allows_reflowed_font_size_gradient(self):
+        """A translated styled event with font-size reflow across words must be accepted when tokens match."""
+        with tempfile.TemporaryDirectory(prefix="v238-fs-gradient-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\fs75}D{*\fs80}r{*\fs85}a{*\fs90}g",
+            ), encoding="utf-8")
+            base.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\fs75}{*\fs80}Arrasta{*\fs85}{*\fs90}",
+            ), encoding="utf-8")
+            _validate_base_presentation_envelope(source, base)
+
+    def test_base_validation_allows_event_2818_style_reflow(self):
+        """Regression test for multi-word font size gradient reflow (e.g. S01E04 event 2818)."""
+        with tempfile.TemporaryDirectory(prefix="v238-event2818-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source_text = r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&HFF7D83&\frz296.5\fs75\b1\blur1.2\pos(509.475,1376.01)\fscx142.86\fscy142.86\frx10\fry8}D{*\fs77.608}r{*\fs80.217}a{*\fs82.826}g {*\fs88.044}D{*\fs90.653}r{*\fs93.261}a{*\fs95.869}g {*\fs101.087}D{*\fs103.695}r{*\fs106.305}a{*\fs108.913}g {*\fs114.131}D{*\fs116.739}r{*\fs119.347}a{*\fs121.956}g {*\fs127.174}D{*\fs129.783}r{*\fs132.392}a{\fs135}g"
+            base_text = r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\c&HFF7D83&\frz296.5\fs75\b1\blur1.2\pos(509.475,1376.01)\fscx142.86\fscy142.86\frx10\fry8}{*\fs77.608}{*\fs80.217}Arrasta{*\fs82.826} {*\fs88.044}{*\fs90.653}{*\fs93.261}Arrasta{*\fs95.869} {*\fs101.087}{*\fs103.695}Arrasta{*\fs106.305}{*\fs108.913} {*\fs114.131}{*\fs116.739}Arrasta{*\fs119.347}{*\fs121.956} {*\fs127.174}{*\fs129.783}Arrasta{*\fs132.392}{\fs135}"
+            source.write_text(ASS.replace("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello", source_text), encoding="utf-8")
+            base.write_text(ASS.replace("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello", base_text), encoding="utf-8")
+            _validate_base_presentation_envelope(source, base)
+
+    def test_base_validation_rejects_corrupted_font_size_gradient(self):
+        """A corrupted font-size token during reflow fails closed with V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH."""
+        with tempfile.TemporaryDirectory(prefix="v238-fs-corrupt-") as raw:
+            root = Path(raw)
+            source, base = root / "source.ass", root / "base.ass"
+            source.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\fs75}D{*\fs80}r{*\fs85}a{*\fs90}g",
+            ), encoding="utf-8")
+            base.write_text(ASS.replace(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,hello",
+                r"Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\fs75}{*\fs80}A{*\fs999}rrasta{*\fs90}",
+            ), encoding="utf-8")
+            with self.assertRaises(Exception) as raised:
+                _validate_base_presentation_envelope(source, base)
+            self.assertIn("V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH", str(raised.exception))
+
     def test_checkpoint_fault_points_resume_without_repeating_v226(self):
         for fault in ("after_v226_return", "after_base_ass", "after_manifest", "before_complete"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="v238-resume-") as raw:

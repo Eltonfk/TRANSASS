@@ -15,6 +15,7 @@ from v238_base_materializer import (
 )
 from v238_full_translation_stage import PIPELINE_ID, STAGE_ID, execute_v238_stage
 from v238_semantic_style_ownership import extract_semantic_style_ownership
+from v238_semantic_style_ownership import semantic_style_token_sequence
 from v238_response_provider import ResponseProviderError
 from v238_llama_policy import enforce_v238_runtime_context
 from v238_llama_policy import (
@@ -81,18 +82,24 @@ def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
             continue
         if tuple(base_program.semantic_properties) != tuple(program.semantic_properties):
             raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_PROPERTIES_MISMATCH")
-        # Translating a styled word can legitimately change the number of
-        # visible intervals.  For example, ``Haraguchi-{\\i1}san{\\i0}``
-        # becoming ``Sr Haraguchi{\\i1}!{\\i0}`` moves the same italic
-        # transitions across a different target word and collapses one
-        # segment.  Segment cardinality is therefore not a safe corruption
-        # test.  Require the effective transition sequence and event-wide base
-        # state to remain identical; a dropped or invented style transition
-        # still fails closed.
-        # Reset-to-base transitions are intentionally omitted here.  A reset
-        # that lands at the end of the translated payload may disappear from
-        # the parsed target program even though the event-level ASS style
-        # boundary is equivalent.  Activations/changes must still match.
+        # Translating a styled word can legitimately change the number and
+        # offsets of visible intervals.  For example, a per-character style
+        # gradient (colour, font size, etc.) may be emitted as a prefix of
+        # override blocks before the longer Portuguese word.  Segment cardinality
+        # and parsed offsets are therefore not safe corruption tests.  Compare
+        # the complete ordered semantic token sequence instead: a dropped,
+        # invented or modified style token still fails closed, while a
+        # language-driven reflow is accepted.
+        source_tokens = semantic_style_token_sequence(source_text)
+        base_tokens = semantic_style_token_sequence(base_text)
+        if source_tokens == base_tokens:
+            # When the complete ordered semantic token sequence is identical,
+            # all style properties, values, and ordering are proven preserved.
+            # Differences in word lengths legitimately reflow inline tags and
+            # may coalesce override blocks at boundary offsets (including
+            # offset 0), altering intermediate trace or base_state comparisons
+            # without dropping presentation.
+            continue
         source_trace = tuple(
             (item.get("property"), item.get("after"))
             for item in (program.provenance.get("transition_trace") or [])
@@ -107,7 +114,7 @@ def _validate_base_presentation_envelope(source: Path, base: Path) -> None:
             raise ResponseProviderError("V238_BASE_SEMANTIC_STYLE_SEGMENTS_MISMATCH")
 
 
-def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
+def _translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
     source = Path(args[0] if args else kwargs["source_path"])
     output = Path(args[1] if len(args) > 1 else kwargs["output_path"])
     execution_context = dict(kwargs.pop("execution_context", {}) or {})
@@ -248,6 +255,16 @@ def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
         "candidate_state": llama_phase.get("state", "NO_ELIGIBLE_UNITS"),
     })
     return result
+
+
+def translate_subtitle_file_v2_3_8(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run V2.3.8 and always remove its private V2.2.6 intermediate."""
+    output = Path(args[1] if len(args) > 1 else kwargs["output_path"])
+    intermediate = output.with_name(f".{output.name}.v226-base.ass")
+    try:
+        return _translate_subtitle_file_v2_3_8(*args, **kwargs)
+    finally:
+        intermediate.unlink(missing_ok=True)
 
 
 __all__ = ["APPROVED_PIPELINE", "translate_subtitle_file_v2_3_8"]
