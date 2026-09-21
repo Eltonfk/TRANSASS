@@ -1,0 +1,212 @@
+"""In-memory semantic translation orchestrator for the V3 unified architecture.
+
+Orchestrates batching, sign-group consistency, and linguistic reconstruction
+directly on the in-memory ASSDocumentAST without writing intermediate temporary
+files to disk.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Callable, Sequence
+
+from ass_engine import (
+    ASSDocumentAST,
+    ASSEventNode,
+    clean_residual_override_tags,
+    is_drawing_event,
+    validate_document_structure,
+    visible_text,
+    TAG_RE,
+)
+
+# ---------------------------------------------------------------------------
+# Sign Grouping & Clustering
+# ---------------------------------------------------------------------------
+
+_STYLE_HINTS = ("sign", "plate", "card", "screen", "onscreen", "on-screen", "caption", "title", "text")
+_WORD_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
+
+
+def _visible_words(text: str) -> tuple[str, ...]:
+    clean = visible_text(text, line_break=" ")
+    return tuple(w.casefold().replace("’", "'") for w in _WORD_RE.findall(clean))
+
+
+def is_sign_node(node: ASSEventNode) -> bool:
+    """Determine if an event is a sign/screen text requiring consistency."""
+    if node.is_comment or node.is_drawing:
+        return False
+    style = (node.style or "").casefold()
+    return any(hint in style for hint in _STYLE_HINTS)
+
+
+def cluster_temporal_signs(nodes: list[ASSEventNode], tolerance_ms: int = 200) -> dict[int, int]:
+    """Group sign nodes occurring in overlapping or close temporal intervals."""
+    ordered = sorted(nodes, key=lambda n: (n.start, n.end, n.index))
+    mapping: dict[int, int] = {}
+    current: list[ASSEventNode] = []
+    current_end = -1
+    cluster = 0
+    for node in ordered:
+        if current and node.start > current_end + tolerance_ms:
+            for m in current:
+                mapping[m.index] = cluster
+            cluster += 1
+            current = []
+            current_end = -1
+        current.append(node)
+        current_end = max(current_end, node.end)
+    for m in current:
+        mapping[m.index] = cluster
+    return mapping
+
+
+def build_sign_groups(nodes: list[ASSEventNode]) -> list[dict[str, Any]]:
+    """Build semantic sign groups that share identical wording and styling."""
+    candidates = [n for n in nodes if is_sign_node(n) and _visible_words(n.text)]
+    if not candidates:
+        return []
+    clusters = cluster_temporal_signs(candidates)
+    grouped: dict[tuple[int, str], list[ASSEventNode]] = defaultdict(list)
+
+    for node in candidates:
+        fingerprint = hashlib.sha256(
+            json.dumps({
+                "words": _visible_words(node.text),
+                "breaks": node.text.count(r"\N"),
+                "style": node.style.casefold(),
+            }, sort_keys=True).encode()
+        ).hexdigest()[:16]
+        cluster_id = clusters.get(node.index, node.index)
+        grouped[(cluster_id, fingerprint)].append(node)
+
+    result: list[dict[str, Any]] = []
+    for (cluster_id, fingerprint), members in sorted(grouped.items(), key=lambda x: x[0]):
+        members.sort(key=lambda m: m.index)
+        sample = members[0]
+        result.append({
+            "group_id": f"sign-{cluster_id}-{fingerprint}",
+            "fingerprint": fingerprint,
+            "source_text": sample.visible,
+            "sample_node": sample,
+            "member_indices": [m.index for m in members],
+            "members": members,
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# In-Memory Translation Batching
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TranslationUnit:
+    """Single linguistic unit submitted to the translation provider."""
+    id: int | str
+    source_text: str
+    context: str = ""
+    is_sign: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TranslationBatch:
+    """Group of units sent in one model API request."""
+    batch_index: int
+    units: list[TranslationUnit] = field(default_factory=list)
+
+    @property
+    def total_words(self) -> int:
+        return sum(len(_visible_words(u.source_text)) for u in self.units)
+
+
+class InMemorySemanticOrchestrator:
+    """Orchestrates in-memory batching, dispatching, and envelope reconstruction."""
+
+    def __init__(self, target_batch_size: int = 16) -> None:
+        self.target_batch_size = target_batch_size
+
+    def plan_batches(self, doc: ASSDocumentAST) -> tuple[list[TranslationBatch], list[dict[str, Any]]]:
+        """Create planned dialogue batches and distinct sign groups."""
+        sign_groups = build_sign_groups(doc.events)
+        sign_member_indices = set()
+        for g in sign_groups:
+            sign_member_indices.update(g["member_indices"])
+
+        units: list[TranslationUnit] = []
+
+        # 1. Dialogue units
+        for node in doc.events:
+            if node.is_comment or node.is_drawing:
+                continue
+            if node.index in sign_member_indices:
+                continue
+            vis = node.visible.strip()
+            if not vis or not _visible_words(vis):
+                continue
+            units.append(TranslationUnit(
+                id=node.index,
+                source_text=vis,
+                is_sign=False,
+                metadata={"node": node},
+            ))
+
+        # 2. Add representative sign units (translated once per group)
+        for g in sign_groups:
+            units.append(TranslationUnit(
+                id=g["group_id"],
+                source_text=g["source_text"],
+                is_sign=True,
+                metadata={"group": g},
+            ))
+
+        # 3. Assemble batches
+        batches: list[TranslationBatch] = []
+        current: list[TranslationUnit] = []
+        for u in units:
+            current.append(u)
+            if len(current) >= self.target_batch_size:
+                batches.append(TranslationBatch(batch_index=len(batches), units=current))
+                current = []
+        if current:
+            batches.append(TranslationBatch(batch_index=len(batches), units=current))
+
+        return batches, sign_groups
+
+    def apply_translations(
+        self,
+        doc: ASSDocumentAST,
+        translations: dict[int | str, str],
+        sign_groups: list[dict[str, Any]],
+    ) -> ASSDocumentAST:
+        """Apply received translations to document nodes while preserving ASS style envelopes."""
+        # 1. Map sign group translations to member indices
+        sign_translations_by_index: dict[int, str] = {}
+        for g in sign_groups:
+            trans = translations.get(g["group_id"])
+            if trans:
+                for idx in g["member_indices"]:
+                    sign_translations_by_index[idx] = trans
+
+        # 2. Apply translations to event nodes in-memory
+        for node in doc.events:
+            target_text = sign_translations_by_index.get(node.index) or translations.get(node.index)
+            if not target_text:
+                continue
+
+            orig_raw = node.text
+            # Se o texto original possui tags de posicionamento ou override, preserva o envelope
+            if "{" in orig_raw:
+                tags = "".join(TAG_RE.findall(orig_raw))
+                # Limpa tags residuais vazias ou asteriscos órfãos
+                clean_tags = clean_residual_override_tags(tags)
+                node.text = f"{clean_tags}{target_text}" if clean_tags else target_text
+            else:
+                node.text = target_text
+
+        return doc

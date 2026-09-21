@@ -33,7 +33,8 @@ Documentation = "https://github.com/Eltonfk/TRANSASS#readme"
 package-dir = {"" = "src/subtranslate"}
 py-modules = [
     "_version", "anime_library_hooks", "anime_subtitle_library",
-    "anime_subtitle_translator", "app", "failure_ledger", "glossary",
+    "anime_subtitle_translator", "app", "ass_structure", "failure_ledger",
+    "glossary", "gpu_thermal_guard",
     "human_feedback", "ollama_runtime", "pipeline_lineage",
     "pipeline_orchestrator", "pipeline_registry", "pipeline_v2_1_2",
     "pipeline_v2_1_3", "pipeline_v2_3_0", "production_v2_1_2_adapter",
@@ -58,6 +59,7 @@ py-modules = [
     "v238_semantic_style_ownership", "v238_source_payload",
     "web_audit_retranslation", "web_durable_provider", "web_execution_context",
     "web_retranslation_runner",
+    "ass_engine", "semantic_orchestrator", "effects_engine", "pipeline_v3",
 ]
 
 [tool.setuptools.data-files]
