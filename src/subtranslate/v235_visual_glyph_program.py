@@ -149,7 +149,12 @@ def extract_visual_glyph_program(source_ass: str, *, program_id: str, envelope_i
         return None, {"valid": False, "reason": "SEMANTICALLY_MEANINGFUL_GLYPH_STYLE_UNPROVEN", "transitions": transitions}
     if not lexical_clusters:
         return None, {"valid": False, "reason": "NON_LINGUISTIC_TEXT_FAIL_CLOSED"}
-    unsupported = sorted({name for _index, name, _value, _raw in all_tokens if name not in GLYPH_ALLOWED_PROPERTIES and name in {"b", "i", "u", "fn", "fs"}})
+    # Font, size and weight are allowed only as event-level presentation
+    # state.  If they change after the first grapheme they become semantic
+    # ownership and this visual-only program must fail closed.
+    unsupported = sorted({name for index, name, _value, _raw in all_tokens
+                          if index != 0 and name not in GLYPH_ALLOWED_PROPERTIES
+                          and name in {"b", "i", "u", "fn", "fs"}})
     if unsupported:
         return None, {"valid": False, "reason": "UNSUPPORTED_GLYPH_PROPERTY", "properties": unsupported}
     base = {name: value for name, value in state_by_index[0].items() if name not in PRIMARY_NAMES}
@@ -217,7 +222,7 @@ def _remove_primary_tokens(source: str) -> str:
         if removals:
             body = raw
             for start, end in reversed(removals): body = body[:start] + body[end:]
-            if body != "{}": out.append(body)
+            if body.strip("{}* \t"): out.append(body)
         else: out.append(raw)
         cursor = match.end()
     out.append(source[cursor:])

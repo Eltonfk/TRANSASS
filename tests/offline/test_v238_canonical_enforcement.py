@@ -451,6 +451,25 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
         self.assertFalse(_has_unsafe_break(r"Festival de Música da\NEscola Towa"))
         self.assertTrue(line_break_inside_word(r"vi\Nda"))
 
+    def test_visual_glyph_primary_tokens_cleanup_and_fallback(self):
+        """Visual glyph primary token removal cleans empty asterisk tags and falls back safely."""
+        from v235_visual_glyph_program import _remove_primary_tokens
+        from v238_full_translation_stage import _render_event
+
+        source_text = r"{\blur0.75\fnCorbert\fs45\b1\pos(956.565,713.22)\1c&HC0BFE4&\fscx93\fscy93}T{*\1c&HBDC2DB&}w{*\1c&HBBC6D3&}o {*\1c&HB5CDC2&}o{*\1c&HB3D0B9&}f {*\1c&HADD7A8&}a {*\1c&HA8DE97&}K{*\1c&HA5E18E&}i{*\1c&HA3E586&}n{\1c&HA0E87D&}d"
+        removed = _remove_primary_tokens(source_text)
+        self.assertNotIn("{*}", removed)
+
+        target_text = r"{\blur0.75\fnCorbert\fs45\b1\pos(956.565,713.22)\1c&HC0BFE4&\fscx93\fscy93}{*\1c&HBDC2DB&}Dois{*\1c&HBBC6D3&}{*\1c&HB5CDC2&}{*\1c&HB3D0B9&} {*\1c&HADD7A8&}Iguais{*\1c&HA8DE97&}{*\1c&HA5E18E&}{*\1c&HA3E586&}{\1c&HA0E87D&}"
+        counters = {"source_payload": 0, "visual_detector": 0, "visual_reconstruction": 0, "styled_span_detector": 0, "semantic_ownership_detector": 0}
+        provider = unittest.mock.NonCallableMagicMock(spec=[])
+        rendered, details = _render_event(
+            source_text, target_text, event_id=2592, provider=provider, model="test", counters=counters,
+        )
+        self.assertIsNotNone(rendered)
+        self.assertEqual(details["path"], "VISUAL_GLYPH_BASE_FALLBACK")
+        self.assertEqual(rendered, target_text)
+
 
 if __name__ == "__main__":
     unittest.main()

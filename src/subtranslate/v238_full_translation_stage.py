@@ -429,7 +429,9 @@ def _render_event(
                 source_text, _plain(target_text), program=visual_program, base_rebuilder=rc4_replace_source_payload
             )
             if rendered is None:
-                raise ResponseProviderError("V238_VISUAL_GLYPH_RECONSTRUCTION_FAILED")
+                counters["visual_glyph_fallback"] = counters.get("visual_glyph_fallback", 0) + 1
+                details.update({"event_id": event_id, "path": "VISUAL_GLYPH_BASE_FALLBACK", "trace": trace})
+                return _fallback_envelope(source_text, target_text, base), details
             details.update({"path": "VISUAL_GLYPH", "trace": trace})
             return rendered, details
         program, program_details = extract_semantic_style_ownership(
