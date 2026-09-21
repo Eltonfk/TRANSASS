@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,12 +26,13 @@ from transport_providers import (
     GEMINI_MIN_DELAY_SECONDS,
     GROQ_MIN_DELAY_SECONDS,
     api_key_from_env,
+    migrate_deepseek_model,
     migrate_gemini_model,
     nvidia_model_is_supported,
 )
 
 ALLOWED_PROVIDERS = {"ollama", "openai_compat", "groq", "gemini", "nvidia", "deepseek"}
-ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8"}
+ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8", "v3"}
 DEFAULT_PIPELINE = "v2_3_8"
 DEFAULT_CONFIG = {
     "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
@@ -48,6 +51,7 @@ DEFAULT_CONFIG = {
         "batch_size": 16,          # Mais unidades por chamada = menos chamadas
         "retry_budget": 32,        # Budget suficiente para temporadas completas (evita PRIMARY_RETRIES_EXHAUSTED)
         "delay_between_calls": GEMINI_MIN_DELAY_SECONDS, # Perfil conservador para limites por projeto
+        "physical_call_maximum": 131,
     },
     # Groq profile: limites conservadores para o plano gratuito, com lotes
     # menores para respeitar TPM e retries suficientes para erros transitórios.
@@ -56,15 +60,20 @@ DEFAULT_CONFIG = {
         "batch_size": 4,
         "retry_budget": 16,
         "delay_between_calls": GROQ_MIN_DELAY_SECONDS,
+        "physical_call_maximum": 192,
     },
     "deepseek_profile": {
         "enabled": True,
         "batch_size": 16,
         "retry_budget": 32,
         "delay_between_calls": max(DEEPSEEK_MIN_DELAY_SECONDS, 2.5),
+        # 192 was the Groq ceiling accidentally reused by DeepSeek.  This
+        # remains a finite guard but supports long subtitle files.
+        "physical_call_maximum": 4096,
     },
     "updated_at": None,
 }
+_CONFIG_WRITE_LOCK = threading.RLock()
 
 
 def _model_digest(engine: dict[str, Any] | None) -> str | None:
@@ -80,12 +89,24 @@ def _model_digest(engine: dict[str, Any] | None) -> str | None:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
+def _authorized_model_prefixes(engine: dict[str, Any]) -> list[str]:
+    """Derive model authority from validated server-side engine identity."""
+    provider = str(engine.get("provider") or "").casefold()
+    model = str(engine.get("model") or "").casefold()
+    namespace = model.split("/", 1)[0]
+    family_match = re.match(r"[a-z]+", namespace)
+    return sorted({
+        item for item in (provider, namespace, family_match.group(0) if family_match else "")
+        if item
+    })
+
+
 class TransportConfigError(RuntimeError):
     pass
 
 
 _PUBLIC_ENGINE_FIELDS = ("provider", "model", "base_url")
-_PROFILE_FIELDS = ("enabled", "batch_size", "retry_budget", "delay_between_calls")
+_PROFILE_FIELDS = ("enabled", "batch_size", "retry_budget", "delay_between_calls", "physical_call_maximum")
 
 
 def _public_engine(engine: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -120,7 +141,7 @@ def _environment_engine(
         "ollama": str(os.environ.get("TRANSLATOR_OLLAMA_MODEL") or "qwen3.5:9b").strip(),
         "gemini": "gemini-3.5-flash-lite",
         "groq": "openai/gpt-oss-20b",
-        "deepseek": "deepseek-chat",
+        "deepseek": "deepseek-v4-flash",
         "nvidia": "meta/llama-3.1-8b-instruct",
     }
     model = str(os.environ.get(model_var) or default_models.get(provider) or "").strip()
@@ -128,6 +149,8 @@ def _environment_engine(
         raise TransportConfigError(f"{model_var}: modelo obrigatório para {provider}")
     if provider == "gemini":
         model = migrate_gemini_model(model)
+    elif provider == "deepseek":
+        model = migrate_deepseek_model(model)
     engine: dict[str, Any] = {"provider": provider, "model": model}
     base_url = str(os.environ.get(base_url_var) or "").strip()
     if base_url:
@@ -215,6 +238,8 @@ def load_transport_config(path: Path) -> dict[str, Any]:
         primary = dict(merged.get("primary") or {})
         if str(primary.get("provider") or "").lower() == "gemini":
             primary["model"] = migrate_gemini_model(primary.get("model") or "")
+        elif str(primary.get("provider") or "").lower() == "deepseek":
+            primary["model"] = migrate_deepseek_model(primary.get("model") or "")
         primary["base_url"] = _effective_ollama_base_url(primary)
         merged["primary"] = primary
         merged["model_digest"] = _model_digest(merged.get("primary"))
@@ -237,6 +262,9 @@ def load_transport_config(path: Path) -> dict[str, Any]:
     if str(primary.get("provider") or "").lower() == "gemini":
         primary["model"] = migrate_gemini_model(primary.get("model") or "")
         merged["primary"] = primary
+    elif str(primary.get("provider") or "").lower() == "deepseek":
+        primary["model"] = migrate_deepseek_model(primary.get("model") or "")
+        merged["primary"] = primary
     effective_base_url = _effective_ollama_base_url(primary)
     primary_changed = primary["model"] != primary_model_before
     if primary_changed or effective_base_url != (str(primary.get("base_url") or "").strip() or None):
@@ -249,13 +277,16 @@ def load_transport_config(path: Path) -> dict[str, Any]:
     if str(fallback.get("provider") or "").lower() == "gemini":
         fallback["model"] = migrate_gemini_model(fallback.get("model") or "")
         merged["fallback"] = fallback
+    elif str(fallback.get("provider") or "").lower() == "deepseek":
+        fallback["model"] = migrate_deepseek_model(fallback.get("model") or "")
+        merged["fallback"] = fallback
     effective_fallback_url = _effective_ollama_base_url(fallback)
     fallback_changed = str(fallback.get("model") or "") != fallback_model_before
     if fallback and (fallback_changed or effective_fallback_url != (str(fallback.get("base_url") or "").strip() or None)):
         fallback["base_url"] = effective_fallback_url
         merged["fallback"] = fallback
         merged["fallback_model_digest"] = _model_digest(fallback)
-    profile = dict(merged.get("gemini_profile") or {})
+    profile = {**DEFAULT_CONFIG["gemini_profile"], **dict(merged.get("gemini_profile") or {})}
     # O modelo pertence exclusivamente ao motor primário/fallback. Perfis
     # antigos podiam duplicá-lo aqui; descartar o campo evita identidade
     # obsoleta e mantém o perfil limitado à política de chamadas.
@@ -264,13 +295,22 @@ def load_transport_config(path: Path) -> dict[str, Any]:
     profile_delay = max(GEMINI_MIN_DELAY_SECONDS, raw_profile_delay)
     if profile_delay != raw_profile_delay or "model" in (merged.get("gemini_profile") or {}):
         profile["delay_between_calls"] = profile_delay
-        merged["gemini_profile"] = profile
-    groq_profile = dict(merged.get("groq_profile") or {})
+    merged["gemini_profile"] = profile
+    groq_profile = {**DEFAULT_CONFIG["groq_profile"], **dict(merged.get("groq_profile") or {})}
     raw_groq_batch = int(groq_profile.get("batch_size", 4) or 4)
     safe_groq_batch = min(4, max(1, raw_groq_batch))
     if safe_groq_batch != raw_groq_batch:
         groq_profile["batch_size"] = safe_groq_batch
-        merged["groq_profile"] = groq_profile
+    merged["groq_profile"] = groq_profile
+    deepseek_profile = {**DEFAULT_CONFIG["deepseek_profile"], **dict(merged.get("deepseek_profile") or {})}
+    raw_deepseek_batch = int(deepseek_profile.get("batch_size", 16) or 16)
+    safe_deepseek_batch = min(30, max(1, raw_deepseek_batch))
+    raw_deepseek_physical = int(deepseek_profile.get("physical_call_maximum", 4096) or 4096)
+    safe_deepseek_physical = min(16384, max(1, raw_deepseek_physical))
+    if safe_deepseek_batch != raw_deepseek_batch or safe_deepseek_physical != raw_deepseek_physical:
+        deepseek_profile["batch_size"] = safe_deepseek_batch
+        deepseek_profile["physical_call_maximum"] = safe_deepseek_physical
+    merged["deepseek_profile"] = deepseek_profile
     if not merged.get("model_digest"):
         merged["model_digest"] = _model_digest(merged.get("primary"))
     if not merged.get("primary_model_digest"):
@@ -316,7 +356,7 @@ def public_transport_config(path: Path) -> dict[str, Any]:
     }
 
 
-def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def _save_transport_config_unlocked(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     """Validate and persist a transport config.  ``keys`` entries are stored
     only for providers present in primary/fallback; empty strings remove them."""
     primary = payload.get("primary") or {}
@@ -334,6 +374,8 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             raise TransportConfigError(f"{label}: modelo obrigatório")
         if provider == "gemini":
             model = migrate_gemini_model(model)
+        elif provider == "deepseek":
+            model = migrate_deepseek_model(model)
         if provider == "nvidia" and not nvidia_model_is_supported(model):
             raise TransportConfigError(
                 f"{label}: NVIDIA exige um modelo com namespace, por exemplo meta/llama-3.1-8b-instruct"
@@ -342,6 +384,18 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             raise TransportConfigError(f"{label}: openai_compat exige base_url")
         raw_base_url = engine.get("base_url")
         base_url = str(raw_base_url).strip() if raw_base_url else None
+        if provider in {"gemini", "groq", "nvidia", "deepseek"} and base_url:
+            raise TransportConfigError(f"{label}: endpoint personalizado não é permitido para {provider}")
+        if base_url:
+            parsed = urlsplit(base_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise TransportConfigError(f"{label}: base_url inválida")
         return {"provider": provider, "model": model, "base_url": base_url}
 
     primary_clean = _validate_engine(primary, "primary")
@@ -379,14 +433,10 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
     pipeline = str(payload.get("pipeline") or DEFAULT_PIPELINE).strip().lower()
     if pipeline not in ALLOWED_PIPELINES:
         raise TransportConfigError(f"pipeline inválido: {pipeline}")
-    authorized = payload.get("authorized_primary_models")
-    if authorized is None:
-        authorized = ["qwen", "gemini", "nvidia", "meta", "openai", "llama", "deepseek"]
-    if not isinstance(authorized, list) or not authorized or not all(isinstance(p, str) and p for p in authorized):
-        raise TransportConfigError("authorized_primary_models inválido")
-    model_digest = str(payload.get("model_digest") or "").strip() or _model_digest(primary_clean)
-    primary_model_digest = str(payload.get("primary_model_digest") or model_digest or "").strip() or _model_digest(primary_clean)
-    fallback_model_digest = str(payload.get("fallback_model_digest") or "").strip() or _model_digest(fallback_clean)
+    authorized = _authorized_model_prefixes(primary_clean)
+    model_digest = _model_digest(primary_clean)
+    primary_model_digest = model_digest
+    fallback_model_digest = _model_digest(fallback_clean)
     # Gemini profile: merge com defaults quando provider=gemini
     gemini_profile = payload.get("gemini_profile") or {}
     default_gemini = DEFAULT_CONFIG.get("gemini_profile", {})
@@ -398,6 +448,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             GEMINI_MIN_DELAY_SECONDS,
             float(gemini_profile.get("delay_between_calls", default_gemini.get("delay_between_calls", GEMINI_MIN_DELAY_SECONDS)) or 0.0),
         ),
+        "physical_call_maximum": min(16384, max(1, int(gemini_profile.get("physical_call_maximum", default_gemini.get("physical_call_maximum", 131)) or 131))),
     }
     groq_profile = payload.get("groq_profile") or {}
     default_groq = DEFAULT_CONFIG.get("groq_profile", {})
@@ -409,6 +460,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             GROQ_MIN_DELAY_SECONDS,
             float(groq_profile.get("delay_between_calls", default_groq.get("delay_between_calls", GROQ_MIN_DELAY_SECONDS)) or 0.0),
         ),
+        "physical_call_maximum": min(16384, max(1, int(groq_profile.get("physical_call_maximum", default_groq.get("physical_call_maximum", 192)) or 192))),
     }
     deepseek_profile = payload.get("deepseek_profile") or {}
     default_deepseek = DEFAULT_CONFIG.get("deepseek_profile", {})
@@ -420,6 +472,7 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
             DEEPSEEK_MIN_DELAY_SECONDS,
             float(deepseek_profile.get("delay_between_calls", default_deepseek.get("delay_between_calls", 2.5)) or 0.0),
         ),
+        "physical_call_maximum": min(16384, max(1, int(deepseek_profile.get("physical_call_maximum", default_deepseek.get("physical_call_maximum", 4096)) or 4096))),
     }
 
     config = {
@@ -460,17 +513,27 @@ def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]
 
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.is_file():
-        backup = path.with_name(f"{path.name}.bak-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+        backup = path.with_name(f"{path.name}.bak-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         os.chmod(backup, 0o600)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=str(path.parent))
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
-        tmp_path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
+        with tmp_path.open("w", encoding="utf-8") as stream:
+            json.dump(config, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
         _fsync_dir(path.parent)
     finally:
         tmp_path.unlink(missing_ok=True)
     return public_transport_config(path)
+
+
+def save_transport_config(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Serialize the process-local read/modify/write and keyring transaction."""
+    with _CONFIG_WRITE_LOCK:
+        return _save_transport_config_unlocked(path, payload)

@@ -81,6 +81,7 @@ class DurableResponseProvider:
         fake: Callable[[dict[str, Any]], Any] | Mapping[str, Any] | None = None,
         expected_capture_ids: Mapping[str, str] | None = None,
         transport_semantics: str | None = None,
+        provider_name: str | None = None,
     ) -> None:
         self.mode = str(mode or "").upper()
         if self.mode not in self.MODES:
@@ -107,13 +108,22 @@ class DurableResponseProvider:
         }
         self.operation_budget: Any = None
         self.operation_budget_phase = "V238_SEMANTIC"
+        self.provider_name = str(provider_name or "").strip().casefold()
+        self.operation_budget_provider = self.provider_name or None
         self.before_call: Callable[[], bool] | None = None
         if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
             raise ValueError(f"{self.mode} requires an explicit capture_root")
 
-    def attach_operation_budget(self, budget: Any, *, phase: str = "V238_SEMANTIC") -> None:
+    def attach_operation_budget(
+        self,
+        budget: Any,
+        *,
+        phase: str = "V238_SEMANTIC",
+        provider: str | None = None,
+    ) -> None:
         self.operation_budget = budget
         self.operation_budget_phase = str(phase)
+        self.operation_budget_provider = str(provider or self.provider_name or "").strip().casefold() or None
 
     def attach_before_call(self, callback: Callable[[], bool] | None) -> None:
         """Install a cooperative gate checked before every provider call."""
@@ -192,7 +202,21 @@ class DurableResponseProvider:
             if self.operation_budget is not None:
                 model_tag = str(payload.get("model") or "qwen3.5:9b")
                 model_digest = payload.get("model_digest")
-                self.operation_budget.reserve(model_tag=model_tag, model_digest=model_digest, phase=self.operation_budget_phase)
+                try:
+                    self.operation_budget.reserve(
+                        model_tag=model_tag,
+                        model_digest=model_digest,
+                        phase=self.operation_budget_phase,
+                        provider=self.operation_budget_provider,
+                    )
+                except TypeError:
+                    # Keep compatibility with injected test budgets using the
+                    # pre-provider-identity reserve signature.
+                    self.operation_budget.reserve(
+                        model_tag=model_tag,
+                        model_digest=model_digest,
+                        phase=self.operation_budget_phase,
+                    )
             call_dir.parent.mkdir(parents=True, exist_ok=True)
             capture = DurableResponseCaptureV1(call_dir, call_id=call_id)
             capture.prepare(payload, {"mode": self.mode, "capture_id": call_id})

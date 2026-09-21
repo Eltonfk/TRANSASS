@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from production_v2_2_6_adapter import translate_subtitle_file_v2_2_6
+from production_v2_2_6_adapter import V226_GLOBAL_COMPAT_LOCK, translate_subtitle_file_v2_2_6
 
 
 _OPERATION_ID_LOCK = threading.Lock()
@@ -420,6 +420,7 @@ class CanonicalV226LiveMaterializer:
         # an already-existing destination.  mkstemp gives us a collision-free
         # name, but its placeholder must not be forwarded as an existing file.
         temporary.unlink(missing_ok=True)
+        V226_GLOBAL_COMPAT_LOCK.acquire()
         saved_budget = os.environ.get("V213_HARD_STOP_CALLS")
         configured_budget = context.get("hard_call_budget")
         if configured_budget is not None:
@@ -493,6 +494,7 @@ class CanonicalV226LiveMaterializer:
                     os.environ.pop("V213_HARD_STOP_CALLS", None)
                 else:
                     os.environ["V213_HARD_STOP_CALLS"] = saved_budget
+            V226_GLOBAL_COMPAT_LOCK.release()
             temporary.unlink(missing_ok=True)
 
 

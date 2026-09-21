@@ -84,7 +84,7 @@ def test_c1_profiles_reach_orchestrator_with_provider_specific_budgets():
     cases = (
         ("gemini", "gemini_profile", 131, 16),
         ("groq", "groq_profile", 192, 4),
-        ("deepseek", "deepseek_profile", 192, 16),
+        ("deepseek", "deepseek_profile", 4096, 16),
     )
     for provider, profile_key, expected_physical_maximum, expected_batch_size in cases:
         config = {
@@ -216,7 +216,7 @@ def test_c2_deepseek_karaoke_uses_selected_network_endpoint(monkeypatch, tmp_pat
     assert value == "Poste de luz lunar"
     assert len(calls) == 1
     assert calls[0][0] == "https://api.deepseek.com/v1/chat/completions"
-    assert calls[0][1]["model"] == "deepseek-chat"
+    assert calls[0][1]["model"] == "deepseek-v4-flash"
     assert calls[0][1]["messages"][-1]["content"].startswith("Traduza somente")
     assert "response_format" not in calls[0][1]
     assert calls[0][1]["thinking"] == {"type": "disabled"}
@@ -418,7 +418,7 @@ def test_m10_build_context_does_not_inject_for_live():
 
 def test_c4_default_pipeline_is_v238():
     assert c4.DEFAULT_PIPELINE == "v2_3_8"
-    assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8"}
+    assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8", "v3"}
 
 
 def test_c4_missing_config_has_model_identity_for_live_jobs(tmp_path):
@@ -437,7 +437,7 @@ def test_c4_missing_config_bootstraps_non_secret_transport_environment(tmp_path,
 
     assert config["primary"] == {
         "provider": "deepseek",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "base_url": None,
     }
     assert config["fallback"] == {
@@ -563,15 +563,14 @@ def test_c4_save_and_load_pipeline():
         saved = c4.save_transport_config(path, {
             "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
             "pipeline": "v2_3_8",
-            "authorized_primary_models": ["qwen", "gemini"],
-            "model_digest": "abc123",
         })
         assert saved["pipeline"] == "v2_3_8"
-        assert saved["authorized_primary_models"] == ["qwen", "gemini"]
-        assert saved["model_digest"] == "abc123"
+        assert "qwen" in saved["authorized_primary_models"]
+        assert saved["model_digest"]
         loaded = c4.load_transport_config(path)
         assert loaded["pipeline"] == "v2_3_8"
-        assert loaded["model_digest"] == "abc123"
+        assert loaded["model_digest"] == saved["model_digest"]
+        assert loaded["authorized_primary_models"] == saved["authorized_primary_models"]
 
 
 def test_c4_rejects_invalid_pipeline():

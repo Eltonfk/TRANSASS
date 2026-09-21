@@ -17,12 +17,14 @@ from typing import Any, Callable, Sequence
 from ass_engine import (
     ASSDocumentAST,
     ASSEventNode,
+    break_count,
     clean_residual_override_tags,
     is_drawing_event,
     validate_document_structure,
     visible_text,
     TAG_RE,
 )
+from ass_structure import replace_source_payload
 
 # ---------------------------------------------------------------------------
 # Sign Grouping & Clustering
@@ -193,20 +195,22 @@ class InMemorySemanticOrchestrator:
                 for idx in g["member_indices"]:
                     sign_translations_by_index[idx] = trans
 
-        # 2. Apply translations to event nodes in-memory
+        # 2. Apply translations to event nodes in-memory using payload replacement
         for node in doc.events:
             target_text = sign_translations_by_index.get(node.index) or translations.get(node.index)
             if not target_text:
                 continue
 
+            # Normaliza quebras de linha literais (\n) para controle ASS (\N)
+            normalized_target = target_text.replace("\r\n", r"\N").replace("\n", r"\N")
+
             orig_raw = node.text
-            # Se o texto original possui tags de posicionamento ou override, preserva o envelope
-            if "{" in orig_raw:
-                tags = "".join(TAG_RE.findall(orig_raw))
-                # Limpa tags residuais vazias ou asteriscos órfãos
-                clean_tags = clean_residual_override_tags(tags)
-                node.text = f"{clean_tags}{target_text}" if clean_tags else target_text
+            has_tags = "{" in orig_raw or r"\h" in orig_raw
+            break_mismatch = break_count(orig_raw) != break_count(normalized_target)
+
+            if has_tags or (break_count(orig_raw) > 0 and break_mismatch):
+                node.text = replace_source_payload(orig_raw, normalized_target)
             else:
-                node.text = target_text
+                node.text = normalized_target
 
         return doc

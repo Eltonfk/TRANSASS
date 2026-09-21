@@ -77,3 +77,66 @@ def test_in_memory_batch_planning_and_application():
     assert translated_doc[1].text == r"{\an8}Entrada da Biblioteca"
     assert translated_doc[2].text == r"{\an8\c&HFF0000&}Entrada da Biblioteca"
     assert translated_doc[3].text == "Vamos entrar."
+
+
+def test_dialogue_line_break_normalization():
+    from ass_engine import line_break_inside_word, validate_document_structure
+
+    raw_ass = (
+        "[Script Info]\nTitle: Test\nScriptType: v4.00+\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,I agreed to sell it for 100,000 points.\\NI don't have a choice.\n"
+    )
+
+    doc = ASSDocumentAST.from_string(raw_ass)
+    orig_doc = ASSDocumentAST.from_string(raw_ass)
+    orchestrator = InMemorySemanticOrchestrator()
+
+    # O modelo retorna quebra de linha literal \n
+    simulated_translations = {
+        0: "Eu concordei em vendê-lo por 100.000 pontos.\nNão tenho escolha.",
+    }
+
+    translated_doc = orchestrator.apply_translations(doc, simulated_translations, [])
+
+    # Deve ser convertido para \N sem quebrar no meio de palavras ou números
+    assert translated_doc[0].text == r"Eu concordei em vendê-lo por 100.000 pontos.\NNão tenho escolha."
+    assert line_break_inside_word(translated_doc[0].text) is False
+    val = validate_document_structure(orig_doc, translated_doc)
+    assert val["valid"] is True
+
+
+def test_dialogue_missing_line_break_reconciled():
+    from ass_engine import validate_document_structure
+
+    raw_ass = (
+        "[Script Info]\nTitle: Test\nScriptType: v4.00+\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Apparently he had a falling-out with\NClass C and got driven out of the camp." "\n"
+    )
+
+    doc = ASSDocumentAST.from_string(raw_ass)
+    orig_doc = ASSDocumentAST.from_string(raw_ass)
+    orchestrator = InMemorySemanticOrchestrator()
+
+    # O modelo traduz sem a quebra \N
+    simulated_translations = {
+        0: "Aparentemente ele se desentendeu com a Classe C e foi expulso do acampamento.",
+    }
+
+    translated_doc = orchestrator.apply_translations(doc, simulated_translations, [])
+
+    # Deve reconstruir a quebra proporcionalmente
+    assert r"\N" in translated_doc[0].text
+    val = validate_document_structure(orig_doc, translated_doc)
+    assert val["valid"] is True
+
+

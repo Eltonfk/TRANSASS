@@ -36,6 +36,153 @@ class PipelineV3Error(RuntimeError):
     pass
 
 
+def make_v3_transport_call(
+    transport: Any,
+    *,
+    source_language: str = "inglês",
+    target_language: str = "português do Brasil (pt-BR)",
+    thermal_gate: Callable[[], bool] | None = None,
+    delay: float = 0.0,
+) -> Callable[[list[dict[str, Any]]], dict[str | int, str]]:
+    """Build a robust, structured batch transport caller for Pipeline V3."""
+    import json
+    from web_durable_provider import _http_post
+
+    effective_delay = delay or getattr(transport, "delay_between_calls", 0.0)
+
+    def _call_model(canonical_payload: dict[str, Any]) -> str:
+        if thermal_gate and thermal_gate():
+            raise RuntimeError("TRANSLATION_CANCELLED_OR_THERMAL_STOP")
+        request_body = transport.build_request(canonical_payload)
+        raw_bytes = _http_post(
+            transport.endpoint(),
+            transport.headers(),
+            request_body,
+            delay=effective_delay,
+        )
+        return transport.extract_content(raw_bytes)
+
+    def _clean_json_markdown(text: str) -> str:
+        text = text.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        return text
+
+    def _single_fallback_translate(source_text: str) -> str:
+        canonical_payload = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        f"Você é um tradutor profissional de legendas de anime. "
+                        f"Traduza a legenda de {source_language} para {target_language}. "
+                        "Mantenha tags ASS intactas. Retorne APENAS a tradução em texto simples sem comentários."
+                    ),
+                },
+                {"role": "user", "content": source_text},
+            ],
+            "options": {"temperature": 0.0, "num_predict": 512},
+            "stream": False,
+            "think": False,
+            "response_mode": "text",
+        }
+        content = _call_model(canonical_payload)
+        return content.strip().strip('"').strip("'")
+
+    def transport_call(payload: list[dict[str, Any]]) -> dict[str | int, str]:
+        if not payload:
+            return {}
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "translations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "translation": {"type": "string"},
+                        },
+                        "required": ["id", "translation"],
+                    },
+                }
+            },
+            "required": ["translations"],
+        }
+
+        system_prompt = (
+            f"Você é um tradutor profissional de legendas de anime para {target_language}. "
+            "Traduza os itens fornecidos mantendo o estilo natural e adequado para legendas. "
+            "Mantenha tags ASS (ex: \\N, {\\i1}, etc.) intactas no texto traduzido. "
+            "Retorne estritamente um objeto JSON com o formato: "
+            '{"translations": [{"id": "<id>", "translation": "<texto traduzido>"}]}. '
+            "Retorne APENAS o JSON válido."
+        )
+
+        user_content = json.dumps(
+            {
+                "source_language": source_language,
+                "target_language": target_language,
+                "items": [
+                    {"id": str(item["id"]), "text": item["source_text"]}
+                    for item in payload
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+        canonical_payload = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "options": {"temperature": 0.0, "num_predict": 4096},
+            "format": schema,
+            "stream": False,
+            "think": False,
+        }
+
+        results: dict[str | int, str] = {}
+        try:
+            raw_text = _call_model(canonical_payload)
+            cleaned = _clean_json_markdown(raw_text)
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict) and "translations" in parsed:
+                for item in parsed["translations"]:
+                    if isinstance(item, dict) and "id" in item and "translation" in item:
+                        item_key = str(item["id"])
+                        translation = str(item["translation"]).strip()
+                        results[item_key] = translation
+                        try:
+                            results[int(item_key)] = translation
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+        # Fallback individual para qualquer ID ausente
+        for item in payload:
+            item_id = item["id"]
+            if item_id not in results and str(item_id) not in results:
+                try:
+                    fallback_text = _single_fallback_translate(item["source_text"])
+                    if fallback_text:
+                        results[item_id] = fallback_text
+                        results[str(item_id)] = fallback_text
+                except Exception:
+                    pass
+
+        return results
+
+    return transport_call
+
+
 def translate_subtitle_file_v3(
     input_path: str | Path,
     output_path: str | Path,
@@ -44,6 +191,7 @@ def translate_subtitle_file_v3(
     target_batch_size: int = 16,
     enable_visual_effects: bool = True,
     enable_karaoke: bool = True,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Execute the end-to-end V3 in-memory translation pipeline."""
     start_time = time.monotonic()
@@ -64,7 +212,7 @@ def translate_subtitle_file_v3(
 
     # 3. Execução das chamadas de tradução
     translations: dict[int | str, str] = {}
-    for batch in batches:
+    for batch_idx, batch in enumerate(batches):
         payload = [
             {"id": unit.id, "source_text": unit.source_text, "is_sign": unit.is_sign}
             for unit in batch.units
@@ -75,6 +223,8 @@ def translate_subtitle_file_v3(
             res = batch_results.get(str(unit.id)) or batch_results.get(unit.id)
             if res:
                 translations[unit.id] = res
+        if progress_callback:
+            progress_callback(batch_idx + 1, len(batches))
 
     # 4. Aplicação das traduções em memória
     working_doc = orchestrator.apply_translations(working_doc, translations, sign_groups)
@@ -95,6 +245,7 @@ def translate_subtitle_file_v3(
         original_doc,
         working_doc,
         segmented_indices=sign_member_indices,
+        allow_tag_reflow_indices=sign_member_indices,
     )
 
     if not validation["valid"]:

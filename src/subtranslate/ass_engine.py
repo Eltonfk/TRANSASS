@@ -376,10 +376,13 @@ def validate_document_structure(
         if allow_tag_reflow_indices is None or index not in allow_tag_reflow_indices:
             if sorted(TAG_RE.findall(left_text)) != sorted(TAG_RE.findall(right_text)):
                 issues.append(f"evento {index}: tags alteradas")
-
-        for flag in validate_inline_tags(left_text, right_text):
-            if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_DUPLICATION", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
-                issues.append(f"evento {index}: {flag}")
+            for flag in validate_inline_tags(left_text, right_text):
+                if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_DUPLICATION", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
+                    issues.append(f"evento {index}: {flag}")
+        else:
+            for flag in validate_inline_tags(left_text, right_text):
+                if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
+                    issues.append(f"evento {index}: {flag}")
 
         # 4. Quebras visuais e espaços rígidos
         if break_count(left_text) != break_count(right_text):

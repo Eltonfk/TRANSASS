@@ -75,3 +75,25 @@ def test_in_memory_effects_engine_pipeline():
     assert r"\c&H" in trans_doc[0].text
     # O evento de karaokê deve ter preservado o timing original da música
     assert r"\k10" in trans_doc[1].text
+
+
+def test_animated_transform_colors_ignored_by_effects_engine():
+    raw_source = (
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:33.76,0:00:41.06,Signs,,0,0,0,,{=2}{\move(225,396,281.865,396.045,25,7283)\c&H0C1E00&\t(835,1485,\c&H332419&)}Eat" "\n"
+    )
+    raw_translated = (
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:33.76,0:00:41.06,Signs,,0,0,0,,{=2}{\move(225,396,281.865,396.045,25,7283)\c&H0C1E00&\t(835,1485,\c&H332419&)}Comer" "\n"
+    )
+    orig_doc = ASSDocumentAST.from_string(raw_source)
+    trans_doc = ASSDocumentAST.from_string(raw_translated)
+
+    engine = InMemoryEffectsEngine(enable_visual_glyphs=True, enable_karaoke=True)
+    stats = engine.process_effects(trans_doc, orig_doc)
+
+    assert stats["visual_glyphs_applied"] == 0
+    assert trans_doc[0].text == r"{=2}{\move(225,396,281.865,396.045,25,7283)\c&H0C1E00&\t(835,1485,\c&H332419&)}Comer"
+

@@ -258,6 +258,31 @@ def test_c7_telemetry_reports_live_semantic_reconstruction(tmp_path):
     assert telemetry["last_activity_at"]
 
 
+def test_c7_telemetry_reads_append_only_ledgers_incrementally(tmp_path):
+    ledger = tmp_path / "job-ledger"
+    ledger.mkdir()
+    (ledger / "units.json").write_text(json.dumps([
+        {"event_id": 1, "status": "resolved"},
+        {"event_id": 2, "status": "pending"},
+    ]), encoding="utf-8")
+    (ledger / "attempts.jsonl").write_text(
+        json.dumps({"event_ids": [1], "phase": "initial"}) + "\n", encoding="utf-8"
+    )
+    job = {"id": "job-ledger", "status": "TRANSLATING", "stage": "TRANSLATING",
+           "failure_ledger_dir": str(ledger), "summary": {}}
+
+    first = web._job_telemetry(job)
+    assert (first["total_units"], first["resolved_units"], first["calls"]) == (2, 1, 1)
+
+    with (ledger / "unit-updates.jsonl").open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps({"event_id": 2, "status": "resolved"}) + "\n")
+    with (ledger / "attempts.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"event_ids": [2], "phase": "retry_simplified"}) + "\n")
+
+    second = web._job_telemetry(job)
+    assert (second["resolved_units"], second["calls"], second["retries"]) == (2, 2, 1)
+
+
 def test_candidate_artifact_is_retained_downloadable_and_hash_bound(tmp_path):
     old_state_dir = web.STATE_DIR
     old_jobs = web.state["jobs"]

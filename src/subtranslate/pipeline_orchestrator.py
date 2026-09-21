@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pipeline_registry import PipelinePlan, UnsupportedPipelineError, get_pipeline_plan
-from v238_llama_policy import DEFAULT_QWEN_PHYSICAL_MAXIMUM
+from v238_llama_policy import DEFAULT_PROVIDER_PHYSICAL_MAXIMUM, DEFAULT_QWEN_PHYSICAL_MAXIMUM
 
 
 class PipelineStageValidationError(RuntimeError):
@@ -42,7 +42,7 @@ class PipelineStageValidationError(RuntimeError):
 
 GEMINI_PHYSICAL_CALL_FLOOR = 131
 GROQ_PHYSICAL_CALL_FLOOR = 192
-DEEPSEEK_PHYSICAL_CALL_FLOOR = 192
+DEEPSEEK_PHYSICAL_CALL_FLOOR = DEFAULT_PROVIDER_PHYSICAL_MAXIMUM
 QWEN_PHYSICAL_CALL_FLOOR = DEFAULT_QWEN_PHYSICAL_MAXIMUM
 
 
@@ -56,21 +56,39 @@ def gemini_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
     """
     profile = profile if isinstance(profile, dict) else {}
     semantic = max(1, int(profile.get("retry_budget", 32) or 32))
-    return semantic, max(GEMINI_PHYSICAL_CALL_FLOOR, semantic)
+    configured = _profile_physical_maximum(profile, GEMINI_PHYSICAL_CALL_FLOOR)
+    return semantic, max(configured, semantic)
 
 
 def groq_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
     """Return bounded semantic/physical budgets for the Groq profile."""
     profile = profile if isinstance(profile, dict) else {}
     semantic = max(1, int(profile.get("retry_budget", 16) or 16))
-    return semantic, max(GROQ_PHYSICAL_CALL_FLOOR, semantic)
+    configured = _profile_physical_maximum(profile, GROQ_PHYSICAL_CALL_FLOOR)
+    return semantic, max(configured, semantic)
 
 
 def deepseek_operation_limits(profile: dict[str, Any] | None) -> tuple[int, int]:
     """Return bounded semantic/physical budgets for the DeepSeek profile."""
     profile = profile if isinstance(profile, dict) else {}
     semantic = max(1, int(profile.get("retry_budget", 32) or 32))
-    return semantic, max(DEEPSEEK_PHYSICAL_CALL_FLOOR, semantic)
+    configured = _profile_physical_maximum(profile, DEEPSEEK_PHYSICAL_CALL_FLOOR)
+    return semantic, max(configured, semantic)
+
+
+def _profile_physical_maximum(profile: dict[str, Any], default: int) -> int:
+    """Read a bounded provider-specific physical call ceiling.
+
+    The previous DeepSeek default of 192 was copied from the Groq profile and
+    was exhausted by long subtitle files before the initial pass could finish.
+    The ceiling remains finite and can be deliberately lowered by an operator.
+    """
+    raw = profile.get("physical_call_maximum", default)
+    try:
+        configured = int(raw)
+    except (TypeError, ValueError):
+        configured = default
+    return min(16384, max(1, configured))
 
 
 def qwen_operation_limits(value: Any = None) -> tuple[int, int]:
@@ -135,6 +153,8 @@ def _build_v238_operation_budget(ctx: dict[str, Any]) -> Any:
     return OperationCallBudget(
         qwen_physical_maximum=physical_maximum,
         llama_generation_maximum=1,
+        provider_name=provider_name or "qwen",
+        provider_physical_maximum=physical_maximum,
     )
 
 

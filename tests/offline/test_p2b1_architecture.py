@@ -8,8 +8,11 @@ from unittest.mock import patch
 
 import pipeline_orchestrator as orchestrator
 from pipeline_registry import (
+    PipelineDeprecatedError,
     UnsupportedPipelineError,
+    ensure_pipeline_for_new_job,
     get_pipeline_plan,
+    pipeline_info,
 )
 
 
@@ -29,6 +32,26 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(get_pipeline_plan("legacy").id, "legacy")
         with self.assertRaises(UnsupportedPipelineError):
             get_pipeline_plan("unknown")
+
+    def test_v21_plans_are_compatibility_only_for_new_jobs(self):
+        for plan_id in ("v2_1_2", "v2_1_3"):
+            with self.subTest(plan_id=plan_id):
+                plan = get_pipeline_plan(plan_id)
+                self.assertTrue(plan.deprecated)
+                self.assertEqual(plan.replacement_pipeline_id, "v2_3_8")
+                # Resolution remains available for historical replay.
+                self.assertEqual(plan.id, plan_id)
+                with self.assertRaises(PipelineDeprecatedError):
+                    ensure_pipeline_for_new_job(plan_id)
+
+    def test_pipeline_info_exposes_lifecycle_without_hiding_history(self):
+        info = pipeline_info("v2_1_3")
+        self.assertTrue(info["supported"])
+        self.assertTrue(info["deprecated"])
+        self.assertEqual(info["lifecycle"], "deprecated")
+        self.assertFalse(info["new_jobs_allowed"])
+        self.assertEqual(info["replacement_pipeline"], "v2_3_8")
+        self.assertTrue(pipeline_info("v2_3_8")["new_jobs_allowed"])
 
     def test_v224_v225_v226_and_v230_plans(self):
         self.assertEqual(get_pipeline_plan("v2_2_4").stages, ("FULL_TRANSLATION_V224",))

@@ -631,12 +631,18 @@ class DurableV226Call:
         try:
             if self.operation_budget is not None and reservation.get("operation_budget_state") != "ACCEPTED":
                 try:
-                    self.operation_budget.reserve(
-                        model_tag=str(self.context["model"]), model_digest=str(self.context["model_digest"]),
-                        phase="V226_QWEN", reservation_id=self.physical_attempt_id,
-                    )
+                    kwargs = {
+                        "model_tag": str(self.context["model"]),
+                        "model_digest": str(self.context["model_digest"]),
+                        "phase": "V226_PRIMARY",
+                        "reservation_id": self.physical_attempt_id,
+                        "provider": str(self.context.get("provider") or "").casefold() or None,
+                    }
+                    self.operation_budget.reserve(**kwargs)
                 except TypeError:
-                    self.operation_budget.reserve(model_tag=str(self.context["model"]), model_digest=str(self.context["model_digest"]), phase="V226_QWEN")
+                    kwargs.pop("provider", None)
+                    kwargs.pop("reservation_id", None)
+                    self.operation_budget.reserve(**kwargs)
                 self.budget_ledger.update_attempt(self.request_id, operation_budget_state="ACCEPTED")
                 operation_budget_accepted_now = True
         except Exception as exc:

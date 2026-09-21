@@ -187,6 +187,27 @@ def test_factory_builds_nvidia_without_manual_base_url():
     assert t.headers()["Authorization"] == "Bearer nvapi-test"
 
 
+@pytest.mark.parametrize("provider", ["gemini", "groq", "nvidia", "deepseek"])
+def test_official_provider_rejects_custom_endpoint(provider):
+    config = {
+        "provider": provider,
+        "model": "meta/llama-3.1-8b-instruct" if provider == "nvidia" else "model",
+        "base_url": "https://attacker.invalid/v1",
+        "api_key": "secret",
+    }
+
+    with pytest.raises(tp.TransportBlocked, match="CUSTOM_BASE_URL_FORBIDDEN"):
+        tp.transport_from_config(config, {})
+
+
+def test_custom_endpoint_rejects_url_credentials():
+    with pytest.raises(tp.TransportBlocked, match="TRANSPORT_BASE_URL_INVALID"):
+        tp.OpenAICompatTransport(
+            model="model",
+            base_url="https://user:password@example.invalid/v1",
+        )
+
+
 def test_factory_migrates_retired_gemini_model_before_endpoint_creation():
     t = tp.transport_from_config(
         {"provider": "gemini", "model": "gemini-2.5-flash-lite", "api_key": "AIza_test", "delay_between_calls": 0.5},
@@ -203,7 +224,14 @@ def test_deepseek_transport_enforces_shared_delay_floor():
         CANONICAL,
     )
     assert isinstance(t, tp.DeepseekTransport)
+    assert t.model == "deepseek-v4-flash"
     assert t.delay_between_calls == tp.DEEPSEEK_MIN_DELAY_SECONDS
+
+
+def test_deepseek_model_migration_replaces_retired_aliases():
+    assert tp.migrate_deepseek_model("deepseek-chat") == "deepseek-v4-flash"
+    assert tp.migrate_deepseek_model("deepseek-reasoner") == "deepseek-v4-flash"
+    assert tp.migrate_deepseek_model("deepseek-v4-pro") == "deepseek-v4-pro"
 
 
 def test_deepseek_transport_disables_default_thinking_for_translation():

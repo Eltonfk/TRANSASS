@@ -33,6 +33,22 @@ Providers suportados: `ollama`, `gemini`, `groq`, `deepseek`, `nvidia` e
 `openai_compat`. O fallback é opcional e atua somente em falha de transporte;
 um texto ruim não troca de fornecedor escondido atrás da cortina.
 
+Para DeepSeek, use `deepseek-v4-flash` como opção recomendada ou
+`deepseek-v4-pro` para casos mais exigentes. Configurações antigas com
+`deepseek-chat` ou `deepseek-reasoner` são migradas automaticamente para
+`deepseek-v4-flash` antes da chamada; o alias antigo fica apenas como
+compatibilidade, não como modelo efetivamente enviado.
+
+## Segurança dos providers
+
+Gemini, Groq, NVIDIA e DeepSeek usam endpoints oficiais fixos. O Transass
+recusa `base_url` personalizada para esses providers para que uma configuração
+maliciosa não leve junto a API key. Ollama e `openai_compat` aceitam endpoints
+locais/personalizados, com URL explícita e sem credenciais embutidas.
+
+`TRANSASS_MAX_HTTP_RESPONSE_BYTES` limita o corpo recebido de um provider. O
+padrão é `16777216` (16 MiB); respostas maiores falham fechadas.
+
 ## Thermal Guard
 
 O caminho V2.3.8 registra telemetria por segundo e pode suspender a proteção

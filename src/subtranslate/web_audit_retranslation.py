@@ -31,6 +31,8 @@ from pipeline_v2_1_3 import (
     validate_structure,
 )
 from runtime_paths import external_media_environment
+from v235_visual_glyph_program import extract_visual_glyph_program
+from v238_semantic_style_ownership import semantic_style_token_sequence
 
 
 TEXTUAL_SUBTITLE_CODECS = {
@@ -65,6 +67,33 @@ CODE_TO_LANGUAGE_NAME = {}
 for _name, _codes in LANGUAGE_NAME_TO_CODES.items():
     for _code in _codes:
         CODE_TO_LANGUAGE_NAME[_code] = _name
+
+
+_VISUAL_TAG_REFLOW_FLAGS = frozenset({
+    "ASS_INLINE_TAG_DUPLICATION",
+    "ASS_TAG_MISMATCH",
+    "ASS_INLINE_TAG_SPLIT_WORD",
+    "ASS_INLINE_TAG_ANCHOR_FAILURE",
+    "tags alteradas",
+})
+
+
+def _is_proven_visual_tag_reflow(source: str, output: str, *, event_id: int) -> bool:
+    """Recognize V2.3.8's deterministic visual colour reprojection.
+
+    V2.3.5 deliberately changes tag anchors when a translated string has a
+    different grapheme count.  The source must first prove a dense visual
+    glyph program, and the output must preserve every semantic token in order;
+    ordinary semantic styles do not receive this exception.
+    """
+    source_program, source_details = extract_visual_glyph_program(
+        source,
+        program_id=f"audit-visual-source-{event_id}",
+        envelope_id=event_id,
+    )
+    if source_program is None or not source_details.get("valid"):
+        return False
+    return semantic_style_token_sequence(source) == semantic_style_token_sequence(output)
 
 
 def _normalize_lang_code(code: object) -> str:
@@ -287,7 +316,31 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
     if len(source_subs) != len(output_subs):
         source_flags.append("EVENT_COUNT_MISMATCH")
     structural = validate_structure(source_subs, output_subs)
-    source_flags.extend(str(issue).split(": ")[-1] for issue in structural.get("issues", []))
+    visual_reflow_indices = {
+        index
+        for index in range(min(len(source_subs), len(output_subs)))
+        if not source_subs[index].is_comment
+        and _is_proven_visual_tag_reflow(
+            str(getattr(source_subs[index], "text", "")),
+            str(getattr(output_subs[index], "text", "")),
+            event_id=index,
+        )
+    }
+    # ``validate_structure`` predates V2.3.5 and treats a deterministic
+    # visual re-projection as a tag mutation.  Remove only its tag-related
+    # findings for events proven by the source visual program; all timing,
+    # metadata, cardinality and content findings remain blocking.
+    structural_issues = [
+        str(issue)
+        for issue in structural.get("issues", [])
+        if not (
+            (match := re.match(r"evento (\d+): (.+)$", str(issue)))
+            and int(match.group(1)) in visual_reflow_indices
+            and match.group(2) in _VISUAL_TAG_REFLOW_FLAGS
+        )
+    ]
+    structural = {**structural, "issues": structural_issues, "valid": not structural_issues}
+    source_flags.extend(issue.split(": ")[-1] for issue in structural_issues)
     dictionary = load_english_dictionary("/nonexistent/american-english")
     for index, event in enumerate(source_events):
         source_line = source_subs[index]
@@ -302,7 +355,9 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
             if source_line.as_dict() != output_line.as_dict():
                 event_flags.append("ASS_COMMENT_CHANGED")
         else:
-            event_flags.extend(validate_inline_tags(source_text, output_text))
+            visual_reflow = index in visual_reflow_indices
+            if not visual_reflow:
+                event_flags.extend(validate_inline_tags(source_text, output_text))
             preserved_exactly = event.classification in DETERMINISTIC_PRESERVE_CLASSES and source_text == output_text
             delimiter_audit = source_relative_delimiter_audit(
                 source_text,
@@ -317,7 +372,13 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
                 event_flags.append("UNBALANCED_DELIMITERS")
             if not preserved_exactly:
                 context = {"previous": [], "next": []}
-                event_flags.extend(content_flags(event, output_text, context, dictionary, source_language=source_language))
+                content_findings = content_flags(
+                    event, output_text, context, dictionary, source_language=source_language
+                )
+                event_flags.extend(
+                    flag for flag in content_findings
+                    if not (visual_reflow and flag in _VISUAL_TAG_REFLOW_FLAGS)
+                )
                 if high_confidence_untranslated_dialogue(event, _plain(source_text), _plain(output_text), dictionary, source_language=source_language):
                     event_flags.append("TRUE_UNTRANSLATED_DIALOGUE")
                 if event.classification in MUST_PRESERVE_CLASSES:
@@ -344,6 +405,7 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
                 and source_text == output_text
             ),
             "delimiter_audit": delimiter_audit,
+            "visual_tag_reflow": bool(index in visual_reflow_indices),
             "flags": event_flags,
         })
     result["flags"] = sorted(set(source_flags))

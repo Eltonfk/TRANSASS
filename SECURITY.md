@@ -28,8 +28,9 @@ desejado.
 - **API keys**: no Desktop, o armazenamento seguro do sistema é preferido;
   quando indisponível, o fallback é um arquivo host-local com acesso restrito.
   A API expõe somente se uma chave está configurada, nunca o segredo.
-- **Rede**: o app web é projetado para uso em **rede local** (bind LAN). Não
-  exponha à internet sem autenticação/reverse proxy.
+- **Rede**: o Compose escuta em `127.0.0.1` por padrão. A interface é
+  administrativa e não possui autenticação própria; para acesso pela LAN ou
+  internet, use firewall e reverse proxy autenticado.
 - **Path traversal**: endpoints de arquivo validam caminhos contra raízes
   autorizadas (`_authorized_path`, `_safe_relative`).
 - **Segredos no repositório**: `.gitignore` bloqueia `.env`, `*api_key*`,
@@ -41,6 +42,6 @@ desejado.
 
 1. Use o Dockerfile com `--pull=false` e base pinada por digest.
 2. Mantenha o `.env` fora do repositório (host-local).
-3. Se expor além da LAN, adicione autenticação (ex.: reverse proxy com
-   basic auth ou OIDC).
+3. Para qualquer exposição além de `localhost`, adicione autenticação (ex.:
+   reverse proxy com basic auth ou OIDC) e TLS quando houver trânsito de rede.
 4. Atualize a imagem regularmente para receber correções.

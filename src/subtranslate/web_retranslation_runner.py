@@ -85,8 +85,9 @@ def _project_v238_summary(result: dict) -> dict:
     # Keep the presentation fallback aligned with the orchestrator's local
     # Qwen/Ollama default.  A missing summary must not make the UI report a
     # stale 131-call ceiling while the runtime is enforcing 256.
-    qwen_max = int(budget.get("qwen_physical_maximum") or 256)
-    qwen_reserved = int(budget.get("qwen_reserved") or 0)
+    budget_provider = str(budget.get("active_provider") or "qwen").strip().casefold()
+    physical_maximum = int(budget.get("physical_maximum") or budget.get("qwen_physical_maximum") or 256)
+    physical_reserved = int(budget.get("physical_reserved") or budget.get("qwen_reserved") or 0)
     calls = int(result.get("calls", 0) or 0)
     flags: dict = {}
     critical_flags: list[str] = []
@@ -115,7 +116,9 @@ def _project_v238_summary(result: dict) -> dict:
             "completion_tokens": None,
             "elapsed_seconds": result.get("pipeline_wall_seconds"),
             "budget_used": int(budget.get("total_reserved", 0) or 0),
-            "budget_remaining": max(0, qwen_max - qwen_reserved),
+            "budget_remaining": max(0, physical_maximum - physical_reserved),
+            "budget_provider": budget_provider,
+            "budget_limit": physical_maximum,
             "provider_mode": "LIVE_CAPTURED",
             "fallback_used": False,
         },

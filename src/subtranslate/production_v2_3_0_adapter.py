@@ -17,6 +17,14 @@ from typing import Any, Callable
 import pysubs2
 import requests
 
+from ass_structure import (
+    break_count,
+    break_tokens,
+    hard_space_count,
+    is_drawing_event,
+    replace_source_payload,
+    visible_text,
+)
 from ollama_runtime import ollama_keep_alive
 from production_v2_2_6_adapter import APPROVED_MODEL as V226_MODEL
 from runtime_config import default_glossary_path
@@ -58,6 +66,7 @@ _ENGLISH_FUNCTION_CONTRACTIONS = {
     "don't", "i'm", "it's", "that's", "they're", "we're", "what's", "you're",
 }
 _ENGLISH_SINGLETONS = {"hey", "yeah", "oh", "moonlight", "signpost", "tomorrow"}
+_PT_HOMOGRAPHS = {"a", "do", "for"}
 _ENGLISH_TOKEN_RE = re.compile(r"[A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)?", re.UNICODE)
 
 
@@ -85,11 +94,11 @@ def _glossary_hints(text: str) -> list[dict[str, str]]:
 
 
 def visible(text: str) -> str:
-    return " ".join(_TAG_RE.sub("", text or "").replace(r"\N", " ").replace(r"\n", " ").split())
+    return " ".join(visible_text(text or "", line_break=" ").split())
 
 
 def _is_drawing(text: str) -> bool:
-    return bool(re.search(r"\\p[1-9]", text or "")) and not re.search(r"[A-Za-zÀ-ÿ]{2,}", visible(text))
+    return is_drawing_event(text)
 
 
 def _looks_like_english_song_text(text: str) -> bool:
@@ -99,10 +108,14 @@ def _looks_like_english_song_text(text: str) -> bool:
         return False
     function_hits = sum(word in _ENGLISH_WORDS or word in _ENGLISH_FUNCTION_CONTRACTIONS for word in words)
     content_hits = sum(word in _ENGLISH_CONTENT_WORDS for word in words)
+    unambiguous_function_hits = sum(
+        (word in _ENGLISH_WORDS and word not in _PT_HOMOGRAPHS) or word in _ENGLISH_FUNCTION_CONTRACTIONS
+        for word in words
+    )
     if len(words) == 1:
         return words[0] in _ENGLISH_SINGLETONS
     return content_hits >= 2 or (content_hits >= 1 and function_hits >= 1) or (
-        len(words) >= 4 and function_hits >= 2 and function_hits / len(words) >= 0.30
+        len(words) >= 4 and function_hits >= 2 and unambiguous_function_hits >= 1 and function_hits / len(words) >= 0.30
     )
 
 
@@ -154,110 +167,20 @@ def classify_song_event(line: pysubs2.SSAEvent) -> str | None:
 
 
 def _has_syllabic_tags(text: str) -> bool:
-    return bool(re.search(r"\\(?:k|K|kf|ko)\d+", text or ""))
-
-
-def _allocate_words(words: list[str], weights: list[int]) -> list[str]:
-    """Distribute a model line over source-owned lexical segments."""
-    if not weights:
-        return []
-    if len(words) < len(weights):
-        # Never lose translated content merely because the target is shorter
-        # than the number of source lines. Keep the sentence order and leave
-        # only the trailing source segments empty.
-        return [word if index < len(words) else "" for index, word in enumerate(weights)]
-    total = max(1, sum(weights))
-    chunks: list[str] = []
-    start = 0
-    cumulative = 0
-    for position, weight in enumerate(weights):
-        cumulative += max(1, weight)
-        if position == len(weights) - 1:
-            end = len(words)
-        else:
-            remaining_segments = len(weights) - position - 1
-            ideal = round(len(words) * cumulative / total)
-            end = min(
-                len(words) - remaining_segments,
-                max(start + 1, ideal),
-            )
-        chunks.append(" ".join(words[start:end]))
-        start = end
-    return chunks
-
-
-def _replace_lexical_payload(source: str, translated: str) -> str | None:
-    """Replace one source segment while retaining its exact ASS tags."""
-    # ASS tags belong to the source envelope. If a model emits them anyway,
-    # discard only those model-owned tags before reinjection.
-    target_words = re.findall(r"\S+", _TAG_RE.sub("", translated or "").strip())
-    tokens = re.split(r"(\{[^}]*\})", source)
-    lexical_indices = [
-        index for index, token in enumerate(tokens)
-        if token and not _TAG_RE.fullmatch(token)
-    ]
-    if not lexical_indices:
-        return source
-    source_word_counts = [
-        max(1, len(re.findall(r"[\wÀ-ÿ]+", tokens[index], re.UNICODE)))
-        for index in lexical_indices
-    ]
-    replacements = dict(zip(lexical_indices, _allocate_words(target_words, source_word_counts)))
-    return "".join(replacements.get(index, token) for index, token in enumerate(tokens))
+    return bool(re.search(r"\\(?:kt|kf|ko|k)\d+", text or "", re.IGNORECASE))
 
 
 def _replace_payload(source: str, translated: str) -> str | None:
-    """Replace lexical payload while retaining the source ASS envelope.
+    """Replace payload through the single source-owned ASS envelope helper.
 
-    The model is not authoritative for line breaks. It may return one line,
-    more lines, or accidentally include ASS tags; all such presentation is
-    normalized back onto the source's exact envelope.
+    The model is not authoritative for line breaks, inline tags, hard spaces
+    or per-character styling.  Empty output remains a fail-closed result for
+    the karaoke caller; every non-empty output is rebuilt from the source
+    envelope by :func:`ass_structure.replace_source_payload`.
     """
-    source_parts = source.split(r"\N")
-    source_lexical_indices = [
-        index for index, part in enumerate(source_parts)
-        if _TAG_RE.sub("", part).strip()
-    ]
-    if not source_lexical_indices:
-        return source
-    target_parts = [
-        _TAG_RE.sub("", part).strip()
-        for part in re.split(r"(?:\\N|\r?\n)", str(translated or ""))
-    ]
-    if not any(target_parts):
+    if not visible_text(str(translated or ""), line_break=" ").strip():
         return None
-
-    if len(target_parts) == len(source_parts):
-        target_by_source = {
-            index: target_parts[index] for index in source_lexical_indices
-        }
-    elif len(target_parts) == len(source_lexical_indices):
-        # Common case: source has tag-only prefix/suffix segments around the
-        # visible text and the model returns only the linguistic segments.
-        target_by_source = dict(zip(source_lexical_indices, target_parts))
-    else:
-        target_words = re.findall(r"\S+", " ".join(target_parts))
-        source_word_counts = [
-            max(1, len(re.findall(r"[\wÀ-ÿ]+", source_parts[index], re.UNICODE)))
-            for index in source_lexical_indices
-        ]
-        target_by_source = dict(zip(
-            source_lexical_indices,
-            _allocate_words(target_words, source_word_counts),
-        ))
-
-    out = []
-    for index, source_part in enumerate(source_parts):
-        if index not in target_by_source:
-            out.append(source_part)
-            continue
-        rendered = _replace_lexical_payload(source_part, target_by_source[index])
-        if rendered is None:
-            return None
-        out.append(rendered)
-    # The source owns the delimiters; the final result always has identical
-    # line-break count and exact source tag sequence.
-    return r"\N".join(out)
+    return replace_source_payload(source or "", str(translated or ""))
 
 
 def _event_fields(line: pysubs2.SSAEvent) -> dict[str, Any]:
@@ -268,8 +191,8 @@ def _event_fields(line: pysubs2.SSAEvent) -> dict[str, Any]:
 def _structural_signature(line: pysubs2.SSAEvent) -> tuple[Any, ...]:
     tags = _TAG_RE.findall(line.text or "")
     return (line.start, line.end, line.layer, line.style, line.name,
-            line.text.count(r"\N"), tags,
-            bool(re.search(r"\\p[1-9]", line.text or "")))
+            break_count(line.text), tuple(break_tokens(line.text)), hard_space_count(line.text), tags,
+            is_drawing_event(line.text))
 
 
 def discover_song_units(subs: pysubs2.SSAFile) -> dict[str, Any]:
@@ -412,7 +335,9 @@ def augment_karaoke_candidate_v2_3_0(input_path: Path, output_path: Path,
             continue
 
         pending_values = {visible(subs[index].text) for index in pending_indices}
-        canonical = next(iter(pending_values)) if len(pending_values) == 1 else source_canonical
+        canonical = source_canonical if original_source_path is not None else (
+            next(iter(pending_values)) if len(pending_values) == 1 else source_canonical
+        )
         context_before, context_after = _song_context(
             discovery_subs,
             discovered["classifications"],

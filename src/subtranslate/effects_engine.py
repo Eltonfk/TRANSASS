@@ -83,12 +83,17 @@ def grapheme_clusters(text: str) -> list[str]:
     return clusters
 
 
+ANIMATION_TAG_RE = re.compile(r"\\t\([^)]*\)")
+
+
 def extract_primary_colors(text: str) -> list[str]:
-    """Extract ordered sequence of primary colors from override tags."""
+    """Extract ordered sequence of primary colors from override tags, ignoring dynamic transforms."""
+    static_text = ANIMATION_TAG_RE.sub("", text or "")
     colors: list[str] = []
-    for match in PRIMARY_COLOR_RE.finditer(text or ""):
+    for match in PRIMARY_COLOR_RE.finditer(static_text):
         colors.append(f"&H{match.group('color').upper()}&")
     return colors
+
 
 
 def apply_glyph_color_gradient(target_text: str, colors: list[str], prefix_tags: str = "") -> str:
@@ -160,7 +165,12 @@ class InMemoryEffectsEngine:
             if self.enable_visual_glyphs and orig_node:
                 source_colors = extract_primary_colors(orig_text)
                 # Dense per-character styling indicator
-                if len(source_colors) >= 2 and len(source_colors) >= len(grapheme_clusters(orig_node.visible)) - 2:
+                has_interspersed_tags = bool(re.search(r"[\wÀ-ÿ]\s*\{", orig_text))
+                if (
+                    has_interspersed_tags
+                    and len(source_colors) >= 2
+                    and len(source_colors) >= len(grapheme_clusters(orig_node.visible)) - 2
+                ):
                     try:
                         clean_target = node.visible
                         base_tags = clean_residual_override_tags(

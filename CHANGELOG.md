@@ -4,6 +4,43 @@ Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/).
 Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/health`,
 `/version` e tooling). Atualizar em conjunto com a tag anotada no Git.
 
+## [Unreleased]
+
+### Alterado
+
+- A suíte offline passou a quatro shards determinísticos com estado isolado,
+  cache de dependências e relatórios JUnit; os 982 testes continuam cobertos.
+- A identidade incorporada na imagem agora prevalece sobre metadados antigos
+  do `.env`, evitando que um rebuild novo se apresente como o contêiner anterior.
+- Providers oficiais usam somente seus endpoints HTTPS conhecidos; endpoints
+  personalizados continuam disponíveis apenas para Ollama/OpenAI-compatible.
+- Respostas de providers são recebidas em streaming, sem redirects, com teto
+  padrão de 16 MiB para impedir exaustão de memória.
+- Auditorias detalhadas saíram de `jobs.json`; jobs terminados e caches agora
+  possuem retenção limitada em memória.
+- A publicação V2.3.8 passou a ser concluída pela Library, incluindo objeto,
+  sidecar e registro, e falha para reconciliação se a operação ficar incompleta.
+- Configuração de transporte ganhou serialização entre threads, `fsync` e
+  identidade de modelo calculada exclusivamente no servidor.
+- A compatibilidade V2.2.6 ficou serializada e seus intermediários são removidos
+  também nas rotas de falha.
+- O CI passou a executar toda a suíte offline, incluindo regressões ASS e
+  contratos de empacotamento, em vez de uma lista curta mantida à mão.
+- A montagem de contexto reutiliza uma única ordenação e índice por episódio;
+  a validação V2.3.8 também reutiliza o parse ASS já carregado.
+- O stream SSE usa diretamente o status recebido, evitando uma segunda chamada
+  HTTP a cada evento.
+- O Compose agora escuta em `127.0.0.1` por padrão; exposição administrativa na
+  LAN tornou-se uma decisão explícita do operador.
+- V2.1.2 e V2.1.3 passaram a ter ciclo de vida `deprecated`: não podem ser
+  escolhidos para novos jobs, mas permanecem resolvíveis para compatibilidade,
+  lineage e replay histórico.
+- A API agora informa o pipeline substituto (`v2_3_8`) e falha fechada com
+  `pipeline_deprecated` quando uma nova fila tenta usar um plano antigo.
+- O parser ASS passou a compartilhar a reconstrução do payload entre V2.2.6,
+  V2.3.0 e V2.3.8, preservando espaços nos limites de tags inline, quebras
+  legadas consecutivas e pontuação sem duplicação em linhas estilizadas.
+
 ## [2.5.2] - 2026-09-08
 
 ### Adicionado
@@ -45,6 +82,11 @@ Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/healt
   texto inglês rotulado como japonês pode ser traduzido corretamente para pt-BR.
 
 ### Corrigido
+
+- O pacote Python declara todos os módulos usados pelo runtime, inclusive o
+  parser ASS compartilhado e o Thermal Guard.
+- O Failure Ledger confina IDs ao diretório de estado, calcula hashes de
+  arquivos em fluxo e não duplica a sincronização completa ao concluir jobs.
 - Episódio atual e progresso da fila voltam a aparecer durante a tradução;
   Caixa de entrada, Acervo e Revisão não ficam presos em carregamento infinito.
 - Retraduções publicam e versionam a nova legenda sem confundir o objeto anterior

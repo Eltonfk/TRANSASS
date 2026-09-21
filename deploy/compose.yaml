@@ -15,7 +15,10 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
-    mem_limit: 512m
+    # V2.3.8 keeps durable unit/capture indexes in the web process while a
+    # long episode is running.  512 MiB caused status polling and ledger
+    # reconciliation to saturate the container before the model was busy.
+    mem_limit: 1g
     cpus: 1.0
     env_file:
       # compose.yaml fica em deploy/; o .env operacional fica na raiz do
@@ -61,8 +64,9 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,mode=1777
     ports:
-      # BIND_ADDR=0.0.0.0 expõe na rede local; use 127.0.0.1 para só local.
-      - "${BIND_ADDR:-0.0.0.0}:${WEB_PORT:-5050}:5000"
+      # A exposição na LAN é opt-in: use firewall e proxy autenticado antes
+      # de trocar BIND_ADDR por 0.0.0.0.
+      - "${BIND_ADDR:-127.0.0.1}:${WEB_PORT:-5050}:5000"
     logging:
       driver: json-file
       options:

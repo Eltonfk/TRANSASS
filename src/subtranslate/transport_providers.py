@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 
 # Google applies RPM/TPM limits per project and the exact ceiling varies by
@@ -34,6 +35,30 @@ GROQ_MIN_DELAY_SECONDS = 2.5
 # DeepSeek is also rate-limited by account/model. Keep a small floor in the
 # shared transport boundary so direct clients and durable web clients agree.
 DEEPSEEK_MIN_DELAY_SECONDS = 2.0
+# DeepSeek retired the compatibility aliases ``deepseek-chat`` and
+# ``deepseek-reasoner``.  Keep the migration in the transport boundary so an
+# old host config, environment variable, or direct caller cannot silently
+# keep sending a retired model identifier.
+DEEPSEEK_TRANSLATION_MODEL_CATALOG: tuple[dict[str, Any], ...] = (
+    {
+        "id": "deepseek-v4-flash",
+        "label": "DeepSeek V4 Flash · recomendado",
+        "description": "Modelo oficial atual, rápido e adequado para lotes de legendas.",
+        "stable": True,
+        "recommended": True,
+    },
+    {
+        "id": "deepseek-v4-pro",
+        "label": "DeepSeek V4 Pro · maior qualidade",
+        "description": "Mais qualidade para casos difíceis; pode ter maior custo e latência.",
+        "stable": True,
+        "recommended": False,
+    },
+)
+DEEPSEEK_MODEL_MIGRATIONS = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-flash",
+}
 # These providers are network services whose credentials must be explicit.
 # ``openai_compat`` is intentionally absent because it may point to a local
 # LM Studio/vLLM/llama.cpp endpoint.
@@ -155,6 +180,17 @@ def migrate_gemini_model(model: str) -> str:
     return value
 
 
+def deepseek_model_catalog() -> list[dict[str, Any]]:
+    """Return the stable DeepSeek text-generation catalogue used by the UI."""
+    return [dict(item) for item in DEEPSEEK_TRANSLATION_MODEL_CATALOG]
+
+
+def migrate_deepseek_model(model: str) -> str:
+    """Replace retired DeepSeek compatibility aliases with official model IDs."""
+    value = str(model or "").strip()
+    return DEEPSEEK_MODEL_MIGRATIONS.get(value.casefold(), value)
+
+
 def gemini_models_from_api(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract text-generation models from ``GET /v1beta/models``.
 
@@ -206,12 +242,28 @@ class TransportBlocked(RuntimeError):
 
 class BaseTransport:
     name = "base"
+    allow_custom_base_url = True
 
     def __init__(self, *, model: str, base_url: str | None = None,
                  api_key: str | None = None,
                  delay_between_calls: float = 0.0) -> None:
         self.model = model
-        self.base_url = (base_url or self.default_base_url()).rstrip("/")
+        default_url = self.default_base_url().rstrip("/") if (
+            base_url is None or not self.allow_custom_base_url
+        ) else None
+        selected_url = (base_url or default_url or "").rstrip("/")
+        parsed = urlsplit(selected_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise TransportBlocked("TRANSPORT_BASE_URL_INVALID")
+        if not self.allow_custom_base_url and selected_url != default_url:
+            raise TransportBlocked(f"{self.name.upper()}_CUSTOM_BASE_URL_FORBIDDEN")
+        self.base_url = selected_url
         self.api_key = api_key
         # Hosted-provider profiles set this value. Keeping it on the
         # transport makes the V226 direct-client path obey the same limiter
@@ -425,6 +477,7 @@ class GroqTransport(OpenAICompatTransport):
     """Groq Inference API using its OpenAI-compatible chat endpoint."""
 
     name = "groq"
+    allow_custom_base_url = False
 
     @staticmethod
     def default_base_url() -> str:
@@ -454,6 +507,7 @@ class NvidiaTransport(OpenAICompatTransport):
     """
 
     name = "nvidia"
+    allow_custom_base_url = False
 
     NVIDIA_MODEL_NAMESPACES = _NVIDIA_MODEL_NAMESPACES
 
@@ -473,6 +527,7 @@ class GeminiTransport(BaseTransport):
     """Google Generative Language API (generateContent)."""
 
     name = "gemini"
+    allow_custom_base_url = False
 
     @staticmethod
     def default_base_url() -> str:
@@ -541,6 +596,18 @@ class DeepseekTransport(OpenAICompatTransport):
     """DeepSeek API — OpenAI-compatible /chat/completions."""
 
     name = "deepseek"
+    allow_custom_base_url = False
+
+    def __init__(self, *, model: str, base_url: str | None = None,
+                 api_key: str | None = None,
+                 delay_between_calls: float = 0.0) -> None:
+        # Keep direct construction safe as well as the config/factory paths.
+        super().__init__(
+            model=migrate_deepseek_model(model),
+            base_url=base_url,
+            api_key=api_key,
+            delay_between_calls=delay_between_calls,
+        )
 
     @staticmethod
     def default_base_url() -> str:
@@ -588,6 +655,8 @@ def transport_from_config(transport_config: dict[str, Any] | None,
         raise TransportBlocked("TRANSPORT_MODEL_MISSING")
     if name == "gemini":
         model = migrate_gemini_model(str(model))
+    elif name == "deepseek":
+        model = migrate_deepseek_model(str(model))
     # Environment/keyring resolution stays at the transport boundary.  The
     # execution context remains credential-free, while `.env` deployments and
     # headless runs behave like the UI-configured file/keyring path.

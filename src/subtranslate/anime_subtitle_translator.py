@@ -41,7 +41,11 @@ import requests
 import pysubs2
 
 from ollama_runtime import ollama_keep_alive
-from pipeline_registry import UnsupportedPipelineError, get_pipeline_plan
+from pipeline_registry import (
+    PipelineDeprecatedError,
+    ensure_pipeline_for_new_job,
+    get_pipeline_plan,
+)
 from pipeline_orchestrator import execute_pipeline_plan
 from runtime_paths import external_media_environment
 from pipeline_lineage import public_summary
@@ -1561,7 +1565,11 @@ def verify_and_fix_subtitle(
 
 def process_folder(folder: Path, dry_run: bool = False, verify: bool = False):
     pipeline = resolve_pipeline()
-    plan = get_pipeline_plan(pipeline)
+    try:
+        plan = ensure_pipeline_for_new_job(pipeline)
+    except PipelineDeprecatedError as error:
+        print(f"[erro] {error}; nenhuma saída foi alterada")
+        return 1
     print(f"Pipeline selecionado no início do job: pipeline={plan.id} model={OLLAMA_MODEL if plan.id != 'legacy' else 'legacy'}")
     if verify and not plan.supports_verify:
         print(f"[erro] --verify ainda não é suportado pelo plano {plan.id}; nenhuma saída foi alterada")

@@ -63,3 +63,8 @@ Ao reportar problema, envie:
 Pare o serviço antes de copiar `STATE_DIR`. Mídia e sidecars estão em
 `MEDIA_ROOT`; trate-os separadamente. API keys não devem entrar em anexos,
 issues, screenshots ou naquela mensagem de madrugada que parecia uma boa ideia.
+
+Inclua `STATE_DIR/audits/` no backup. Os arquivos são evidência detalhada; o
+resumo em `jobs.json` não pretende substituí-los. Um job com estágio
+`RECONCILIATION_REQUIRED` não foi publicado com sucesso e deve ser investigado
+antes de uma nova tentativa sobre o mesmo destino.

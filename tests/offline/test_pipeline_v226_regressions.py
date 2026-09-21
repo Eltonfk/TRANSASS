@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pipeline_v2_1_3 as pipeline
+from production_v2_2_6_adapter import _replace_source_payload
 from v238_semantic_style_ownership import extract_semantic_style_ownership
 
 
@@ -69,6 +70,31 @@ def test_shorter_translation_keeps_collapsed_style_tag_order():
         (item["property"], item["after"])
         for item in output_program.provenance["transition_trace"]
     ]
+
+
+def test_v226_sign_fanout_keeps_whitespace_around_inline_style_tags():
+    # One-Punch Man E01 has animated title cards with the same shape.  The
+    # former fan-out allocator replaced ``How ``/``Beetles `` without their
+    # trailing spaces and produced ``os{tag}Besouros``.
+    source = r"{\blur1\c&HCB91E0&\pos(497.252,168.333)}How {\c&HE8A070&}Beetles {\c&HCB91E0&}Transform"
+    rendered = _replace_source_payload(source, "Como os Besouros se Transformam")
+
+    assert rendered == r"{\blur1\c&HCB91E0&\pos(497.252,168.333)}Como os {\c&HE8A070&}Besouros {\c&HCB91E0&}se Transformam"
+    assert pipeline.validate_inline_tags(source, rendered) == []
+
+
+def test_event_local_delimiter_fragment_is_preserved_without_relaxing_counts():
+    # This is the shape that failed in the real episode: the opening `(` is
+    # in one ASS event and the closing `)` is in the following event.
+    assert pipeline.delimiter_flags("(Structure may be", "(A estrutura pode ser") == []
+    assert pipeline.delimiter_flags("Structure may be)", "Estrutura pode ser)") == []
+    assert "UNBALANCED_DELIMITERS" in pipeline.delimiter_flags("(Structure)", "(A estrutura")
+    assert "UNBALANCED_DELIMITERS" in pipeline.delimiter_flags("(Structure may be", "(A estrutura pode ser)")
+
+    source = r"{\blur0.6\fnFrom Where You Are}({\fnCheryl}Structure may be"
+    candidate = r"{\blur0.6\fnFrom Where You Are}({\fnCheryl}A estrutura pode ser"
+    event = _event(source, event_id=3813)
+    assert pipeline.content_flags(event, candidate, {}, set(), set()) == []
 
 
 def test_unknown_gemini_id_is_repaired_only_when_order_and_cardinality_match():

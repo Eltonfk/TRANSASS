@@ -23,6 +23,15 @@ REVIEW_VERDICTS = frozenset({"REVIEWER_NO_OBJECTION", "REVIEWER_FLAGGED", "REVIE
 LLAMA_MODEL_TAG = "llama3.1:8b"
 LLAMA_MODEL_DIGEST = "46e0c10c039e019119339687c3c1757cc81b9da49709a3b3924863ba87ca666e"
 DEFAULT_QWEN_PHYSICAL_MAXIMUM = 256
+DEFAULT_PROVIDER_PHYSICAL_MAXIMUM = 4096
+
+
+def _normalise_provider(value: str | None) -> str:
+    """Return the stable provider bucket used by the operation budget."""
+    provider = str(value or "").strip().casefold()
+    if provider == "ollama":
+        return "qwen"
+    return provider
 
 
 class LlamaPolicyError(RuntimeError):
@@ -43,56 +52,143 @@ class HardCallBudget:
 
 
 class OperationCallBudget:
-    """Shared per-operation reservation ledger for every model transport."""
+    """Shared per-operation reservation ledger for every model transport.
 
-    def __init__(self, *, qwen_physical_maximum: int = DEFAULT_QWEN_PHYSICAL_MAXIMUM, llama_generation_maximum: int = 1) -> None:
-        self.qwen_physical_maximum = int(qwen_physical_maximum)
-        self.llama_generation_maximum = int(llama_generation_maximum)
+    Older versions treated every non-Llama transport as Qwen.  That made a
+    DeepSeek operation consume the local Ollama bucket and produced a false
+    ``V238_SHARED_QWEN_*`` failure.  The active provider is now explicit, with
+    a compatibility inference for direct legacy callers.
+    """
+
+    def __init__(
+        self,
+        *,
+        qwen_physical_maximum: int = DEFAULT_QWEN_PHYSICAL_MAXIMUM,
+        llama_generation_maximum: int = 1,
+        provider_name: str | None = None,
+        provider_physical_maximum: int | None = None,
+        provider_physical_maximums: Mapping[str, int] | None = None,
+    ) -> None:
+        self.qwen_physical_maximum = max(1, int(qwen_physical_maximum))
+        self.llama_generation_maximum = max(0, int(llama_generation_maximum))
+        self.provider_name = _normalise_provider(provider_name)
+        self.provider_physical_maximums: dict[str, int] = {
+            _normalise_provider(key): max(1, int(value))
+            for key, value in (provider_physical_maximums or {}).items()
+            if _normalise_provider(key)
+        }
+        if self.provider_name and self.provider_name != "qwen":
+            self.provider_physical_maximums.setdefault(
+                self.provider_name,
+                max(1, int(provider_physical_maximum or self.qwen_physical_maximum)),
+            )
         self.total_reserved = 0
         self.qwen_reserved = 0
         self.llama_reserved = 0
+        self.provider_reserved: dict[str, int] = {}
         self.reservations: list[dict[str, Any]] = []
 
-    def reserve(self, *, model_tag: str, model_digest: str | None, phase: str,
-                reservation_id: str | None = None) -> dict[str, Any]:
+    def _bucket(self, *, model_tag: str, phase: str, provider: str | None) -> str:
+        token = str(phase or "").upper()
+        # An explicit fallback phase is authoritative.  Otherwise the
+        # provider identity wins: hosted NVIDIA/Groq endpoints may legitimately
+        # serve a model whose name contains ``llama`` without being the local
+        # canonical fallback phase.
+        if "LLAMA" in token:
+            return "llama"
+        explicit = _normalise_provider(provider)
+        if explicit:
+            return explicit
+        if self.provider_name:
+            return self.provider_name
+        # Compatibility for direct V2.2.x callers that predate provider
+        # identity in the execution context.
+        model = str(model_tag).casefold()
+        if model.startswith("llama"):
+            return "llama"
+        for candidate in ("deepseek", "gemini", "groq", "qwen"):
+            if candidate in model or candidate.upper() in token:
+                return candidate
+        return "qwen"
+
+    def _physical_maximum(self, bucket: str) -> int:
+        if bucket == "llama":
+            return self.llama_generation_maximum
+        if bucket == "qwen":
+            return self.qwen_physical_maximum
+        return self.provider_physical_maximums.get(bucket, DEFAULT_PROVIDER_PHYSICAL_MAXIMUM)
+
+    def _reservation_error(self, bucket: str, *, model_tag: str, phase: str, reserved: int, maximum: int) -> str:
+        label = "QWEN" if bucket == "qwen" else bucket.upper()
+        return (
+            f"V238_SHARED_{label}_PHYSICAL_CALL_BUDGET_EXCEEDED:"
+            f"reserved={reserved}:maximum={maximum}:"
+            f"model={str(model_tag)[:120]}:phase={phase}"
+        )
+
+    def reserve(
+        self,
+        *,
+        model_tag: str,
+        model_digest: str | None,
+        phase: str,
+        reservation_id: str | None = None,
+        provider: str | None = None,
+    ) -> dict[str, Any]:
+        token = str(phase or "").upper()
+        bucket = self._bucket(model_tag=model_tag, phase=token, provider=provider)
         if reservation_id:
             existing = next((row for row in self.reservations if row.get("reservation_id") == str(reservation_id)), None)
             if existing is not None:
-                expected = (str(model_tag), model_digest, str(phase or "").upper())
-                actual = (existing.get("model_tag"), existing.get("model_digest"), existing.get("phase"))
+                expected = (str(model_tag), model_digest, token, bucket)
+                # Rows created by pre-provider-identity callers are accepted
+                # with the bucket inferred from the current request.  New
+                # rows always persist the provider bucket explicitly.
+                actual = (
+                    existing.get("model_tag"), existing.get("model_digest"),
+                    existing.get("phase"), existing.get("provider") or bucket,
+                )
                 if actual != expected:
                     raise LlamaPolicyError("V238_SHARED_BUDGET_RESERVATION_IDENTITY_MISMATCH")
                 return {**existing, "reused": True}
-        token = str(phase or "").upper()
-        is_llama = "LLAMA" in token or str(model_tag).casefold().startswith("llama")
-        if is_llama:
-            if self.llama_reserved >= self.llama_generation_maximum:
+        maximum = self._physical_maximum(bucket)
+        reserved = self.llama_reserved if bucket == "llama" else self.provider_reserved.get(bucket, 0)
+        if reserved >= maximum:
+            if bucket == "llama":
                 raise LlamaPolicyError("V238_SHARED_LLAMA_CALL_BUDGET_EXCEEDED")
+            raise LlamaPolicyError(self._reservation_error(
+                bucket, model_tag=model_tag, phase=token, reserved=reserved, maximum=maximum,
+            ))
+        if bucket == "llama":
             self.llama_reserved += 1
         else:
-            if self.qwen_reserved >= self.qwen_physical_maximum:
-                raise LlamaPolicyError(
-                    "V238_SHARED_QWEN_PHYSICAL_CALL_BUDGET_EXCEEDED:"
-                    f"reserved={self.qwen_reserved}:maximum={self.qwen_physical_maximum}:"
-                    f"model={str(model_tag)[:120]}:phase={token}"
-                )
-            self.qwen_reserved += 1
+            self.provider_reserved[bucket] = reserved + 1
+            if bucket == "qwen":
+                self.qwen_reserved = self.provider_reserved[bucket]
         self.total_reserved += 1
         reservation = {
             "model_tag": str(model_tag), "model_digest": model_digest,
-            "phase": token, "attempt": self.total_reserved,
+            "phase": token, "provider": bucket, "attempt": self.total_reserved,
             "reservation_id": str(reservation_id) if reservation_id else None,
         }
         self.reservations.append(reservation)
         return reservation
 
     def snapshot(self) -> dict[str, Any]:
+        active_bucket = self.provider_name or "qwen"
         return {
+            # Legacy aliases remain for existing status consumers.  New code
+            # must use active_provider/physical_* or provider_* below.
             "qwen_reserved": self.qwen_reserved,
             "llama_reserved": self.llama_reserved,
             "total_reserved": self.total_reserved,
             "qwen_physical_maximum": self.qwen_physical_maximum,
             "llama_generation_maximum": self.llama_generation_maximum,
+            "active_provider": active_bucket,
+            "physical_reserved": self.llama_reserved if active_bucket == "llama" else self.provider_reserved.get(active_bucket, 0),
+            "physical_maximum": self._physical_maximum(active_bucket),
+            "provider_reserved": dict(self.provider_reserved),
+            "provider_physical_maximums": dict(self.provider_physical_maximums),
             "reservations": list(self.reservations),
         }
 
@@ -310,4 +406,4 @@ def review_suspect_qwen_outputs(outputs: Iterable[Mapping[str, Any]], reviewer: 
     return verdicts
 
 
-__all__ = ["ALLOWED_REASON_CODES", "FALLBACK_CANDIDATE_ONLY", "LLAMA_MODEL_TAG", "LLAMA_MODEL_DIGEST", "DEFAULT_QWEN_PHYSICAL_MAXIMUM", "HardCallBudget", "OperationCallBudget", "CanonicalLlamaProvider", "LlamaPolicyError", "eligible_units", "run_single_fallback_phase", "review_suspect_qwen_outputs", "enforce_v238_runtime_context"]
+__all__ = ["ALLOWED_REASON_CODES", "FALLBACK_CANDIDATE_ONLY", "LLAMA_MODEL_TAG", "LLAMA_MODEL_DIGEST", "DEFAULT_QWEN_PHYSICAL_MAXIMUM", "DEFAULT_PROVIDER_PHYSICAL_MAXIMUM", "HardCallBudget", "OperationCallBudget", "CanonicalLlamaProvider", "LlamaPolicyError", "eligible_units", "run_single_fallback_phase", "review_suspect_qwen_outputs", "enforce_v238_runtime_context"]

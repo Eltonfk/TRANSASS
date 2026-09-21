@@ -24,6 +24,27 @@ from transport_providers import (
 from ollama_runtime import ollama_keep_alive
 
 
+DEFAULT_MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def _read_limited_response(response: Any, maximum: int) -> bytes:
+    raw_length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
+    if raw_length:
+        try:
+            if int(raw_length) > maximum:
+                raise TransportBlocked("PROVIDER_RESPONSE_TOO_LARGE")
+        except ValueError:
+            raise TransportBlocked("PROVIDER_CONTENT_LENGTH_INVALID") from None
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > maximum:
+            raise TransportBlocked("PROVIDER_RESPONSE_TOO_LARGE")
+        body.extend(chunk)
+    return bytes(body)
+
+
 def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay: float = 0.0) -> bytes:
     """EXACTLY ONE HTTP POST.  Imported lazily so offline tests never load
     the requests dependency graph unless a live call is actually made.
@@ -33,9 +54,18 @@ def _http_post(url: str, headers: dict[str, str], request: dict[str, Any], delay
 
     if delay > 0:
         time.sleep(delay)
-    response = requests.post(url, headers=headers, json=request, timeout=300)
-    response.raise_for_status()
-    return response.content
+    maximum = max(1024, int(os.environ.get(
+        "TRANSASS_MAX_HTTP_RESPONSE_BYTES", DEFAULT_MAX_HTTP_RESPONSE_BYTES
+    )))
+    response = requests.post(
+        url, headers=headers, json=request, timeout=300, stream=True,
+        allow_redirects=False,
+    )
+    try:
+        response.raise_for_status()
+        return _read_limited_response(response, maximum)
+    finally:
+        response.close()
 
 
 def _decode_model_content(content: str) -> dict[str, Any]:
@@ -78,6 +108,7 @@ class WebDurableResponseProvider(DurableResponseProvider):
         super().__init__(
             mode, capture_root=capture_root, transport_semantics=transport_semantics,
             client=self._build_client(),
+            provider_name=provider,
         )
 
     def _build_client(self) -> Callable[[dict[str, Any]], dict[str, Any]]:

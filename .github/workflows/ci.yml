@@ -9,6 +9,10 @@ on:
 jobs:
   offline-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,6 +23,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-test.lock
 
       - name: Install dependencies
         run: |
@@ -30,23 +38,22 @@ jobs:
         env:
           # The web app creates its state dir at import time; point it at a
           # writable temp path on CI instead of the container default /app.
-          TRANSLATOR_WEB_STATE_DIR: /tmp/transass-state
-          ANIME_SUBTITLE_LIBRARY_ROOT: /tmp/transass-state/anime-subtitle-library
-          TRANSLATOR_GLOSSARY_PATH: /tmp/transass-state/glossary_v1.json
+          TRANSLATOR_WEB_STATE_DIR: ${{ runner.temp }}/transass-state
         run: |
-          # CI runs the environment-independent unit suite.  The remaining
-          # tests/offline files are operational tests that require the
-          # author's canonical state / runtime evidence (see docs/TESTING.md).
-          PYTHONPATH=src/subtranslate python3 -m pytest -v \
-            tests/offline/test_v238_canonical_port.py \
-            tests/offline/test_transport_providers.py \
-            tests/offline/test_subtranslate_readonly_probe.py \
-            tests/offline/test_subtranslate_context_inspect.py \
-            tests/offline/test_subtranslate_next_routing.py \
-            tests/offline/test_subtranslate_command_dispatch.py \
-            tests/offline/test_maintenance.py
+          python3 scripts/run_test_shard.py --shard ${{ matrix.shard }} --total 4 \
+            --junit-dir "${{ runner.temp }}/test-results"
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-tests-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-results
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Compile check
+        if: matrix.shard == 1
         run: |
           python3 -m compileall -q src/subtranslate
 

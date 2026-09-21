@@ -337,3 +337,85 @@ def test_v230_accepts_pretranslated_syllabic_event_without_rewriting_tags(tmp_pa
     assert result["translated_units"] == 1
     assert result["already_translated_units"] == 1
     assert pysubs2.load(str(output))[0].text == r"{\k20}Poste {\k30}lunar"
+
+
+def test_portuguese_homographs_do_not_falsely_trigger_english_detection():
+    # "a" and "do" are Portuguese words, should not qualify text as English on their own
+    assert karaoke._looks_like_english_song_text("Vamos conquistar a luz do sol") is False
+    assert karaoke._looks_like_english_song_text("Vou até a casa do amigo") is False
+    assert karaoke._looks_like_english_song_text("Caminhando a passos do destino") is False
+    assert karaoke._still_requires_song_translation(
+        "We're going to seize the sunlight",
+        "Vamos conquistar a luz do sol",
+    ) is False
+
+
+def test_v230_does_not_retranslate_lyric_with_portuguese_homographs(tmp_path):
+    original = tmp_path / "episode.original.ass"
+    intermediate = tmp_path / "episode.v238.ass"
+    output = tmp_path / "episode.pt-BR.ass"
+
+    original_subs = pysubs2.SSAFile()
+    original_subs.events = [
+        pysubs2.SSAEvent(style="OP English", text=r"{\be2}We're going to seize the sunlight"),
+    ]
+    original_subs.save(str(original), encoding="utf-8")
+
+    candidate_subs = pysubs2.SSAFile()
+    candidate_subs.events = [
+        pysubs2.SSAEvent(style="OP English", text=r"{\be2}Vamos conquistar a luz do sol"),
+    ]
+    candidate_subs.save(str(intermediate), encoding="utf-8")
+
+    def unexpected_translator(*_args):
+        raise AssertionError("linha em português não deve ser reenviada ao modelo")
+
+    result = karaoke.augment_karaoke_candidate_v2_3_0(
+        intermediate,
+        output,
+        translator=unexpected_translator,
+        original_source_path=original,
+    )
+    translated = pysubs2.load(str(output))
+
+    assert result["song_units"] == 1
+    assert result["translated_units"] == 1
+    assert result["already_translated_units"] == 1
+    assert result["provider_calls"] == 0
+    assert result["failures"] == []
+    assert translated[0].text == r"{\be2}Vamos conquistar a luz do sol"
+
+
+def test_v230_uses_source_canonical_when_retranslating(tmp_path):
+    original = tmp_path / "episode.original.ass"
+    intermediate = tmp_path / "episode.v238.ass"
+    output = tmp_path / "episode.pt-BR.ass"
+
+    original_subs = pysubs2.SSAFile()
+    original_subs.events = [
+        pysubs2.SSAEvent(style="OP English", text=r"{\be2}We're going to seize the sunlight"),
+    ]
+    original_subs.save(str(original), encoding="utf-8")
+
+    candidate_subs = pysubs2.SSAFile()
+    candidate_subs.events = [
+        pysubs2.SSAEvent(style="OP English", text=r"{\be2}We're going to seize the sunlight"),
+    ]
+    candidate_subs.save(str(intermediate), encoding="utf-8")
+
+    calls = []
+
+    def fake_translator(canonical, _before, _after):
+        calls.append(canonical)
+        return "Vamos conquistar a luz do sol"
+
+    result = karaoke.augment_karaoke_candidate_v2_3_0(
+        intermediate,
+        output,
+        translator=fake_translator,
+        original_source_path=original,
+    )
+    assert calls == ["We're going to seize the sunlight"]
+    assert result["failures"] == []
+    assert result["translated_units"] == 1
+

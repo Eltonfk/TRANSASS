@@ -32,6 +32,8 @@ class PipelinePlan:
     adapter_function: str | None = None
     augmentation_module: str | None = None
     augmentation_function: str | None = None
+    replacement_pipeline_id: str | None = None
+    deprecation_reason: str = ""
 
 
 def _plan(plan_id: str, label: str, stages: tuple[str, ...], *,
@@ -39,7 +41,9 @@ def _plan(plan_id: str, label: str, stages: tuple[str, ...], *,
           deprecated: bool = False, model_family: str | None = None,
           notes: str = "", archive_translation: bool = False,
           adapter_module: str | None = None, adapter_function: str | None = None,
-          augmentation_module: str | None = None, augmentation_function: str | None = None) -> PipelinePlan:
+          augmentation_module: str | None = None, augmentation_function: str | None = None,
+          replacement_pipeline_id: str | None = None,
+          deprecation_reason: str = "") -> PipelinePlan:
     return PipelinePlan(
         id=plan_id,
         display_label=label,
@@ -57,7 +61,27 @@ def _plan(plan_id: str, label: str, stages: tuple[str, ...], *,
         adapter_function=adapter_function,
         augmentation_module=augmentation_module,
         augmentation_function=augmentation_function,
+        replacement_pipeline_id=replacement_pipeline_id,
+        deprecation_reason=deprecation_reason,
     )
+
+
+class PipelineDeprecatedError(UnsupportedPipelineError):
+    """Raised when a deprecated plan is requested for a new job.
+
+    Deprecated plans remain resolvable by ``get_pipeline_plan`` so historical
+    summaries, explicit replays and already-created jobs keep their lineage.
+    New work must go through ``ensure_pipeline_for_new_job`` instead.
+    """
+
+    def __init__(self, plan: PipelinePlan):
+        self.plan_id = plan.id
+        self.replacement_pipeline_id = plan.replacement_pipeline_id
+        replacement = plan.replacement_pipeline_id or "o pipeline atual"
+        super().__init__(
+            f"pipeline {plan.id} está descontinuado para novos jobs; "
+            f"use {replacement}"
+        )
 
 
 _PLANS = {
@@ -66,8 +90,23 @@ _PLANS = {
         retranslation=False,
         notes="Explicit legacy plan; it is never an implicit unknown-token fallback.",
     ),
-    "v2_1_2": _plan("v2_1_2", "V2.1.2", ("FULL_TRANSLATION_V212",), adapter_module="production_v2_1_2_adapter", adapter_function="translate_subtitle_file_v2_1_2"),
-    "v2_1_3": _plan("v2_1_3", "V2.1.3", ("FULL_TRANSLATION_V213",), archive_translation=True, adapter_module="production_v2_1_3_adapter", adapter_function="translate_subtitle_file_v2_1_3"),
+    "v2_1_2": _plan(
+        "v2_1_2", "V2.1.2", ("FULL_TRANSLATION_V212",),
+        deprecated=True, replacement_pipeline_id="v2_3_8",
+        deprecation_reason="plano histórico substituído pelo fluxo canônico V2.3.8",
+        notes="Compatibilidade histórica e replay explícito; não aceita novos jobs.",
+        adapter_module="production_v2_1_2_adapter",
+        adapter_function="translate_subtitle_file_v2_1_2",
+    ),
+    "v2_1_3": _plan(
+        "v2_1_3", "V2.1.3", ("FULL_TRANSLATION_V213",),
+        deprecated=True, replacement_pipeline_id="v2_3_8",
+        deprecation_reason="núcleo histórico substituído pelo fluxo canônico V2.3.8",
+        notes="Compatibilidade histórica e replay explícito; não aceita novos jobs.",
+        archive_translation=True,
+        adapter_module="production_v2_1_3_adapter",
+        adapter_function="translate_subtitle_file_v2_1_3",
+    ),
     "v2_2_0": _plan("v2_2_0", "V2.2.0", ("FULL_TRANSLATION_V220",), archive_translation=True, adapter_module="production_v2_2_0_adapter", adapter_function="translate_subtitle_file_v2_2_0"),
     "v2_2_1": _plan("v2_2_1", "V2.2.1", ("FULL_TRANSLATION_V221",), archive_translation=True, adapter_module="production_v2_2_1_adapter", adapter_function="translate_subtitle_file_v2_2_1"),
     "v2_2_2": _plan("v2_2_2", "V2.2.2", ("FULL_TRANSLATION_V222",), archive_translation=True, adapter_module="production_v2_2_2_adapter", adapter_function="translate_subtitle_file_v2_2_2"),
@@ -87,6 +126,12 @@ _PLANS = {
         adapter_module="production_v2_3_8_adapter", adapter_function="translate_subtitle_file_v2_3_8",
         augmentation_module="production_v2_3_0_adapter", augmentation_function="augment_karaoke_candidate_v2_3_0", archive_translation=True,
     ),
+    "v3": _plan(
+        "v3", "V3", ("V3_UNIFIED_PIPELINE",),
+        notes="Transass V3 Unified in-memory AST pipeline: single-pass parsing, semantic translation, visual glyph preservation and karaoke augmentation.",
+        adapter_module="pipeline_v3", adapter_function="translate_subtitle_file_v3",
+        archive_translation=True,
+    ),
 }
 
 PLANS: Mapping[str, PipelinePlan] = MappingProxyType(_PLANS)
@@ -104,8 +149,21 @@ def get_pipeline_plan(plan_id: str) -> PipelinePlan:
 
 
 def resolve_pipeline(plan_id: str) -> PipelinePlan:
-    """Resolve explicitly; unknown values fail closed and never become legacy."""
+    """Resolve explicitly, inclusive planos deprecated para replay."""
     return get_pipeline_plan(plan_id)
+
+
+def ensure_pipeline_for_new_job(plan_id: str) -> PipelinePlan:
+    """Return a plan that is allowed to start new work.
+
+    This gate is intentionally separate from ``get_pipeline_plan``. Removing
+    deprecated plans from resolution would make historical jobs impossible to
+    inspect or replay and would erase useful lineage evidence.
+    """
+    plan = get_pipeline_plan(plan_id)
+    if plan.deprecated:
+        raise PipelineDeprecatedError(plan)
+    return plan
 
 
 def pipeline_info(plan_id: str, *, model: str = "", service_available_for_mutation: bool = True) -> dict:
@@ -125,8 +183,15 @@ def pipeline_info(plan_id: str, *, model: str = "", service_available_for_mutati
         "archive_translation": plan.archive_translation,
         "model": model or "não configurado",
         "deprecated": plan.deprecated,
+        "lifecycle": "deprecated" if plan.deprecated else "active",
+        "new_jobs_allowed": bool(plan.supported and not plan.deprecated),
+        "replacement_pipeline": plan.replacement_pipeline_id,
+        "deprecation_reason": plan.deprecation_reason,
         "notes": plan.notes,
     }
 
 
-__all__ = ["PLANS", "PipelinePlan", "UnsupportedPipelineError", "get_pipeline_plan", "resolve_pipeline", "pipeline_info"]
+__all__ = [
+    "PLANS", "PipelineDeprecatedError", "PipelinePlan", "UnsupportedPipelineError",
+    "ensure_pipeline_for_new_job", "get_pipeline_plan", "resolve_pipeline", "pipeline_info",
+]

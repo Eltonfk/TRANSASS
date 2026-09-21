@@ -139,6 +139,25 @@ class ContractAndControlPlaneTests(unittest.TestCase):
         self.assertEqual(info["effective_pipeline_plan"], "v2_3_8")
         self.assertEqual(info["pipeline"], "v2_3_8")
 
+    def test_deprecated_pipeline_rejects_new_start_without_queue_mutation(self):
+        import app
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "source.mkv").write_bytes(b"x")
+            old_base = app.BASE_LIBRARY
+            try:
+                app.BASE_LIBRARY = root
+                with app.app.test_client() as client, patch.object(app, "_effective_pipeline", return_value="v2_1_3"), patch.object(app, "_start_worker_locked") as start_worker:
+                    response = client.post("/start", json={"folder": ".", "episodes": ["source.mkv"]})
+                payload = response.get_json()
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(payload["code"], "pipeline_deprecated")
+                self.assertEqual(payload["pipeline"], "v2_1_3")
+                self.assertEqual(payload["replacement_pipeline"], "v2_3_8")
+                start_worker.assert_not_called()
+            finally:
+                app.BASE_LIBRARY = old_base
+
     def test_start_route_n3_adds_three_jobs_and_starts_once(self):
         import app
         with tempfile.TemporaryDirectory() as tmp:

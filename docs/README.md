@@ -6,6 +6,8 @@ programa numa terça-feira à noite.
 
 ## Para usar
 
+- [Baseline verificável](STATUS_ATUAL.md): fonte canônica e comandos para medir o runtime atual.
+- [ASS no Transass](ASS_FORMAT.md): formato, tags, typesetting e regras de preservação.
 - [Instalação](INSTALLATION.md): Desktop, Docker e desenvolvimento.
 - [Configuração](CONFIGURATION.md): providers, caminhos, idioma e Thermal Guard.
 - [Operações](OPERATIONS.md): iniciar, atualizar, diagnosticar e manter.

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.historical
+
 TOOL_PATH = (
     Path(__file__).resolve().parents[2]
     / ".opencode/tools/subtranslate_b7_planner.py"

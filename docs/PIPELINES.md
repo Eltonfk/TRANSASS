@@ -19,11 +19,28 @@ título e comentários técnicos não viram letra apenas porque o fansub reutili
 um estilo chamado `Karaoke Translation`. Foi assim que 21 “músicas” voltaram a
 ser 8; a matemática agradeceu.
 
-## Planos históricos
+## Planos em retirada
+
+`v2_1_2` e `v2_1_3` estão marcados como `deprecated`. A interface, o endpoint
+de preflight, a fila web e o comando normal de tradução recusam esses IDs para
+novos jobs e apontam para `v2_3_8`. O registro e os adapters continuam presentes
+temporariamente para preservar lineage, diagnósticos, jobs já criados e replay
+explícito.
+
+Essa etapa não é uma remoção física. O núcleo `pipeline_v2_1_3.py` ainda é uma
+dependência transitiva dos adapters V2.2.x e do materializador base utilizado
+por V2.3.8. Antes de apagar os arquivos, as primitivas restantes precisam ser
+extraídas para módulos neutros, os checkpoints históricos precisam ser auditados
+e a suíte offline precisa provar que o fechamento de imports continua íntegro.
+
+## Outros planos históricos
 
 `legacy`, `v2_2_4`, `v2_2_5`, `v2_2_6` e `v2_3_0` permanecem registrados para
 replay e compatibilidade explícita. Eles não são fallback automático do plano
 canônico. ID desconhecido falha antes de importar ou chamar um modelo.
+
+`v2_3_0` não está em retirada: continua sendo a etapa de complemento de
+karaokê/OP/ED dentro do plano V2.3.8.
 
 ## Regras invariantes
 

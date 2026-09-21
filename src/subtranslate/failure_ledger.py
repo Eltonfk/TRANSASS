@@ -37,6 +37,22 @@ def _sha(value: Any) -> str | None:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
 
 
+def _sha_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _job_directory_name(job_id: str) -> str:
+    """Return one safe filesystem component without rejecting valid jobs."""
+    encoded = job_id.encode("utf-8", "replace")
+    if job_id and job_id not in {".", ".."} and not any(char in job_id for char in ("/", "\\", "\0")) and len(encoded) <= 180:
+        return job_id
+    return f"job-{_sha(job_id)}"
+
+
 def _safe(value: Any, *, limit: int = MAX_TEXT, key: str = "") -> Any:
     """Make JSON evidence bounded and remove credential-like fields."""
     lowered = key.lower()
@@ -87,7 +103,7 @@ class FailureLedger:
         self.job_id = str(job_id)
         base = Path(root or default_failure_ledger_root())
         self.root = base
-        self.job_dir = base / "jobs" / self.job_id
+        self.job_dir = base / "jobs" / _job_directory_name(self.job_id)
         self.job_dir.mkdir(parents=True, exist_ok=True)
         self.metadata = _safe(dict(metadata))
         self._source_path: Path | None = None
@@ -115,7 +131,7 @@ class FailureLedger:
         _write_json(self.job_dir / "source-reference.json", {
             "path": str(path),
             "exists": path.is_file(),
-            "sha256": _sha(path.read_bytes()) if path.is_file() else None,
+            "sha256": _sha_file(path) if path.is_file() else None,
             "size": path.stat().st_size if path.is_file() else None,
         })
 
@@ -222,7 +238,7 @@ class FailureLedger:
             destination = self.job_dir / "source.ass"
             if not destination.exists():
                 shutil.copy2(self._source_path, destination)
-            snapshot["source_snapshot"] = {"path": str(destination), "sha256": _sha(destination.read_bytes())}
+            snapshot["source_snapshot"] = {"path": str(destination), "sha256": _sha_file(destination)}
         _write_json(self.job_dir / "snapshot.json", snapshot)
         _write_json(self.job_dir / "manifest.json", {
             "schema": "failure-ledger-manifest-v1", "job_id": self.job_id,
@@ -234,9 +250,7 @@ class FailureLedger:
         return str(self.job_dir / "snapshot.json")
 
     def complete(self, runner: Any, summary: dict[str, Any] | None) -> str:
-        self.sync_runner(runner, summary)
-        result = self.snapshot(runner, summary, stage="completed", blocking=False)
-        return result
+        return self.snapshot(runner, summary, stage="completed", blocking=False)
 
     def prune(self) -> None:
         jobs_root = self.root / "jobs"

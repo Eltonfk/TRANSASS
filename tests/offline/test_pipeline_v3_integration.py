@@ -68,3 +68,85 @@ def test_pipeline_v3_end_to_end_in_memory(tmp_path: Path):
     assert final_doc[4].text == r"{\p1}m 0 0 l 20 20"
     # Comentário intacto
     assert final_doc[5].is_comment is True
+
+
+def test_make_v3_transport_call_batch_and_fallback(monkeypatch):
+    from pipeline_v3 import make_v3_transport_call
+
+    class FakeTransport:
+        delay_between_calls = 0.0
+
+        def endpoint(self):
+            return "http://fake-llm/api"
+
+        def headers(self):
+            return {"Content-Type": "application/json"}
+
+        def build_request(self, canonical_payload):
+            return canonical_payload
+
+        def extract_content(self, body):
+            return body.decode("utf-8")
+
+    fake_calls = []
+
+    def fake_http_post(url, headers, request, delay=0.0):
+        fake_calls.append(request)
+        # Se for o lote inicial
+        messages = request.get("messages", [])
+        user_msg = messages[-1]["content"]
+        if "items" in user_msg:
+            # Retorna apenas 1 dos 2 itens em JSON para forçar fallback no segundo
+            return b'{"translations": [{"id": "1", "translation": "Ola mundo"}]}'
+        # Fallback individual
+        return b'"Fallback individual"'
+
+    monkeypatch.setattr("web_durable_provider._http_post", fake_http_post)
+
+    caller = make_v3_transport_call(FakeTransport())
+    payload = [
+        {"id": 1, "source_text": "Hello world", "is_sign": False},
+        {"id": 2, "source_text": "Second sentence", "is_sign": False},
+    ]
+    res = caller(payload)
+
+    assert res[1] == "Ola mundo"
+    assert res[2] == "Fallback individual"
+    assert len(fake_calls) == 2  # 1 lote + 1 fallback individual
+
+
+def test_pipeline_v3_progress_callback(tmp_path: Path):
+    raw_source = (
+        "[Script Info]\nTitle: Progress Test\nScriptType: v4.00+\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Line 1\n"
+        "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Line 2\n"
+    )
+    src_file = tmp_path / "prog_ep.ass"
+    dest_file = tmp_path / "prog_ep.pt-BR.ass"
+    src_file.write_text(raw_source, encoding="utf-8")
+
+    progress_ticks = []
+
+    def on_progress(current, total):
+        progress_ticks.append((current, total))
+
+    def mock_call(payload):
+        return {item["id"]: f"Trad: {item['source_text']}" for item in payload}
+
+    result = translate_subtitle_file_v3(
+        src_file,
+        dest_file,
+        transport_call=mock_call,
+        target_batch_size=1,
+        progress_callback=on_progress,
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert len(progress_ticks) == 2
+    assert progress_ticks[-1] == (2, 2)
+

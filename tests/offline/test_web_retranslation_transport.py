@@ -6,9 +6,10 @@ import pytest
 from web_retranslation_runner import _provider_for
 from web_durable_provider import WebDurableResponseProvider
 from pipeline_v2_1_3 import validate_inline_tags
-from web_audit_retranslation import source_relative_delimiter_audit
+from web_audit_retranslation import audit_record, source_relative_delimiter_audit
 from v238_full_translation_stage import _render_event, _repair_ownership_whitespace
 from v238_source_payload import rc4_replace_source_payload
+from v238_semantic_style_ownership import semantic_style_token_sequence
 from transport_providers import TransportBlocked
 
 
@@ -120,6 +121,73 @@ def test_ordinary_v238_event_uses_source_owned_reenvelope():
     assert details["path"] == "BASE_V226_PAYLOAD_REENVELOPED"
     assert validate_inline_tags(source, rendered) == []
     assert rendered.count(r"\N") == source.count(r"\N")
+
+
+def test_dense_colour_gradient_is_reprojected_before_semantic_ownership():
+    class OrdinaryProvider:
+        def v238_group_key(self, event_id: int):
+            return "event-visual"
+
+        def ownership(self, request, *, capture_id=None):
+            raise AssertionError("visual gradients must not request semantic ownership")
+
+    source = r"{\fnCorbert\fs26\b1\c&H000000&}A{\c&H111111&}B{\c&H222222&}C{\c&H444444&}D"
+    target = "ABCDE"
+    counters = {key: 0 for key in (
+        "source_payload", "styled_span_detector", "semantic_ownership_detector",
+        "semantic_ownership_render", "visual_detector", "visual_reconstruction",
+        "temporal_transform", "ownership_request", "anchor_solver",
+    )}
+
+    rendered, details = _render_event(
+        source, target, event_id=777, provider=OrdinaryProvider(), model=None,
+        counters=counters, ownership_cache={},
+    )
+
+    assert details["path"] == "VISUAL_GLYPH"
+    assert "{\\c&H000000&}" in rendered
+    assert semantic_style_token_sequence(source) == semantic_style_token_sequence(rendered)
+    assert counters["ownership_request"] == 0
+
+
+def test_audit_accepts_proven_visual_tag_reflow(tmp_path: Path):
+    source_text = r"{\fnCorbert\fs26\b1\c&H000000&}A{\c&H111111&}B{\c&H222222&}C{\c&H444444&}D"
+    counters = {key: 0 for key in (
+        "source_payload", "styled_span_detector", "semantic_ownership_detector",
+        "semantic_ownership_render", "visual_detector", "visual_reconstruction",
+        "temporal_transform", "ownership_request", "anchor_solver",
+    )}
+    class OrdinaryProvider:
+        def v238_group_key(self, event_id: int):
+            return "event-visual"
+
+        def ownership(self, request, *, capture_id=None):
+            raise AssertionError("visual gradients must not request semantic ownership")
+
+    output_text, _details = _render_event(
+        source_text, "ABCDE", event_id=778, provider=OrdinaryProvider(), model=None,
+        counters=counters, ownership_cache={},
+    )
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,2,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    line = "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{}\n"
+    source = tmp_path / "source.ass"
+    output = tmp_path / "output.ass"
+    source.write_text(header + line.format(source_text), encoding="utf-8")
+    output.write_text(header + line.format(output_text), encoding="utf-8")
+
+    result = audit_record(source, output)
+
+    assert result["status"] == "SEM PROBLEMAS DETECTADOS"
+    assert result["blocking_flags"] == []
+    assert result["checks"]["structural"] is True
+    assert result["events"][0]["visual_tag_reflow"] is True
 
 
 def test_ordinary_v238_event_keeps_materialized_break_spacing():

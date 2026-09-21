@@ -64,7 +64,10 @@ def test_runtime_environment_never_reuses_container_aliases(monkeypatch, tmp_pat
 def test_live_execution_identity_has_local_defaults_and_honors_build_metadata(monkeypatch):
     from runtime_config import execution_identity
 
-    for key in ("PROMPT_SCHEMA_HASH", "CONFIGURATION_HASH", "CANDIDATE_COMMIT", "CANDIDATE_IMAGE_ID"):
+    for key in (
+        "PROMPT_SCHEMA_HASH", "CONFIGURATION_HASH", "CANDIDATE_COMMIT",
+        "CANDIDATE_IMAGE_ID", "TRANSASS_BUILD_COMMIT", "TRANSASS_BUILD_IMAGE_ID",
+    ):
         monkeypatch.delenv(key, raising=False)
     local = execution_identity({"primary": {"provider": "ollama", "model": "qwen3.5:9b"}})
     assert all(local[key] for key in ("prompt_schema_hash", "configuration_hash", "candidate_commit", "candidate_image_id"))
@@ -74,6 +77,12 @@ def test_live_execution_identity_has_local_defaults_and_honors_build_metadata(mo
     release = execution_identity({})
     assert release["candidate_commit"] == "ci-commit"
     assert release["candidate_image_id"] == "ci-image"
+
+    monkeypatch.setenv("TRANSASS_BUILD_COMMIT", "embedded-commit")
+    monkeypatch.setenv("TRANSASS_BUILD_IMAGE_ID", "embedded-image")
+    embedded = execution_identity({})
+    assert embedded["candidate_commit"] == "embedded-commit"
+    assert embedded["candidate_image_id"] == "embedded-image"
 
 
 def test_migration_preserves_existing_user_legend_and_is_repeatable(tmp_path):

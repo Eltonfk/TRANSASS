@@ -40,7 +40,7 @@ Edite no mínimo:
 ```env
 MEDIA_ROOT=/caminho/para/series
 STATE_DIR=/caminho/para/transass-state
-BIND_ADDR=0.0.0.0
+BIND_ADDR=127.0.0.1
 WEB_PORT=5050
 ```
 
@@ -53,6 +53,9 @@ docker compose --env-file .env -f deploy/compose.yaml up -d
 
 Acesse `http://localhost:5050`. O Compose monta a mídia em `/shows` e o estado
 em `/app/state`; esses aliases pertencem ao contêiner, não ao host.
+
+Para acessar pela LAN, não exponha diretamente a interface administrativa:
+coloque-a atrás de um reverse proxy autenticado e só então altere `BIND_ADDR`.
 
 Para Ollama no host Linux, o Compose usa `host.docker.internal`. Confirme antes:
 
