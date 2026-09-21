@@ -438,6 +438,19 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertNotIn("{*}", rendered)
 
+    def test_line_break_inside_word_accepts_legitimate_short_words(self):
+        """Legitimate short functional words around an ASS visual break must not trigger LINE_BREAK_INSIDE_WORD."""
+        from pipeline_v2_1_3 import line_break_inside_word
+        from production_v2_2_2_adapter import _has_unsafe_break
+
+        self.assertFalse(line_break_inside_word(r"Festival de Música\Nda Escola Towa"))
+        self.assertFalse(line_break_inside_word(r"Festival de Música da\NEscola Towa"))
+        self.assertFalse(line_break_inside_word(r"O livro\Ndo meu pai"))
+        self.assertFalse(line_break_inside_word(r"Wombat, e\N\N\Nlogo voltou"))
+        self.assertFalse(_has_unsafe_break(r"Festival de Música\Nda Escola Towa"))
+        self.assertFalse(_has_unsafe_break(r"Festival de Música da\NEscola Towa"))
+        self.assertTrue(line_break_inside_word(r"vi\Nda"))
+
 
 if __name__ == "__main__":
     unittest.main()

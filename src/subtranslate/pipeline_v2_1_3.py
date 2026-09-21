@@ -23,12 +23,26 @@ from typing import Any
 import pysubs2
 import requests
 
+from ass_structure import (
+    BREAK_RE,
+    CONTROL_RE,
+    TAG_RE as ASS_TAG_RE,
+    TOKEN_RE as ASS_TOKEN_RE,
+    break_count,
+    break_tokens,
+    hard_space_count,
+    inline_tag_counts as ass_inline_tag_counts,
+    is_drawing_event,
+    restore_hard_spaces,
+    split_text_with_controls,
+    visible_text,
+)
 from ollama_runtime import ollama_keep_alive
 
 
-TAG_RE = re.compile(r"\{[^}]*\}")
-TOKEN_RE = re.compile(r"(\{[^}]*\}|\\N)")
-KARAOKE_RE = re.compile(r"\\k(?:f|o)?\d+", re.I)
+TAG_RE = ASS_TAG_RE
+TOKEN_RE = ASS_TOKEN_RE
+KARAOKE_RE = re.compile(r"\\(?:kt|kf|ko|k)\d+", re.I)
 WORD_RE = re.compile(r"[A-Za-zÀ-ÿ]+", re.UNICODE)
 BRACKET_RE = re.compile(r"\[([^\[\]]+)\]")
 POSITION_RE = re.compile(r"\\(?:pos|move|an\d|p\d)", re.I)
@@ -53,6 +67,27 @@ PORTUGUESE_IDENTICAL = {
 }
 SONG_WORDS = {"op", "ed", "opening", "ending", "song", "theme", "lyric", "lyrics", "karaoke", "romaji", "kanji", "insert"}
 VISUAL_STOPWORDS = {"a", "o", "as", "os", "um", "uma", "de", "do", "da", "dos", "das", "e", "em", "por", "para", "com", "no", "na", "nos", "nas", "que"}
+LEGITIMATE_SHORT_WORDS = {
+    "a", "o", "as", "os", "um", "uma", "uns", "umas",
+    "ao", "aos", "à", "às",
+    "de", "do", "da", "dos", "das",
+    "em", "no", "na", "nos", "nas",
+    "num", "numa", "nuns", "numas",
+    "dum", "duma", "duns", "dumas",
+    "por", "pelo", "pela", "pelos", "pelas", "pra", "pro", "pras", "pros",
+    "e", "ou", "se", "que", "mas", "com", "sem", "sob", "até", "nem", "pois",
+    "eu", "tu", "ele", "ela", "nós", "vós", "eles", "elas",
+    "me", "te", "se", "nos", "vos", "lhe", "lhes",
+    "meu", "teu", "seu", "sua", "meus", "teus", "seus", "suas",
+    "isso", "isto", "esse", "essa", "este", "esta",
+    "já", "só", "lá", "cá", "ali", "aqui", "bem", "mal", "mau", "não", "sim",
+    "é", "era", "foi", "vai", "vem", "dar", "ver", "ter", "ser", "sou", "são",
+    "tem", "diz", "faz", "vou", "fiz", "deu", "viu", "sai", "ia",
+    "dia", "sol", "lua", "mar", "céu", "fim", "paz", "dor", "som", "tom", "voz",
+    "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês",
+    "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua",
+    "oba", "olá", "alô", "opa", "uau", "ai", "ui", "ah", "oh", "ei",
+}
 
 # Palavras francesas comuns para detectar texto em francês e não classificá-lo como música.
 # Lista deliberadamente conservadora: inclui apenas artigos, preposições e conectivos
@@ -90,6 +125,7 @@ CRITICAL_FLAGS = {
     "DELIMITER_COUNT_MISMATCH",
     "ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_ANCHOR_FAILURE",
     "ASS_INLINE_TAG_DUPLICATION",
+    "ASS_HARD_SPACE_COUNT_MISMATCH",
     "IDIOMATIC_LITERAL_RISK",
     "UNTRANSLATED_DIALOGUE",
 }
@@ -211,6 +247,13 @@ class Event:
     tag_anchors: list[dict[str, Any]]
     line_break_boundaries: list[int]
     has_positioning: bool
+    # ASS supports both hard (\N) and soft (\n) visual breaks.  Keep their
+    # exact source tokens so translation never upgrades a soft break by
+    # accident.  Hard spaces are tracked by visible offset and restored after
+    # the target payload is produced.
+    line_break_tokens: list[str] = field(default_factory=list)
+    hard_space_positions: list[int] = field(default_factory=list)
+    is_drawing: bool = False
     classification: str = "UNKNOWN"
     classification_reason: str = ""
     screen_confidence: float = 0.0
@@ -297,30 +340,12 @@ def _style_tokens(line: Any) -> set[str]:
 
 def split_ass_text(text: str) -> tuple[list[str], list[dict[str, Any]], list[int]]:
     """Remove tags while recording exact tag anchors and visual boundaries."""
-    pieces: list[str] = []
-    anchors: list[dict[str, Any]] = []
-    breaks: list[int] = []
-    current: list[str] = []
-    visible_offset = 0
-    for token in TOKEN_RE.split(text):
-        if not token:
-            continue
-        if token == r"\N":
-            pieces.append("".join(current))
-            current = []
-            breaks.append(len(pieces) - 1)
-            continue
-        if token.startswith("{") and token.endswith("}"):
-            anchors.append({"position": visible_offset, "tag": token})
-            continue
-        current.append(token)
-        visible_offset += len(token)
-    pieces.append("".join(current))
+    pieces, anchors, breaks, _break_values, _hard_spaces = split_text_with_controls(text)
     return pieces, anchors, breaks
 
 
 def _visible(text: str) -> str:
-    return TAG_RE.sub("", text).replace(r"\N", "\n")
+    return visible_text(text)
 
 
 def looks_romanized_token(token: str, english_dictionary: set[str] | None = None) -> bool:
@@ -338,7 +363,7 @@ def looks_romanized_token(token: str, english_dictionary: set[str] | None = None
 
 def extract_romanization_gloss(text: str, english_dictionary: set[str] | None = None) -> tuple[str, str] | None:
     """Extract `RomanizedBase [English gloss]` without anime-specific names."""
-    plain = TAG_RE.sub("", text).replace(r"\N", " ").strip()
+    plain = visible_text(text, line_break=" ").strip()
     match = ROMANIZATION_GLOSS_RE.fullmatch(plain)
     if not match:
         return None
@@ -362,7 +387,7 @@ def probable_romaji(
     """
     if canonical_source_language(source_language) != "english":
         return False, 0.0, "non-English source language"
-    plain = TAG_RE.sub("", text).replace(r"\N", " ").strip()
+    plain = visible_text(text, line_break=" ").strip()
     words = [word.lower() for word in WORD_RE.findall(plain)]
     if len(words) < 3 or not plain or not all(word.isascii() for word in words):
         return False, 0.0, "insufficient ASCII word sequence"
@@ -399,6 +424,8 @@ def classify_event(
 ) -> tuple[str, str, float]:
     if getattr(line, "is_comment", False):
         return "TECHNICAL_OR_EMPTY", "ASS Comment preservado", 1.0
+    if is_drawing_event(_field(line, "text", "")):
+        return "TECHNICAL_OR_EMPTY", "ASS desenho vetorial preservado", 1.0
     if not clean_text.strip():
         return "TECHNICAL_OR_EMPTY", "sem texto linguístico", 1.0
     romanization_gloss = extract_romanization_gloss(clean_text, english_dictionary)
@@ -455,6 +482,9 @@ def analyze_profile(subs: pysubs2.SSAFile, events: list[Event]) -> dict[str, Any
         "karaoke": sum(bool(KARAOKE_RE.search(event.original_text)) for event in events),
         "positioning": sum(event.has_positioning for event in events),
         "line_breaks": sum(bool(event.line_break_boundaries) for event in events),
+        "soft_breaks": sum(event.original_text.count(r"\n") for event in events),
+        "hard_spaces": sum(event.original_text.count(r"\h") for event in events),
+        "drawing_events": sum(event.is_drawing for event in events),
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_data, sort_keys=True).encode()).hexdigest()[:16]
     return {
@@ -466,6 +496,15 @@ def analyze_profile(subs: pysubs2.SSAFile, events: list[Event]) -> dict[str, Any
         "karaoke_events": fingerprint_data["karaoke"],
         "positioning_events": fingerprint_data["positioning"],
         "line_break_events": fingerprint_data["line_breaks"],
+        "soft_breaks": fingerprint_data["soft_breaks"],
+        "hard_spaces": fingerprint_data["hard_spaces"],
+        "drawing_events": fingerprint_data["drawing_events"],
+        "ass_controls": {
+            "hard_breaks": sum(event.original_text.count(r"\N") for event in events),
+            "soft_breaks": fingerprint_data["soft_breaks"],
+            "hard_spaces": fingerprint_data["hard_spaces"],
+            "karaoke_tags": fingerprint_data["karaoke"],
+        },
         "overlap_pairs": sum(1 for i, left in enumerate(events) for right in events[i + 1:] if _overlap(left, right)),
         "style_hypotheses": style_stats,
         "universal_style_rule_warning": "Style functions are release-specific hypotheses, never universal rules.",
@@ -753,7 +792,7 @@ def load_events(
     english_dictionary = load_english_dictionary("/usr/share/dict/american-english")
     preliminary: list[Event] = []
     for index, line in enumerate(subs):
-        pieces, anchors, breaks = split_ass_text(_field(line, "text", ""))
+        pieces, anchors, breaks, break_values, hard_spaces = split_text_with_controls(_field(line, "text", ""))
         clean_pieces = [piece.strip() for piece in pieces]
         clean_text = " ".join(piece for piece in clean_pieces if piece)
         segments = [CleanSegment(i, pieces[i], clean_pieces[i], bool(SPEAKER_RE.match(clean_pieces[i]))) for i in range(len(pieces))]
@@ -767,6 +806,8 @@ def load_events(
             original_text=str(_field(line, "text", "")), visible_text=_visible(_field(line, "text", "")),
             clean_text=clean_text, segments=segments, tag_anchors=anchors,
             line_break_boundaries=breaks, has_positioning=bool(POSITION_RE.search(_field(line, "text", ""))),
+            line_break_tokens=break_values, hard_space_positions=hard_spaces,
+            is_drawing=is_drawing_event(_field(line, "text", "")),
             romanization_base=romanized_gloss[0] if romanized_gloss else "",
             romanization_gloss=romanized_gloss[1] if romanized_gloss else "",
             is_comment=bool(line.is_comment),
@@ -829,9 +870,21 @@ def build_sign_groups(events: list[Event], enabled: bool = True) -> list[Unit]:
     return units
 
 
-def choose_context(events: list[Event], target: Event, config: Config) -> dict[str, Any]:
-    ordered = sorted((event for event in events if not event.is_comment or event.id == target.id), key=lambda event: event.original_index)
-    pos = next(index for index, event in enumerate(ordered) if event.id == target.id)
+def choose_context(
+    events: list[Event],
+    target: Event,
+    config: Config,
+    *,
+    ordered: list[Event] | None = None,
+    positions: dict[int, int] | None = None,
+) -> dict[str, Any]:
+    if ordered is None or positions is None or target.id not in positions:
+        ordered = sorted(
+            (event for event in events if not event.is_comment or event.id == target.id),
+            key=lambda event: event.original_index,
+        )
+        positions = {event.id: index for index, event in enumerate(ordered)}
+    pos = positions[target.id]
     previous: list[dict[str, Any]] = []
     following: list[dict[str, Any]] = []
     budget = 0
@@ -916,12 +969,25 @@ def _speaker_segment_groups(event: Event) -> list[list[CleanSegment]]:
     return groups
 
 
-def _restore_group_line_breaks(group: list[CleanSegment], translated: str) -> str | None:
+def _break_token_for(event: Event, segment_id: int) -> str:
+    """Return the source break after a physical ASS segment."""
+    for index, boundary in enumerate(event.line_break_boundaries):
+        if boundary == segment_id:
+            if index < len(event.line_break_tokens):
+                return event.line_break_tokens[index]
+            return r"\N"
+    return r"\N"
+
+
+def _restore_group_line_breaks(
+    group: list[CleanSegment], translated: str, break_values: list[str] | None = None,
+) -> str | None:
     """Restore source visual wraps inside one translated speaker segment."""
     if len(group) <= 1:
         return translated.strip()
     source_len = max(1, sum(len(segment.clean_text) for segment in group) + len(group) - 1)
     base = translated.strip()
+    break_values = break_values or []
     for boundary in range(len(group) - 1, 0, -1):
         before = sum(len(segment.clean_text) for segment in group[:boundary]) + boundary - 1
         index = _choose_visual_break(base, before / source_len)
@@ -929,7 +995,8 @@ def _restore_group_line_breaks(group: list[CleanSegment], translated: str) -> st
             return None
         left = base[:index].rstrip()
         right = base[index:].lstrip()
-        base = left + " " + r"\N" + right
+        token = break_values[boundary - 1] if boundary - 1 < len(break_values) else r"\N"
+        base = left + _break_separator(left, right) + token + right
     return base
 
 
@@ -964,7 +1031,7 @@ def _schema(units: list[Unit]) -> dict[str, Any]:
 
 
 _GEMINI_PLACEHOLDER_RE = re.compile(r"§(?:T|G|C)\d+§")
-_GEMINI_LINEBREAK_PLACEHOLDER_RE = re.compile(r"§N§|\\N")
+_GEMINI_LINEBREAK_PLACEHOLDER_RE = re.compile(r"§N§|\\(?:N|n|h)")
 _GEMINI_ASS_TAG_RE = re.compile(r"\{[^{}]*\}")
 
 
@@ -1069,7 +1136,7 @@ def validate_response(
                 item = dict(item)
                 item["text"] = cleaned
                 text_values = [cleaned]
-        if any("§T" in text or "§N" in text or "{" in text or "}" in text or r"\N" in text for text in text_values):
+        if any("§T" in text or "§N" in text or "{" in text or "}" in text or CONTROL_RE.search(text) for text in text_values):
             issues.append(f"estrutura/placeholder enviado na resposta: {item_id}")
             continue
         found[item_id] = item
@@ -1150,7 +1217,7 @@ def likely_english_sentence_source(event: Event, english_dictionary: set[str] | 
     This guard is used before the deterministic ROMAJI_PRESERVED short-circuit
     so an uncertain block profile cannot silently preserve an English clause.
     """
-    source_norm = " ".join(event.clean_text.lower().replace(r"\N", " ").split())
+    source_norm = " ".join(visible_text(event.clean_text, line_break=" ").lower().split())
     words = [word.lower() for word in WORD_RE.findall(source_norm)]
     if len(words) < 4:
         return False
@@ -1260,8 +1327,8 @@ def high_confidence_untranslated_dialogue(event: Event, source: str, output: str
     classes and short names/codes.  The detector is release-independent and
     never treats one English-looking token as a failure.
     """
-    source_norm = " ".join(source.lower().replace(r"\N", " ").split())
-    output_norm = " ".join(output.lower().replace(r"\N", " ").split())
+    source_norm = " ".join(visible_text(source, line_break=" ").lower().split())
+    output_norm = " ".join(visible_text(output, line_break=" ").lower().split())
     english_music_source = (
         event.classification == "MUSIC_OR_KARAOKE"
         and canonical_source_language(source_language) == "english"
@@ -1357,21 +1424,21 @@ def inline_tag_split_word(text: str) -> bool:
         # `\\N` as a hard boundary before applying the lexical test.
         before_without_tags = TAG_RE.sub("", text[:match.start()])
         after_without_tags = TAG_RE.sub("", text[match.end():])
-        if re.search(r"\\N\s*$", before_without_tags) or re.match(r"^\s*\\N", after_without_tags):
+        if re.search(r"\\(?:N|n)\s*$", before_without_tags) or re.match(r"^\s*\\(?:N|n)", after_without_tags):
             continue
-        left = before_without_tags.replace(r"\N", "")
-        right = after_without_tags.replace(r"\N", "")
+        left = visible_text(before_without_tags, line_break="")
+        right = visible_text(after_without_tags, line_break="")
         if left and right and _word_char(left[-1]) and _word_char(right[0]):
             return True
     return False
 
 
 def inline_tag_counts(text: str) -> Counter[str]:
-    return Counter(TAG_RE.findall(text or ""))
+    return ass_inline_tag_counts(text)
 
 
 def _visible_length(text: str) -> int:
-    return len(TAG_RE.sub("", text).replace(r"\N", ""))
+    return len(visible_text(text, line_break=""))
 
 
 def _raw_index_for_visible_offset(text: str, offset: int) -> int:
@@ -1384,8 +1451,9 @@ def _raw_index_for_visible_offset(text: str, offset: int) -> int:
         if tag:
             index = tag.end()
             continue
-        if text.startswith(r"\N", index):
-            index += 2
+        control = BREAK_RE.match(text, index)
+        if control:
+            index = control.end()
             continue
         if visible >= offset:
             return index
@@ -1400,7 +1468,7 @@ def _safe_inline_boundary(text: str, desired: int) -> int | None:
     Boundaries are between words, punctuation, whitespace, or at the ends. A
     tag is never inserted in the middle of a translated Unicode word.
     """
-    plain = TAG_RE.sub("", text).replace(r"\N", "")
+    plain = visible_text(text, line_break="")
     if not plain:
         return 0
     desired = max(0, min(len(plain), desired))
@@ -1432,27 +1500,31 @@ def validate_inline_tags(source: str, candidate: str) -> list[str]:
 
 
 def line_break_inside_word(text: str) -> bool:
-    for match in re.finditer(r"\\N", text):
+    for match in BREAK_RE.finditer(text or ""):
         index = match.start()
         left_raw = text[:index]
-        right_raw = text[index + 2:]
+        right_raw = text[match.end():]
         # ASS style tags commonly sit immediately on both sides of a visual
         # break (`{\\i0}\\N{\\i1}`); those tags are an explicit boundary.
         if re.search(r"\{[^}]*\}\s*$", left_raw) or re.match(r"\s*\{[^}]*\}", right_raw):
             continue
-        plain = TAG_RE.sub("", text)
-        plain_index = len(TAG_RE.sub("", text[:index]))
-        if plain_index > 0 and plain_index + 2 < len(plain) and _word_char(plain[plain_index - 1]) and _word_char(plain[plain_index + 2]):
+        plain = visible_text(text, line_break="")
+        plain_index = len(visible_text(text[:index], line_break=""))
+        if plain_index > 0 and plain_index + 1 < len(plain) and _word_char(plain[plain_index - 1]) and _word_char(plain[plain_index]):
             # ASS visual breaks are often emitted without spaces.  Treat a
             # break between two complete lexical runs as a boundary, while
             # rejecting the short fragments produced by an actual split
             # (``refletin\\Ndo``, ``vi\\Nda``, etc.).  The source-aware
             # reconstruction still preserves the original line intent.
-            left_match = re.search(r"[\\wÀ-ÿ]+$", plain[:plain_index])
-            right_match = re.match(r"[\\wÀ-ÿ]+", plain[plain_index + 2:])
+            left_match = re.search(r"[\wÀ-ÿ]+$", plain[:plain_index])
+            right_match = re.match(r"[\wÀ-ÿ]+", plain[plain_index:])
             left_len = len(left_match.group(0)) if left_match else 0
             right_len = len(right_match.group(0)) if right_match else 0
-            if left_len >= 4 and right_len >= 4:
+            left_word = left_match.group(0).lower() if left_match else ""
+            right_word = right_match.group(0).lower() if right_match else ""
+            left_valid = left_len >= 4 or left_word in LEGITIMATE_SHORT_WORDS
+            right_valid = right_len >= 4 or right_word in LEGITIMATE_SHORT_WORDS
+            if left_valid and right_valid:
                 continue
             return True
     return False
@@ -1498,27 +1570,46 @@ def _choose_visual_break(text: str, ratio: float) -> int | None:
     return min(candidates, key=score)
 
 
+def _break_separator(left: str, right: str) -> str:
+    """Keep only the marker needed to disambiguate a short lexical split."""
+    left_word = re.search(r"[\wÀ-ÿ]+$", left, re.UNICODE)
+    right_word = re.match(r"[\wÀ-ÿ]+", right, re.UNICODE)
+    if left_word and right_word and len(left_word.group(0)) >= 4 and len(right_word.group(0)) >= 4:
+        return ""
+    return " "
+
+
 def delimiter_flags(source: str, output: str) -> list[str]:
     """Conservative balance check for visible delimiters, not apostrophes."""
     flags: list[str] = []
     source_plain = TAG_RE.sub("", source)
     output_plain = TAG_RE.sub("", output)
     for opening, closing, name in (("\"", "\"", "QUOTES"), ("(", ")", "DELIMITERS"), ("[", "]", "DELIMITERS")):
-        source_count = source_plain.count(opening)
-        if source_count == 0:
+        source_open_count = source_plain.count(opening)
+        source_close_count = source_plain.count(closing)
+        if source_open_count == 0 and source_close_count == 0:
             continue
+        output_open_count = output_plain.count(opening)
+        output_close_count = output_plain.count(closing)
         # A sign can span multiple simultaneous ASS events (for example an
-        # opening quote in one event and its closing quote in the next). In
-        # that case event-local validation must not reject a balanced group.
-        if opening == closing and source_count % 2 != 0:
+        # opening parenthesis in one event and its closing parenthesis in the
+        # next). In that case event-local validation must not reject a
+        # balanced group. Accept only an exact count-preserving fragment;
+        # adding or removing a delimiter remains a hard validation failure.
+        if opening != closing and source_open_count != source_close_count:
+            if (output_open_count, output_close_count) == (source_open_count, source_close_count):
+                continue
+            flags.append("UNBALANCED_DELIMITERS")
+            continue
+        if opening == closing and source_open_count % 2 != 0:
             continue
         output_count = output_plain.count(opening)
         if opening == closing:
             balanced = output_count % 2 == 0
-            enough = output_count >= source_count
+            enough = output_count >= source_open_count
         else:
             balanced = output_plain.count(opening) == output_plain.count(closing)
-            enough = output_plain.count(opening) >= source_plain.count(opening) and output_plain.count(closing) >= source_plain.count(closing)
+            enough = output_open_count >= source_open_count and output_close_count >= source_close_count
         if not balanced:
             flags.append("UNBALANCED_QUOTES" if name == "QUOTES" else "UNBALANCED_DELIMITERS")
         elif not enough:
@@ -1583,7 +1674,7 @@ def preserve_source_punctuation_profile(source: str, output: str) -> tuple[str, 
     punctuation that is genuinely present while making unpunctuated dialogue
     and opening/ending lyrics remain unpunctuated after translation.
     """
-    source_visible = TAG_RE.sub("", source or "").replace(r"\N", "")
+    source_visible = visible_text(source or "", line_break="")
     allowed = {char for group in _PUNCTUATION_CLASSES if any(char in source_visible for char in group) for char in group}
     if all(any(char in source_visible for char in group) for group in _PUNCTUATION_CLASSES):
         return output, False
@@ -1648,7 +1739,7 @@ def normalize_idiomatic_output(source: str, output: str, context: dict[str, Any]
 
 
 def content_flags(event: Event, output: str, context: dict[str, Any], english_dictionary: set[str] | None = None, protected_terms: set[str] | None = None, source_language: str = "inglês") -> list[str]:
-    linguistic = TAG_RE.sub("", output).replace(r"\N", " ").strip()
+    linguistic = visible_text(output, line_break=" ").strip()
     flags: list[str] = []
     source_has_content = bool(re.search(r"[\wÀ-ÿ]", event.clean_text, re.UNICODE))
     output_has_content = bool(re.search(r"[\wÀ-ÿ]", linguistic, re.UNICODE))
@@ -1683,23 +1774,39 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
         if actual not in (expected, physical_expected):
             return event.original_text, ["SEGMENT_ID_MISMATCH"]
         translated_segments = [item["text"].strip() for item in values]
+        if any(CONTROL_RE.search(value) for value in translated_segments):
+            return event.original_text, ["MODEL_EMITTED_STRUCTURAL_TOKEN"]
         if actual == expected:
             restored: list[str] = []
             for group, translated in zip(groups, translated_segments):
-                value = _restore_group_line_breaks(group, translated)
+                internal_breaks = [
+                    _break_token_for(event, segment.segment_id)
+                    for segment in group[:-1]
+                ]
+                value = _restore_group_line_breaks(group, translated, internal_breaks)
                 if value is None:
                     return event.original_text, ["LINE_BREAK_INSIDE_WORD"]
                 restored.append(value)
-            base = r"\N".join(restored)
+            base_parts: list[str] = []
+            for index, value in enumerate(restored):
+                base_parts.append(value)
+                if index < len(restored) - 1:
+                    base_parts.append(_break_token_for(event, groups[index][-1].segment_id))
+            base = "".join(base_parts)
         else:
             # Backward-compatible acceptance for callers that still return
             # one response segment per physical source piece.
-            base = r"\N".join(translated_segments)
+            base_parts = []
+            for index, value in enumerate(translated_segments):
+                base_parts.append(value)
+                if index < len(translated_segments) - 1:
+                    base_parts.append(_break_token_for(event, event.segments[index].segment_id))
+            base = "".join(base_parts)
     else:
         base = response.get("text", "").strip()
         if not isinstance(base, str):
             return event.original_text, ["TEXT_NOT_STRING"]
-        if r"\N" in base:
+        if CONTROL_RE.search(base):
             return event.original_text, ["MODEL_EMITTED_STRUCTURAL_TOKEN"]
         if event.classification == "ROMANIZATION_GLOSS":
             if any(token in base for token in ("§T", "§N", "§G", "{", "}", "[", "]")) or not base or base[:1] in {"\"", "'"} or base[-1:] in {"\"", "'"}:
@@ -1727,7 +1834,13 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
                 # Keep a boundary marker on the left side.  Without it,
                 # `word\\Nword` is indistinguishable from a real intra-word
                 # split during the post-reconstruction validator.
-                base = left + " " + r"\N" + right
+                token = _break_token_for(event, boundary)
+                base = left + _break_separator(left, right) + token + right
+    restored_hard_spaces = restore_hard_spaces(event.original_text, base)
+    if restored_hard_spaces is None:
+        flags.append("ASS_HARD_SPACE_COUNT_MISMATCH")
+    else:
+        base = restored_hard_spaces
     base, punctuation_normalized = preserve_source_punctuation_profile(event.clean_text, base)
     if punctuation_normalized:
         flags.append("PUNCTUATION_PROFILE_NORMALIZED")
@@ -1762,7 +1875,7 @@ def reconstruct_event(event: Event, response: dict[str, Any]) -> tuple[str, list
     for safe, tags in sorted(anchored.items(), reverse=True):
         raw_position = _raw_index_for_visible_offset(base, safe)
         base = base[:raw_position] + "".join(tags) + base[raw_position:]
-    if base.count(r"\N") != len(event.line_break_boundaries):
+    if break_count(base) != len(event.line_break_boundaries):
         flags.append("LINE_BREAK_COUNT_MISMATCH")
     if not segmented_response and not is_multi_speaker(event) and line_break_inside_word(base):
         flags.append("LINE_BREAK_INSIDE_WORD")
@@ -1839,11 +1952,18 @@ class Client:
         # per-call durability below, where the persistent ledger reserves
         # immediately before request materialization.
         if not durable_context and self.config.operation_budget is not None:
-            self.config.operation_budget.reserve(
-                model_tag=self.model,
-                model_digest=getattr(self.config, "model_digest", None),
-                phase="V226_QWEN",
-            )
+            reserve = self.config.operation_budget.reserve
+            kwargs = {
+                "model_tag": self.model,
+                "model_digest": getattr(self.config, "model_digest", None),
+                "phase": "V226_PRIMARY",
+                "provider": str(getattr(getattr(self.config, "transport", None), "name", "") or "").casefold() or None,
+            }
+            try:
+                reserve(**kwargs)
+            except TypeError:
+                kwargs.pop("provider", None)
+                reserve(**kwargs)
         schema = _schema(units)
         schema_kind = unit_schema_kind(units)
         targets: list[dict[str, Any]] = []
@@ -2302,7 +2422,23 @@ class Runner:
         self.english_dictionary = load_english_dictionary(config.english_dictionary_path)
         self.protected_terms = set(glossary) | set(glossary.values())
         self.by_id = {event.id: event for event in events}
-        self.contexts = {event.id: choose_context(events, event, config) for event in events}
+        ordered_context_events = sorted(
+            (event for event in events if not event.is_comment),
+            key=lambda event: event.original_index,
+        )
+        context_positions = {
+            event.id: index for index, event in enumerate(ordered_context_events)
+        }
+        self.contexts = {
+            event.id: choose_context(
+                events,
+                event,
+                config,
+                ordered=ordered_context_events if not event.is_comment else None,
+                positions=context_positions if not event.is_comment else None,
+            )
+            for event in events
+        }
         self.calls: list[dict[str, Any]] = []
         self.results = {event.id: Result(event.id) for event in events}
         self.client = Client(config, self.calls, glossary=glossary)
@@ -2624,9 +2760,13 @@ class Runner:
                     batch_index=batch_index,
                 )
                 return
-        terminal_issue = any(reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")) or any(
-            reason.startswith("NON_RETRYABLE_TRANSPORT_") for reason in issues
+        physical_budget_exhausted = any(
+            "V238_SHARED_" in reason and "_PHYSICAL_CALL_BUDGET_EXCEEDED" in reason
+            for reason in issues
         )
+        terminal_issue = physical_budget_exhausted or any(
+            reason in issues for reason in ("RETRY_BUDGET_EXHAUSTED", "LAB_HARD_STOP_CALL_LIMIT", "RATE_LIMIT_429")
+        ) or any(reason.startswith("NON_RETRYABLE_TRANSPORT_") for reason in issues)
         if terminal_issue:
             failure = "; ".join(issues)
             for unit in units:
@@ -2853,8 +2993,10 @@ def validate_structure(original: pysubs2.SSAFile, candidate: pysubs2.SSAFile, se
         for flag in validate_inline_tags(left.text or "", right.text or ""):
             if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_DUPLICATION", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
                 issues.append(f"evento {index}: {flag}")
-        if (left.text or "").count(r"\N") != (right.text or "").count(r"\N"):
-            issues.append(f"evento {index}: \\N alterado")
+        if break_count(left.text or "") != break_count(right.text or ""):
+            issues.append(f"evento {index}: quebra ASS alterada")
+        if hard_space_count(left.text or "") != hard_space_count(right.text or ""):
+            issues.append(f"evento {index}: \\h alterado")
         if selected_indices is not None and index not in selected_indices:
             continue
         # If a selected event was preserved byte-for-byte (technical/music or
@@ -2862,8 +3004,8 @@ def validate_structure(original: pysubs2.SSAFile, candidate: pysubs2.SSAFile, se
         # break instead of misclassifying it as a newly introduced split.
         if (index not in (segmented_indices or set()) and (left.text or "") != (right.text or "") and line_break_inside_word(right.text or "")):
             issues.append(f"evento {index}: LINE_BREAK_INSIDE_WORD")
-        source_clean = TAG_RE.sub("", left.text or "").replace(r"\N", " ").strip()
-        candidate_clean = TAG_RE.sub("", right.text or "").replace(r"\N", " ").strip()
+        source_clean = visible_text(left.text or "", line_break=" ").strip()
+        candidate_clean = visible_text(right.text or "", line_break=" ").strip()
         if re.search(r"[\wÀ-ÿ]", source_clean, re.UNICODE) and not re.search(r"[\wÀ-ÿ]", candidate_clean, re.UNICODE):
             issues.append(f"evento {index}: CONTENT_LOSS")
         if any(token in (right.text or "") for token in ("§T", "§N", "§G")):

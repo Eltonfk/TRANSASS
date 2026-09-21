@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 import pysubs2
 
 import production_v2_2_5_adapter as frozen_v225
+from ass_structure import replace_source_payload
 from pipeline_v2_1_3 import CRITICAL_FLAGS, Event, TAG_RE, Unit, load_events, validate_structure
 from production_v2_2_1_adapter import _restore_tags_by_source_segment
 from production_v2_2_4_adapter import _restore_multiline_sign_card_v224
@@ -39,6 +41,7 @@ APPROVED_MODEL = V225_MODEL
 SIGN_GROUP_TRANSLATION_RETRY = "SIGN_GROUP_TRANSLATION"
 SIGN_GROUP_TRANSLATION_AMBIGUOUS = "SIGN_GROUP_TRANSLATION_AMBIGUOUS"
 SIGN_GROUP_STRUCTURAL_FAILURE = "SIGN_GROUP_STRUCTURAL_FAILURE"
+V226_GLOBAL_COMPAT_LOCK = threading.RLock()
 
 _PROTECTED_CLASSES = {
     "MUSIC_OR_KARAOKE", "SONG_LYRICS_PRESERVED", "ROMAJI_PRESERVED",
@@ -183,29 +186,8 @@ def _clean_group_surface(text: str, source_part: str = "") -> str:
 
 
 def _replace_source_payload(source_part: str, target_part: str) -> str:
-    """Replace only lexical payload; retain source tags and ``\\h`` tokens."""
-    token_re = re.compile(r"(\{[^}]*\}|\\h)")
-    tokens = token_re.split(source_part)
-    lexical_indices = [i for i, token in enumerate(tokens) if token and not token_re.fullmatch(token)]
-    if not lexical_indices:
-        return source_part
-    if len(lexical_indices) == 1:
-        replacements = {lexical_indices[0]: target_part}
-    else:
-        source_chunks = [tokens[i] for i in lexical_indices]
-        target_words = re.findall(r"\S+", target_part)
-        total = max(1, sum(len(re.findall(r"[\wÀ-ÿ]+", chunk, re.UNICODE)) for chunk in source_chunks))
-        replacements: dict[int, str] = {}
-        start = 0
-        for pos, index in enumerate(lexical_indices):
-            if pos == len(lexical_indices) - 1:
-                end = len(target_words)
-            else:
-                count = len(re.findall(r"[\wÀ-ÿ]+", source_chunks[pos], re.UNICODE))
-                end = min(len(target_words), max(start + 1, round(len(target_words) * count / total)))
-            replacements[index] = " ".join(target_words[start:end])
-            start = end
-    return "".join(replacements.get(i, token) for i, token in enumerate(tokens))
+    """Replace payload through the shared source-owned ASS envelope helper."""
+    return replace_source_payload(source_part, target_part)
 
 
 def validate_animated_sign_group_translation_coverage(report: dict[str, Any]) -> dict[str, Any]:
@@ -453,6 +435,8 @@ class V226MemoryRunner(V225MemoryRunner):
             result = self.results[item["id"]]
             result.final_text = item.get("final_text")
             result.flags = list(item.get("flags", []))
+            if (item.get("final_text") or "").count(r"\N") and "SIGN_GROUP_FANOUT" in result.flags:
+                self.v224_multiline_cards[item["id"]] = {"eligible": True, "source": "v226_sign_fanout"}
         summary["results"] = result_items
         summary.update({
             "sign_group_semantic_count": self.v226_sign_group_report["semantic_group_count"],
@@ -481,17 +465,18 @@ class V226MemoryRunner(V225MemoryRunner):
 
 def translate_subtitle_file_v2_2_6(*args: Any, **kwargs: Any) -> dict[str, Any]:
     """Run the frozen V2.2.5 materialization with the V2.2.6 runner."""
-    old_runner = frozen_v225.V225MemoryRunner
-    old_pipeline = frozen_v225.APPROVED_PIPELINE
-    frozen_v225.V225MemoryRunner = V226MemoryRunner
-    frozen_v225.APPROVED_PIPELINE = APPROVED_PIPELINE
-    try:
-        result = frozen_v225.translate_subtitle_file_v2_2_5(*args, **kwargs)
-        result["pipeline"] = APPROVED_PIPELINE
-        return result
-    finally:
-        frozen_v225.V225MemoryRunner = old_runner
-        frozen_v225.APPROVED_PIPELINE = old_pipeline
+    with V226_GLOBAL_COMPAT_LOCK:
+        old_runner = frozen_v225.V225MemoryRunner
+        old_pipeline = frozen_v225.APPROVED_PIPELINE
+        frozen_v225.V225MemoryRunner = V226MemoryRunner
+        frozen_v225.APPROVED_PIPELINE = APPROVED_PIPELINE
+        try:
+            result = frozen_v225.translate_subtitle_file_v2_2_5(*args, **kwargs)
+            result["pipeline"] = APPROVED_PIPELINE
+            return result
+        finally:
+            frozen_v225.V225MemoryRunner = old_runner
+            frozen_v225.APPROVED_PIPELINE = old_pipeline
 
 
 def augment_sign_candidate_v2_2_6(source_path: Path, candidate_path: Path, output_path: Path) -> dict[str, Any]:

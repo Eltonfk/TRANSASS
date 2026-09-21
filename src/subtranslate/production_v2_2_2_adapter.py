@@ -38,6 +38,7 @@ from pipeline_v2_1_3 import (
     validate_structure,
     write_ass,
     _word_char,
+    line_break_inside_word,
 )
 from runtime_config import default_library_root
 from production_v2_1_3_adapter import APPROVED_CONFIG, APPROVED_MODEL, _fsync_file, _merged_glossary
@@ -156,14 +157,7 @@ def _assemble_slots(slots: list[str]) -> str:
 
 def _has_unsafe_break(text: str) -> bool:
     """Strict lexical check used by the candidate before frozen validation."""
-    for match in re.finditer(r"\\N", text):
-        before = TAG_RE.sub("", text[:match.start()])
-        after = TAG_RE.sub("", text[match.end():])
-        if before.endswith("\\N") or after.startswith("\\N"):
-            continue
-        if before and after and _word_char(before[-1]) and _word_char(after[0]):
-            return True
-    return False
+    return line_break_inside_word(text)
 
 
 def _restore_empty_breaks_v222(original: Event, translated: str) -> str | None:
