@@ -10,6 +10,7 @@ import pipeline_orchestrator as orchestrator
 from pipeline_registry import (
     PipelineDeprecatedError,
     UnsupportedPipelineError,
+    canonical_pipeline_id,
     ensure_pipeline_for_new_job,
     get_pipeline_plan,
     pipeline_info,
@@ -20,7 +21,7 @@ class RegistryTests(unittest.TestCase):
     def test_known_plans_and_unknown_fail_closed(self):
         for plan_id in (
             "legacy", "v2_1_2", "v2_1_3", "v2_2_0", "v2_2_1", "v2_2_2",
-            "v2_2_3", "v2_2_4", "v2_2_5", "v2_2_6", "v2_3_0",
+            "v2_2_3", "v2_2_4", "v2_2_5", "v2_2_6", "v2_3_0", "v2_3_8", "v3",
         ):
             self.assertEqual(get_pipeline_plan(plan_id).id, plan_id)
         with self.assertRaises(UnsupportedPipelineError):
@@ -28,8 +29,12 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(UnsupportedPipelineError):
             get_pipeline_plan("")
 
-    def test_legacy_requires_explicit_token(self):
+    def test_legacy_is_replay_only_and_requires_explicit_token(self):
         self.assertEqual(get_pipeline_plan("legacy").id, "legacy")
+        self.assertTrue(get_pipeline_plan("legacy").deprecated)
+        self.assertEqual(get_pipeline_plan("legacy").replacement_pipeline_id, "v3")
+        with self.assertRaises(PipelineDeprecatedError):
+            ensure_pipeline_for_new_job("legacy")
         with self.assertRaises(UnsupportedPipelineError):
             get_pipeline_plan("unknown")
 
@@ -38,7 +43,7 @@ class RegistryTests(unittest.TestCase):
             with self.subTest(plan_id=plan_id):
                 plan = get_pipeline_plan(plan_id)
                 self.assertTrue(plan.deprecated)
-                self.assertEqual(plan.replacement_pipeline_id, "v2_3_8")
+                self.assertEqual(plan.replacement_pipeline_id, "v3")
                 # Resolution remains available for historical replay.
                 self.assertEqual(plan.id, plan_id)
                 with self.assertRaises(PipelineDeprecatedError):
@@ -50,8 +55,21 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(info["deprecated"])
         self.assertEqual(info["lifecycle"], "deprecated")
         self.assertFalse(info["new_jobs_allowed"])
-        self.assertEqual(info["replacement_pipeline"], "v2_3_8")
-        self.assertTrue(pipeline_info("v2_3_8")["new_jobs_allowed"])
+        self.assertEqual(info["replacement_pipeline"], "v3")
+        self.assertFalse(pipeline_info("v2_3_8")["new_jobs_allowed"])
+        self.assertTrue(pipeline_info("v3")["new_jobs_allowed"])
+
+    def test_v238_is_replay_only_and_v3_alias_is_resolvable(self):
+        plan = get_pipeline_plan("v2_3_8")
+        self.assertTrue(plan.deprecated)
+        self.assertEqual(plan.replacement_pipeline_id, "v3")
+        self.assertEqual(get_pipeline_plan("v3_0_0").id, "v3")
+        with self.assertRaises(PipelineDeprecatedError):
+            ensure_pipeline_for_new_job("v2_3_8")
+
+    def test_v3_artifact_version_normalizes_to_current_plan(self):
+        self.assertEqual(canonical_pipeline_id("v3_0_0"), "v3")
+        self.assertEqual(canonical_pipeline_id("V3"), "v3")
 
     def test_v224_v225_v226_and_v230_plans(self):
         self.assertEqual(get_pipeline_plan("v2_2_4").stages, ("FULL_TRANSLATION_V224",))
@@ -185,6 +203,7 @@ class QueueAndConvergenceTests(unittest.TestCase):
                 )
                 self.assertEqual(len(jobs), n)
                 self.assertEqual(len({job["id"] for job in jobs}), n)
+                self.assertTrue(all(job["v3_run_id"] == job["id"] for job in jobs))
 
     def test_queue_persistence_reload_does_not_introduce_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:

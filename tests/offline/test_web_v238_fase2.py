@@ -176,7 +176,7 @@ def test_m6_projects_ledger_to_units():
 # ---------------------------------------------------------------------------
 
 
-def test_c5_effective_pipeline_from_transport_config():
+def test_effective_pipeline_migrates_v238_transport_config_to_v3():
     import tempfile
 
     from transport_config_store import save_transport_config
@@ -190,18 +190,18 @@ def test_c5_effective_pipeline_from_transport_config():
         old_path = web.TRANSPORT_CONFIG_PATH
         web.TRANSPORT_CONFIG_PATH = cfg_path
         try:
-            assert web._effective_pipeline() == "v2_3_8"
+            assert web._effective_pipeline() == "v3"
         finally:
             web.TRANSPORT_CONFIG_PATH = old_path
 
 
-def test_c5_effective_pipeline_falls_back_to_env():
+def test_effective_pipeline_migrates_legacy_environment_to_v3():
     import os
 
     old_env = os.environ.get("TRANSLATOR_PIPELINE")
     os.environ["TRANSLATOR_PIPELINE"] = "legacy"
     try:
-        assert web._effective_pipeline() == "legacy"
+        assert web._effective_pipeline() == "v3"
     finally:
         if old_env is None:
             os.environ.pop("TRANSLATOR_PIPELINE", None)
@@ -255,6 +255,41 @@ def test_c7_telemetry_reports_live_semantic_reconstruction(tmp_path):
     assert telemetry["semantic_in_progress"] == 1
     assert telemetry["semantic_incomplete"] == 0
     assert telemetry["current_event_id"] == 342
+    assert telemetry["last_activity_at"]
+
+
+def test_c7_telemetry_counts_v3_durable_calls_when_runner_summary_is_missing(tmp_path):
+    old_state_dir = web.STATE_DIR
+    web.STATE_DIR = tmp_path
+    job_id = "v3-job-telemetry"
+    run_token = hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:24]
+    capture_root = tmp_path / "v3-runs" / run_token / "operation-1" / "captures"
+    for call_id, state_name in (
+        ("v3-000001", "RESPONSE_DURABLE"),
+        ("v3-000002", "TRANSPORT_IN_PROGRESS"),
+        ("v3-000003", "TRANSPORT_FAILED"),
+    ):
+        call_dir = capture_root / call_id
+        call_dir.mkdir(parents=True)
+        (call_dir / "capture_state.json").write_text(
+            json.dumps({"call_id": call_id, "state": state_name}),
+            encoding="utf-8",
+        )
+    try:
+        telemetry = web._job_telemetry({
+            "id": job_id,
+            "status": "FAILED",
+            "stage": "FAILED",
+            "summary": {},
+        })
+    finally:
+        web.STATE_DIR = old_state_dir
+
+    assert telemetry["calls"] == 3
+    assert telemetry["semantic_calls"] == 3
+    assert telemetry["semantic_completed"] == 1
+    assert telemetry["semantic_in_progress"] == 1
+    assert telemetry["semantic_incomplete"] == 1
     assert telemetry["last_activity_at"]
 
 

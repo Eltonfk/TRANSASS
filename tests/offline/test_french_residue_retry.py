@@ -96,6 +96,32 @@ def test_classify_french_copy_is_high_confidence_retry_eligible():
     assert any(str(e).startswith("source_residue:french") for e in assessment["evidence"])
 
 
+def test_ambiguous_d_apostrophe_in_romanized_names_is_not_a_french_residual():
+    names = "BUNGO GYÔDA, MARI D'ETSUKO GYÔDA"
+    evidence = engine.source_residue_evidence(names, "francês")
+    assessment = classify_short_english_fragment(
+        _event(names), names, {}, None, source_language="francês",
+    )
+
+    assert evidence["pattern_hits"] == 1
+    assert evidence["strong_pattern_hits"] == 0
+    assert not engine.source_residue_strong(evidence, overlap=1.0)
+    assert assessment["status"] != SHORT_ENGLISH_HIGH_CONFIDENCE
+    assert assessment["retry_eligible"] is False
+
+
+def test_unambiguous_french_elision_daccord_remains_detectable():
+    evidence = engine.source_residue_evidence("D'accord!", "francês")
+    assessment = classify_short_english_fragment(
+        _event("D'accord!"), "D'accord!", {}, None, source_language="francês",
+    )
+
+    assert evidence["strong_pattern_hits"] == 1
+    assert engine.source_residue_strong(evidence, overlap=1.0)
+    assert assessment["status"] == SHORT_ENGLISH_HIGH_CONFIDENCE
+    assert assessment["retry_eligible"] is True
+
+
 def test_classify_same_input_with_english_source_keeps_old_behavior():
     """Regression: with the default English source the detector stays off."""
     source = "J'assure que je ne voulais pas de ça."

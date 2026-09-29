@@ -190,6 +190,239 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     assert result["events"][0]["visual_tag_reflow"] is True
 
 
+def test_audit_does_not_mark_exact_proper_names_as_untranslated_dialogue(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,2,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    rows = [
+        "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Sunako.",
+        "Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,SHI KI",
+        r"Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,{\i1}Sunako...{\i0}",
+        "Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,YÛKI - KOIDE",
+    ]
+    source = tmp_path / "names-fr.ass"
+    output = tmp_path / "names-pt.ass"
+    source.write_text(header + "\n".join(rows) + "\n", encoding="utf-8")
+    output.write_text(header + "\n".join(rows) + "\n", encoding="utf-8")
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert result["status"] == "SEM PROBLEMAS DETECTADOS"
+    assert result["flags"] == []
+    assert result["checks"]["structural"] is True
+
+
+def test_audit_uses_v3_line_break_rules_and_keeps_real_word_splits(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H64000000,&H64000000,0,0,0,0,100,100,0,2,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source_rows = [
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Mettons-le\Ndans la tombe.",
+        r"Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,ils sont plus de dix\Nen comptant les Kirishiki.",
+        r"Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Mais j'ignore\Nquand il rentrera...",
+        r"Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,Il a tenté de l'expliquer\Nde diverses façons.",
+        r"Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Je suis en vie\Nce soir.",
+    ]
+    output_rows = [
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Vamos colocá-lo\Nna sepultura.",
+        r"Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,eles são mais de dez\Ncontando os Kirishiki.",
+        r"Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Mas eu não sei\Nquando ele volta...",
+        r"Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,Ele tentou explicar\Nde várias formas.",
+        r"Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Eu estou em vi\Nda hoje.",
+    ]
+    source = tmp_path / "breaks-fr.ass"
+    output = tmp_path / "breaks-pt.ass"
+    source.write_text(header + "\n".join(source_rows) + "\n", encoding="utf-8")
+    output.write_text(header + "\n".join(output_rows) + "\n", encoding="utf-8")
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert result["checks"]["structural"] is False
+    assert all("LINE_BREAK_INSIDE_WORD" not in result["events"][i]["flags"] for i in range(4))
+    assert "LINE_BREAK_INSIDE_WORD" in result["events"][4]["flags"]
+
+
+def test_audit_allows_break_after_source_acronym_but_not_inside_it(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source = tmp_path / "acronym-break-fr.ass"
+    output = tmp_path / "acronym-break-pt.ass"
+    source.write_text(header + "\n".join((
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,L'EEG commence\Nà réagir régulièrement.",
+        r"Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,EEG arrive.",
+    )) + "\n", encoding="utf-8")
+    output.write_text(header + "\n".join((
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,O EEG\Ncomeça a reagir regularmente.",
+        r"Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,EE\NG chegou.",
+    )) + "\n", encoding="utf-8")
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert result["checks"]["structural"] is False
+    assert "LINE_BREAK_INSIDE_WORD" not in result["events"][0]["flags"]
+    assert "LINE_BREAK_INSIDE_WORD" in result["events"][1]["flags"]
+
+
+def test_audit_uppercase_source_token_does_not_hide_december_split(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source = tmp_path / "uppercase-token-december-source.ass"
+    output = tmp_path / "uppercase-token-december-output.ass"
+    source.write_text(
+        header + r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,DEZ arrive\Ndemain." + "\n",
+        encoding="utf-8",
+    )
+    output.write_text(
+        header + r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,dez\Nembro chegou." + "\n",
+        encoding="utf-8",
+    )
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert "LINE_BREAK_INSIDE_WORD" in result["events"][0]["flags"]
+
+
+def test_audit_reuses_repeated_and_progressive_name_evidence_from_v3(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source_rows = (
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Les Shi Ki\Ntraquent les hommes.",
+        "Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,SHI KI",
+        "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Je parle de Kyôko Ozaki.",
+        "Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,Kyôko Ozaki.",
+        "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Je connais Toshio.",
+        "Dialogue: 0,0:00:06.00,0:00:06.50,Default,,0,0,0,,To...",
+        "Dialogue: 0,0:00:06.50,0:00:07.00,Default,,0,0,0,,Toshi...",
+        "Dialogue: 0,0:00:07.00,0:00:07.50,Default,,0,0,0,,Toshio...",
+    )
+    output_rows = (
+        r"Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Os Shi Ki\Ncaçam os humanos.",
+        "Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,SHI KI",
+        "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Eu falo da Kyôko Ozaki.",
+        "Dialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,Kyôko Ozaki.",
+        "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,Conheço Toshio.",
+        "Dialogue: 0,0:00:06.00,0:00:06.50,Default,,0,0,0,,To...",
+        "Dialogue: 0,0:00:06.50,0:00:07.00,Default,,0,0,0,,Toshi...",
+        "Dialogue: 0,0:00:07.00,0:00:07.50,Default,,0,0,0,,Toshio...",
+    )
+    source = tmp_path / "v3-name-context-fr.ass"
+    output = tmp_path / "v3-name-context-pt.ass"
+    source.write_text(header + "\n".join(source_rows) + "\n", encoding="utf-8")
+    output.write_text(header + "\n".join(output_rows) + "\n", encoding="utf-8")
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert "LINE_BREAK_INSIDE_WORD" not in result["events"][0]["flags"]
+    assert all(
+        "POSSIBLE_UNTRANSLATED_OUTPUT" not in result["events"][index]["flags"]
+        for index in (1, 3, 5, 6, 7)
+    )
+
+
+def test_audit_accepts_open_quote_spans_only_when_each_event_count_is_preserved(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source_rows = (
+        'Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,"Libres ?',
+        'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,"Et où irais-tu,\\Nsi tu l\'étais ?',
+    )
+    preserved_rows = (
+        'Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,"Livres?',
+        'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,"E para onde você iria,\\Nse fosse livre?',
+    )
+    changed_rows = (
+        'Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,"Livres?"',
+        'Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,"E para onde você iria,\\Nse fosse livre?"',
+    )
+    source = tmp_path / "open-quote-fr.ass"
+    preserved = tmp_path / "open-quote-preserved.ass"
+    changed = tmp_path / "open-quote-changed.ass"
+    source.write_text(header + "\n".join(source_rows) + "\n", encoding="utf-8")
+    preserved.write_text(header + "\n".join(preserved_rows) + "\n", encoding="utf-8")
+    changed.write_text(header + "\n".join(changed_rows) + "\n", encoding="utf-8")
+
+    good = audit_record(source, preserved, source_language="francês")
+    bad = audit_record(source, changed, source_language="francês")
+
+    assert "UNBALANCED_DELIMITERS" not in good["blocking_flags"]
+    assert "UNBALANCED_DELIMITERS" in bad["blocking_flags"]
+
+    curly_source = tmp_path / "open-curly-quote-fr.ass"
+    curly_bad = tmp_path / "extra-curly-quotes-pt.ass"
+    curly_source.write_text(
+        header + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,‘Libres ?\n",
+        encoding="utf-8",
+    )
+    curly_bad.write_text(
+        header + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,‘Livres?’’\n",
+        encoding="utf-8",
+    )
+    curly_result = audit_record(curly_source, curly_bad, source_language="francês")
+
+    assert curly_result["events"][0]["delimiter_audit"]["sequence_preserved"] is False
+    assert "UNBALANCED_DELIMITERS" in curly_result["blocking_flags"]
+
+
+def test_audit_blocks_reordered_delimiters_even_when_counts_match(tmp_path: Path):
+    header = """[Script Info]
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    source = tmp_path / "ordered-delimiters-fr.ass"
+    output = tmp_path / "reordered-delimiters-pt.ass"
+    source.write_text(
+        header + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,(Texte)\n",
+        encoding="utf-8",
+    )
+    output.write_text(
+        header + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,)Texto(\n",
+        encoding="utf-8",
+    )
+
+    result = audit_record(source, output, source_language="francês")
+
+    assert result["events"][0]["delimiter_audit"]["sequence_preserved"] is False
+    assert "UNBALANCED_DELIMITERS" in result["blocking_flags"]
+
+
 def test_ordinary_v238_event_keeps_materialized_break_spacing():
     class OrdinaryProvider:
         def v238_group_key(self, event_id: int):

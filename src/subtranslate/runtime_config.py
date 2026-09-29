@@ -24,11 +24,17 @@ def execution_identity(transport_config: dict | None = None) -> dict[str, str]:
         version = str(__version__)
     except (ImportError, AttributeError):
         pass
+    pipeline = str(config.get("pipeline") or os.environ.get("TRANSLATOR_PIPELINE") or "v3")
+    default_prompt_schema = (
+        b"transass-v3_0_0-prompt-schema-v1"
+        if pipeline in {"v3", "v3_0_0"}
+        else b"transass-v2_3_8-prompt-schema-v1"
+    )
     prompt_schema_hash = os.environ.get("PROMPT_SCHEMA_HASH") or hashlib.sha256(
-        b"transass-v2_3_8-prompt-schema-v1"
+        default_prompt_schema
     ).hexdigest()
     material = {
-        "pipeline": str(config.get("pipeline") or os.environ.get("TRANSLATOR_PIPELINE") or "v2_3_8"),
+        "pipeline": pipeline,
         "primary": {key: primary.get(key) for key in ("provider", "model", "base_url")},
         "fallback": {key: fallback.get(key) for key in ("provider", "model", "base_url")} if fallback else None,
         "source_language": config.get("source_language") or os.environ.get("TRANSLATOR_SOURCE_LANGUAGE") or "inglês",

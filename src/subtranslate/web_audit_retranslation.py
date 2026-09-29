@@ -20,6 +20,17 @@ from pathlib import Path
 from typing import Any
 
 import pysubs2
+from ass_engine import (
+    line_break_inside_word as _v3_line_break_inside_word,
+    prose_delimiter_token_counts,
+    prose_delimiter_token_sequence,
+    source_uppercase_break_tokens,
+)
+from translation_quality import (
+    extract_repeated_french_names,
+    names_in_source,
+    progressive_protected_name_prefixes_in_sequence,
+)
 
 from pipeline_v2_1_3 import (
     content_flags,
@@ -76,6 +87,11 @@ _VISUAL_TAG_REFLOW_FLAGS = frozenset({
     "ASS_INLINE_TAG_ANCHOR_FAILURE",
     "tags alteradas",
 })
+_IDENTITY_WORD_RE = re.compile(r"[\wÀ-ÿ]+(?:['’][\wÀ-ÿ]+)?", re.UNICODE)
+_ELLIPSIZED_IDENTITY_RE = re.compile(
+    r"^\s*[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]{1,}[ \t]*(?:\.{3,}|…)\s*$",
+    re.UNICODE,
+)
 
 
 def _is_proven_visual_tag_reflow(source: str, output: str, *, event_id: int) -> bool:
@@ -94,6 +110,129 @@ def _is_proven_visual_tag_reflow(source: str, output: str, *, event_id: int) -> 
     if source_program is None or not source_details.get("valid"):
         return False
     return semantic_style_token_sequence(source) == semantic_style_token_sequence(output)
+
+
+def _source_protection_context(source_subs: Any, source_language: str) -> tuple[dict[int, tuple[str, ...]], set[int]]:
+    """Mirror V3's event-local name evidence for read-only structural auditing."""
+    source_texts = tuple(str(getattr(line, "text", "")) for line in source_subs)
+    protected_names = extract_repeated_french_names(source_texts, source_language)
+    allowed_break_words: dict[int, tuple[str, ...]] = {}
+    protected_identity_only: set[int] = set()
+
+    progressive_fragment_indices: set[int] = set()
+    for start in range(max(0, len(source_subs) - 2)):
+        window = source_subs[start:start + 3]
+        if len(window) != 3 or any(getattr(line, "is_comment", False) for line in window):
+            continue
+        if len({str(getattr(line, "style", "")) for line in window}) != 1:
+            continue
+        gaps = (
+            int(getattr(window[1], "start", 0)) - int(getattr(window[0], "end", 0)),
+            int(getattr(window[2], "start", 0)) - int(getattr(window[1], "end", 0)),
+        )
+        if any(gap < 0 or gap > 2500 for gap in gaps):
+            continue
+        texts = tuple(str(getattr(line, "text", "")) for line in window)
+        for offset in (0, 1):
+            if progressive_protected_name_prefixes_in_sequence(texts, offset, protected_names):
+                progressive_fragment_indices.add(start + offset)
+
+    for index, raw_text in enumerate(source_texts):
+        protected_tokens = {
+            token.casefold()
+            for name in names_in_source(raw_text, protected_names)
+            for token in _IDENTITY_WORD_RE.findall(name)
+        }
+        words = list(source_uppercase_break_tokens(raw_text))
+        words.extend(sorted(protected_tokens))
+        allowed_break_words[index] = tuple(dict.fromkeys(words))
+
+        visible = _plain(raw_text)
+        tokens = tuple(token.casefold() for token in _IDENTITY_WORD_RE.findall(visible))
+        names_only = bool(tokens) and all(token in protected_tokens for token in tokens)
+        progressive_only = (
+            index in progressive_fragment_indices
+            and bool(tokens)
+            and _ELLIPSIZED_IDENTITY_RE.fullmatch(visible) is not None
+        )
+        if names_only or progressive_only:
+            protected_identity_only.add(index)
+    return allowed_break_words, protected_identity_only
+
+
+def _keep_audit_structural_issue(
+    issue: str,
+    *,
+    visual_reflow_indices: set[int],
+    output_subs: Any,
+    allowed_break_words_by_event: dict[int, tuple[str, ...]],
+) -> bool:
+    """Filter only legacy false-positive line-break findings from V2.1.3."""
+    match = re.match(r"evento (\d+): (.+)$", issue)
+    if not match:
+        return True
+    index = int(match.group(1))
+    flag = match.group(2)
+    if index in visual_reflow_indices and flag in _VISUAL_TAG_REFLOW_FLAGS:
+        return False
+    if (
+        flag == "LINE_BREAK_INSIDE_WORD"
+        and index < len(output_subs)
+        and not _v3_line_break_inside_word(
+            str(getattr(output_subs[index], "text", "")),
+            allowed_short_words=allowed_break_words_by_event.get(index, ()),
+        )
+    ):
+        # The V3 validator understands legitimate short words and Portuguese
+        # hyphenated clitics. Keep the finding whenever that stricter canonical
+        # check still sees an actual lexical split.
+        return False
+    return True
+
+
+def _audit_content_flags(
+    event: Any,
+    output_text: str,
+    *,
+    source_language: str,
+    source_text: str,
+    allowed_break_words: tuple[str, ...],
+    protected_name_only: bool,
+    context: dict[str, Any],
+    dictionary: set[str],
+) -> list[str]:
+    source_text = str(getattr(event, "clean_text", ""))
+    flags = content_flags(
+        event, output_text, context, dictionary,
+        source_language=source_language,
+    )
+    if not _v3_line_break_inside_word(
+        output_text,
+        allowed_short_words=allowed_break_words,
+    ):
+        flags = [flag for flag in flags if flag != "LINE_BREAK_INSIDE_WORD"]
+    source_plain = " ".join(_plain(source_text).split()).casefold()
+    output_plain = " ".join(_plain(output_text).split()).casefold()
+    if source_plain and source_plain == output_plain and protected_name_only:
+        flags = [flag for flag in flags if flag != "POSSIBLE_UNTRANSLATED_OUTPUT"]
+    elif source_plain and source_plain == output_plain:
+        try:
+            from pipeline_v3 import _is_untranslated_source_copy
+
+            likely_untranslated = _is_untranslated_source_copy(
+                _plain(source_text),
+                _plain(output_text),
+                source_language,
+                protected_names=allowed_break_words,
+            )
+        except (ImportError, AttributeError):
+            likely_untranslated = True
+        if not likely_untranslated:
+            # Exact names, titles, and romanization can be legitimate. A
+            # sentence-level V3 source-copy detector still leaves genuine
+            # French/English dialogue reviewable or blocking.
+            flags = [flag for flag in flags if flag != "POSSIBLE_UNTRANSLATED_OUTPUT"]
+    return flags
 
 
 def _normalize_lang_code(code: object) -> str:
@@ -186,14 +325,12 @@ def _delimiter_balance_signature(value: str) -> dict[str, int]:
 
 def _delimiter_token_counts(value: str) -> dict[str, int]:
     """Count literal prose delimiters, retaining event-boundary ownership."""
-    visible = _plain(value)
-    return {
-        "double_quotes": visible.count('"'),
-        "open_parentheses": visible.count("("),
-        "close_parentheses": visible.count(")"),
-        "open_brackets": visible.count("["),
-        "close_brackets": visible.count("]"),
-    }
+    return prose_delimiter_token_counts(value)
+
+
+def _delimiter_token_sequence(value: str) -> tuple[str, ...]:
+    """Return literal prose delimiters in order for event-local comparison."""
+    return prose_delimiter_token_sequence(value)
 
 
 def source_relative_delimiter_audit(
@@ -213,6 +350,10 @@ def source_relative_delimiter_audit(
     output_signature = _delimiter_balance_signature(output)
     source_core_flags = sorted(set(delimiter_flags(source, source)))
     candidate_core_flags = sorted(set(delimiter_flags(source, output)))
+    source_sequence = _delimiter_token_sequence(source)
+    candidate_sequence = _delimiter_token_sequence(output)
+    if source_sequence != candidate_sequence:
+        candidate_core_flags.append("ASS_DELIMITER_SEQUENCE_MISMATCH")
     source_unbalanced = any(source_signature.values()) or bool(source_core_flags)
     output_unbalanced = any(output_signature.values()) or bool(candidate_core_flags)
     exact = source == output
@@ -224,6 +365,7 @@ def source_relative_delimiter_audit(
     preserved_sequence = (
         bool(sequence_preserved)
         and _delimiter_token_counts(source) == _delimiter_token_counts(output)
+        and source_sequence == candidate_sequence
     )
     if source_unbalanced and (protected_exact and exact or preserved_sequence):
         state = DELIMITER_SOURCE_PRESERVED
@@ -313,6 +455,9 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
     source_flags: list[str] = []
     informational_flags: list[str] = []
     delimiter_states: Counter[str] = Counter()
+    allowed_break_words_by_event, protected_name_only_indices = _source_protection_context(
+        source_subs, source_language,
+    )
     if len(source_subs) != len(output_subs):
         source_flags.append("EVENT_COUNT_MISMATCH")
     structural = validate_structure(source_subs, output_subs)
@@ -333,10 +478,10 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
     structural_issues = [
         str(issue)
         for issue in structural.get("issues", [])
-        if not (
-            (match := re.match(r"evento (\d+): (.+)$", str(issue)))
-            and int(match.group(1)) in visual_reflow_indices
-            and match.group(2) in _VISUAL_TAG_REFLOW_FLAGS
+        if _keep_audit_structural_issue(
+            str(issue), visual_reflow_indices=visual_reflow_indices,
+            output_subs=output_subs,
+            allowed_break_words_by_event=allowed_break_words_by_event,
         )
     ]
     structural = {**structural, "issues": structural_issues, "valid": not structural_issues}
@@ -363,7 +508,10 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
                 source_text,
                 output_text,
                 protected_exact=preserved_exactly,
-                sequence_preserved=_delimiter_token_counts(source_text) == _delimiter_token_counts(output_text),
+                sequence_preserved=(
+                    _delimiter_token_counts(source_text) == _delimiter_token_counts(output_text)
+                    and _delimiter_token_sequence(source_text) == _delimiter_token_sequence(output_text)
+                ),
             )
             delimiter_states[delimiter_audit["state"]] += 1
             if delimiter_audit["state"] == DELIMITER_SOURCE_PRESERVED:
@@ -372,8 +520,12 @@ def audit_record(source_path: str | Path | None, output_path: str | Path, *, sou
                 event_flags.append("UNBALANCED_DELIMITERS")
             if not preserved_exactly:
                 context = {"previous": [], "next": []}
-                content_findings = content_flags(
-                    event, output_text, context, dictionary, source_language=source_language
+                content_findings = _audit_content_flags(
+                    event, output_text, source_language=source_language,
+                    source_text=source_text,
+                    allowed_break_words=allowed_break_words_by_event.get(index, ()),
+                    protected_name_only=index in protected_name_only_indices,
+                    context=context, dictionary=dictionary,
                 )
                 event_flags.extend(
                     flag for flag in content_findings
@@ -465,7 +617,12 @@ def _record_format_extension(record: dict[str, Any]) -> str | None:
     return suffix if suffix in SIDE_CAR_EXTENSIONS else None
 
 
-def _materialize_library_record(library: Any, record_id: int) -> dict[str, Any]:
+def _materialize_library_record(
+    library: Any,
+    record_id: int,
+    *,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     """Create an extension-bearing staging copy of an immutable library object."""
     record = library.get_record(int(record_id))
     if not record:
@@ -481,9 +638,11 @@ def _materialize_library_record(library: Any, record_id: int) -> dict[str, Any]:
             "record_id": int(record_id),
         }
     canonical = Path(library.object_path_for_record(int(record_id)))
-    staging_root = Path(getattr(library, "staging_root", canonical.parent / ".staging"))
-    staging_root.mkdir(parents=True, exist_ok=True)
-    directory = Path(tempfile.mkdtemp(prefix=f"source-{int(record_id)}-", dir=str(staging_root)))
+    staging_base = Path(staging_root) if staging_root is not None else Path(
+        getattr(library, "staging_root", canonical.parent / ".staging")
+    )
+    staging_base.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=f"source-{int(record_id)}-", dir=str(staging_base)))
     target = directory / f"source-{int(record_id)}{extension}"
     try:
         with canonical.open("rb") as source, target.open("wb") as output:
@@ -504,7 +663,13 @@ def _materialize_library_record(library: Any, record_id: int) -> dict[str, Any]:
         raise
 
 
-def resolve_source_record(library: Any, record_id: int, *, materialize: bool = False) -> dict[str, Any]:
+def resolve_source_record(
+    library: Any,
+    record_id: int,
+    *,
+    materialize: bool = False,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     """Resolve a source using only library record IDs and lineage."""
     record = library.get_record(int(record_id))
     if not record:
@@ -513,7 +678,9 @@ def resolve_source_record(library: Any, record_id: int, *, materialize: bool = F
         try:
             result = {"available": True, "record_id": record["id"], "path": str(library.object_path_for_record(record["id"])), "old_record_id": record["id"], "format": record.get("format"), "reason": "registro de fonte"}
             if materialize:
-                result.update(_materialize_library_record(library, int(record["id"])))
+                result.update(_materialize_library_record(
+                    library, int(record["id"]), staging_root=staging_root,
+                ))
                 result["old_record_id"] = record["id"]
                 result["reason"] = "registro de fonte materializado"
             return result
@@ -527,7 +694,9 @@ def resolve_source_record(library: Any, record_id: int, *, materialize: bool = F
             try:
                 result = {"available": True, "record_id": parent["id"], "path": str(library.object_path_for_record(parent["id"])), "old_record_id": record["id"], "format": parent.get("format"), "reason": "fonte resolvida pela linhagem"}
                 if materialize:
-                    result.update(_materialize_library_record(library, int(parent["id"])))
+                    result.update(_materialize_library_record(
+                        library, int(parent["id"]), staging_root=staging_root,
+                    ))
                     result["old_record_id"] = record["id"]
                     result["reason"] = "fonte da linhagem materializada"
                 return result
@@ -726,13 +895,59 @@ def _ingest_source(library: Any, episode_id: int, source_path: Path, *, source_k
     return {"record_id": int(record["id"]), "path": str(library.object_path_for_record(int(record["id"]))), "record": record}
 
 
-def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[str, Any], *, source_language: str = "inglês", job_id: str | None = None) -> dict[str, Any]:
+def _stage_source_file(source_path: Path, staging_root: Path, *, episode_id: int) -> dict[str, Any]:
+    """Copy a sidecar into isolated job staging without touching Library storage."""
+    if source_path.is_symlink() or source_path.suffix.casefold() not in SIDE_CAR_EXTENSIONS:
+        raise RuntimeError("fonte sidecar candidata não é um arquivo textual seguro")
+    source = source_path.resolve(strict=True)
+    if not source.is_file():
+        raise RuntimeError("fonte sidecar candidata indisponível")
+    staging_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=f"source-{int(episode_id)}-", dir=str(staging_root)))
+    target = directory / f"source-{int(episode_id)}{source.suffix.casefold()}"
+    try:
+        source_digest = hashlib.sha256()
+        with source.open("rb") as input_file, target.open("xb") as output_file:
+            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                source_digest.update(chunk)
+                output_file.write(chunk)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        staged_digest = hashlib.sha256()
+        with target.open("rb") as staged_file:
+            for chunk in iter(lambda: staged_file.read(1024 * 1024), b""):
+                staged_digest.update(chunk)
+        if staged_digest.digest() != source_digest.digest():
+            raise RuntimeError("hash divergente ao preparar sidecar candidato")
+        return {
+            "available": True,
+            "path": str(target),
+            "staging_path": str(directory),
+            "format": source.suffix.casefold().lstrip("."),
+            "record_id": None,
+        }
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def _extract_track(
+    library: Any,
+    episode_id: int,
+    video_path: Path,
+    track: dict[str, Any],
+    *,
+    source_language: str = "inglês",
+    job_id: str | None = None,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     extension = TEXTUAL_SUBTITLE_CODECS.get(str(track.get("codec") or "").casefold(), ".ass")
-    staging = Path(getattr(library, "staging_root", video_path.parent / ".subtranslate-staging"))
+    staging = Path(staging_root) if staging_root is not None else Path(
+        getattr(library, "staging_root", video_path.parent / ".subtranslate-staging")
+    )
     staging.mkdir(parents=True, exist_ok=True)
-    raw = tempfile.NamedTemporaryFile(prefix=f"source-{episode_id}-", suffix=extension, dir=staging, delete=False)
-    raw.close()
-    target = Path(raw.name)
+    directory = Path(tempfile.mkdtemp(prefix=f"source-{int(episode_id)}-", dir=str(staging)))
+    target = directory / f"source-{int(episode_id)}{extension}"
     command = ["ffmpeg", "-y", "-v", "error", "-i", str(video_path), "-map", f"0:{track['index']}", "-c:s", "copy", str(target)]
     try:
         completed = subprocess.run(
@@ -741,14 +956,27 @@ def _extract_track(library: Any, episode_id: int, video_path: Path, track: dict[
         )
         if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
             raise RuntimeError((completed.stderr or "falha ao extrair track ENG")[-500:])
+        if staging_root is not None:
+            return {
+                "available": True,
+                "path": str(target),
+                "staging_path": str(directory),
+                "format": extension.lstrip("."),
+                "record_id": None,
+            }
         return _ingest_source(library, episode_id, target, source_kind="EXTRACTED", source_language=source_language, track=track, job_id=job_id)
+    except Exception:
+        if staging_root is not None:
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
     finally:
-        target.unlink(missing_ok=True)
+        if staging_root is None:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 def _public_source_status(result: dict[str, Any]) -> dict[str, Any]:
     """Remove host paths before returning source status to the browser."""
-    allowed = {"available", "status", "kind", "display", "reason", "record_id", "track", "candidates"}
+    allowed = {"available", "status", "kind", "display", "reason", "record_id", "track", "candidates", "source_language"}
     return {key: value for key, value in result.items() if key in allowed}
 
 
@@ -761,6 +989,7 @@ def resolve_episode_source(
     job_id: str | None = None,
     source_language: str = "inglês",
     refresh_from_media: bool = False,
+    staging_root: Path | None = None,
 ) -> dict[str, Any]:
     """Resolve an original textual source for an anime episode.
 
@@ -773,7 +1002,10 @@ def resolve_episode_source(
     old = library.get_record(int(record_id)) if record_id else None
     linked_source = None
     if old and not refresh_from_media:
-        linked_source = resolve_source_record(library, int(old["id"]), materialize=materialize)
+        linked_source = resolve_source_record(
+            library, int(old["id"]), materialize=materialize,
+            staging_root=staging_root,
+        )
     # A normal audit should retain the exact archived parent.  Retranslation,
     # however, can explicitly request a fresh decision from the current video
     # so a previously selected embedded track is not treated as immutable input.
@@ -787,7 +1019,10 @@ def resolve_episode_source(
         # If the media was removed, an archived source is still a valid and
         # recoverable fallback for retranslation.
         if old and linked_source is None:
-            linked_source = resolve_source_record(library, int(old["id"]), materialize=materialize)
+            linked_source = resolve_source_record(
+                library, int(old["id"]), materialize=materialize,
+                staging_root=staging_root,
+            )
         if linked_source and linked_source.get("available"):
             fmt = str(linked_source.get("format") or "").upper()
             result = {**linked_source, "status": "SOURCE_AVAILABLE_LIBRARY", "kind": "LIBRARY", "display": f"{lang_label} {fmt} — Biblioteca".strip()}
@@ -798,6 +1033,15 @@ def resolve_episode_source(
     if len(sidecars) == 1:
         source_path = sidecars[0]
         if materialize:
+            if staging_root is not None:
+                staged = _stage_source_file(source_path, staging_root, episode_id=int(episode_id))
+                return {
+                    "available": True,
+                    "status": "SOURCE_AVAILABLE_SIDECAR",
+                    "kind": "SIDECAR_TEXT",
+                    "display": f"{lang_label} ASS/SRT — Sidecar staged",
+                    **staged,
+                }
             ingested = _ingest_source(library, episode_id, source_path, source_kind="EXTERNAL", source_language=source_language, job_id=job_id)
             if materialize:
                 ingested.update(_materialize_library_record(library, int(ingested["record_id"])))
@@ -813,7 +1057,11 @@ def resolve_episode_source(
     if selected:
         result = {"available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT", "kind": "EMBEDDED_TEXT", "display": f"{str(selected.get('codec') or '').upper()} — track {lang_label} interna {selected.get('index')}", "track": selected}
         if materialize:
-            result.update(_extract_track(library, episode_id, video_path, selected, source_language=source_language, job_id=job_id))
+            result.update(_extract_track(
+                library, episode_id, video_path, selected,
+                source_language=source_language, job_id=job_id,
+                staging_root=staging_root,
+            ))
             if result.get("record_id") is not None:
                 result.update(_materialize_library_record(library, int(result["record_id"])))
         else:

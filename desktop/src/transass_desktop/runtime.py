@@ -66,7 +66,7 @@ class LocalRuntime:
             "ANIME_SUBTITLE_LIBRARY_ROOT": str(self.paths.library_root),
             "TRANSLATOR_FAILURE_LEDGER_ROOT": str(self.paths.failure_ledger_root),
             "TRANSPORT_CONFIG_PATH": str(self.paths.transport_config),
-            "TRANSLATOR_PIPELINE": "v2_3_8",
+            "TRANSLATOR_PIPELINE": "v3",
             "TMPDIR": str(self.paths.temp_root),
         }
         # These paths belong to the Desktop session.  Overriding stale

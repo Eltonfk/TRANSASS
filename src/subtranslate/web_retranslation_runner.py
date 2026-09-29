@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
@@ -129,6 +131,7 @@ def _project_v238_summary(result: dict) -> dict:
 
 def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: str) -> dict[str, Any]:
     scratch = Path(tempfile.mkdtemp(prefix=".web-retranslation-", dir="/tmp"))
+    v3_thermal_guard = None
     try:
         safe_series = re.sub(r"[^\w .!'-]+", "_", args.series_title).strip() or "Anime"
         safe_episode = re.sub(r"[^\w .!'-]+", "_", args.episode_title).strip() or "Episode"
@@ -139,14 +142,18 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
         if pipeline == "v2_3_8":
             # G1: caminho V2.3.8 exige execution context completo
             # (response_provider, base_materializer, transport, identidade).
-            import hashlib
             import uuid
 
             from web_execution_context import build_v238_execution_context
             from web_durable_provider import WebDurableResponseProvider
 
             transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
-            identity = execution_identity(transport_config)
+            # The config loader migrates retired plans to V3 for new work.
+            # This branch is an explicit historical replay, so preserve the
+            # V2.3.8 identity used by its durable captures and checkpoints.
+            identity_config = dict(transport_config)
+            identity_config["pipeline"] = pipeline
+            identity = execution_identity(identity_config)
             if transport is not None:
                 transport_provider = getattr(transport, "name", "ollama")
                 transport_model = getattr(transport, "model", None)
@@ -219,6 +226,147 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
             with open(os.devnull, "w", encoding="utf-8") as quiet_output:
                 with contextlib.redirect_stdout(quiet_output):
                     result = execute_pipeline_plan(pipeline, semantic_source, args.output, ctx)
+        elif pipeline in {"v3", "v3_0_0"}:
+            import uuid
+
+            from gpu_thermal_guard import GpuThermalGuard
+            from pipeline_v3 import make_v3_transport_call
+            from v3_runtime import create_v3_live_transport, v3_batch_size
+
+            transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
+            primary = transport_config.get("primary") or {}
+            fallback = transport_config.get("fallback") or {}
+            selected = primary
+            if transport is not None:
+                for candidate in (primary, fallback):
+                    if (
+                        str(candidate.get("provider", "")).casefold()
+                        == str(getattr(transport, "name", "")).casefold()
+                        and str(candidate.get("model", ""))
+                        == str(getattr(transport, "model", "") or "")
+                    ):
+                        selected = candidate
+                        break
+            run_id = str(getattr(args, "v3_run_id", None) or args.job_id)
+            operation_id = hashlib.sha256(
+                f"v3:{run_id}:{selected.get('provider')}:{selected.get('model')}".encode("utf-8")
+            ).hexdigest()[:32]
+            job_token = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:24]
+            capture_root = (
+                default_state_dir()
+                / "v3-runs"
+                / job_token
+                / operation_id
+                / "captures"
+            )
+
+            # Retranslations run in a child process, so the parent queue's
+            # cooperative gate cannot be passed into this request loop. Keep
+            # the same vendor-neutral guard in the child and attach it at both
+            # V3 request boundaries. The parent remains responsible for the
+            # user-visible telemetry and for terminating a tripped job.
+            thermal_gate = None
+            effective_provider = str(selected.get("provider") or "").casefold()
+            if effective_provider == "ollama":
+                def report_warning(snapshot, config) -> None:
+                    temperature = (
+                        f"{snapshot.hottest_sensor or 'GPU'}="
+                        f"{snapshot.hottest_c:.1f}°C"
+                        if snapshot.hottest_c is not None else "temperatura indisponível"
+                    )
+                    print(
+                        f"Proteção térmica GPU: alerta — {temperature}; "
+                        f"retomada abaixo de "
+                        f"{v3_thermal_guard.cooling_resume_c(config):.0f}°C",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                def report_sample(snapshot, config) -> None:
+                    status = (
+                        "TRIPPED" if getattr(v3_thermal_guard, "tripped", False)
+                        else "TEMPORARY_OVERRIDE" if getattr(v3_thermal_guard, "override_active", False)
+                        else "COOLING_OBSERVATION" if getattr(v3_thermal_guard, "cooling_active", False)
+                        else "MONITORING"
+                    )
+                    sample = snapshot.as_dict(config)
+                    sample.update({
+                        "status": status,
+                        "warning_c": config.warning_c,
+                        "stop_c": config.stop_c,
+                        "interval_s": config.interval_s,
+                        "trip_confirmations": config.trip_confirmations,
+                        "cooling_window_s": config.cooling_window_s,
+                        "trip_override_window_s": config.trip_override_window_s,
+                        "cooling_elapsed_s": round(getattr(v3_thermal_guard, "cooling_elapsed_s", 0.0), 1),
+                        "override_elapsed_s": round(getattr(v3_thermal_guard, "override_elapsed_s", 0.0), 1),
+                        "override_remaining_s": round(getattr(v3_thermal_guard, "override_remaining_s", 0.0), 1),
+                        "override_reason": getattr(v3_thermal_guard, "override_reason", None),
+                        "consecutive_over_stop": getattr(v3_thermal_guard, "consecutive_over_stop", 0),
+                        "trip_reason": getattr(v3_thermal_guard, "trip_reason", None),
+                        "fan_control": "hardware_driver",
+                    })
+                    print(
+                        "V3_THERMAL_SAMPLE "
+                        + json.dumps(sample, ensure_ascii=False, separators=(",", ":")),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                def report_trip(snapshot, _config) -> None:
+                    temperature = (
+                        f"{snapshot.hottest_sensor or 'GPU'}="
+                        f"{snapshot.hottest_c:.1f}°C"
+                        if snapshot.hottest_c is not None else "temperatura indisponível"
+                    )
+                    print(
+                        f"V3_THERMAL_GUARD_TRIPPED: {temperature}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                v3_thermal_guard = GpuThermalGuard(
+                    on_warning=report_warning,
+                    on_trip=report_trip,
+                    on_sample=report_sample,
+                )
+                v3_thermal_guard.start()
+
+                def thermal_gate() -> bool:
+                    if not v3_thermal_guard.wait_for_cooling():
+                        raise RuntimeError("V3_THERMAL_GUARD_TRIPPED")
+                    return False
+
+            active_transport, response_provider = create_v3_live_transport(
+                transport_config,
+                dict(selected),
+                capture_root=capture_root,
+                before_call=thermal_gate,
+            )
+            transport_call = make_v3_transport_call(
+                active_transport,
+                response_provider=response_provider,
+                capture_id_prefix=f"v3-retranslate-{job_token}",
+                operation_id=operation_id,
+                source_language=source_language,
+                thermal_gate=thermal_gate,
+            )
+            with open(os.devnull, "w", encoding="utf-8") as quiet_output:
+                with contextlib.redirect_stdout(quiet_output):
+                    result = execute_pipeline_plan(
+                        pipeline,
+                        semantic_source,
+                        args.output,
+                        {
+                            "operation": "RETRANSLATE",
+                            "transport_call": transport_call,
+                            "source_language": source_language,
+                            "target_batch_size": v3_batch_size(
+                                transport_config,
+                                str(getattr(active_transport, "name", "")),
+                            ),
+                        },
+                    )
         else:
             with open(os.devnull, "w", encoding="utf-8") as quiet_output:
                 with contextlib.redirect_stdout(quiet_output):
@@ -238,6 +386,8 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                         },
                     )
     finally:
+        if v3_thermal_guard is not None:
+            v3_thermal_guard.stop()
         shutil.rmtree(scratch, ignore_errors=True)
     return result
 
@@ -316,7 +466,8 @@ def main() -> int:
     parser.add_argument("--anime-series-id", type=int)
     parser.add_argument("--episode-id", type=int)
     parser.add_argument("--job-id", default="web-retranslation")
-    parser.add_argument("--pipeline", default=os.environ.get("TRANSLATOR_PIPELINE", "legacy"))
+    parser.add_argument("--v3-run-id", help="identidade estável para replay seguro após reinício")
+    parser.add_argument("--pipeline", default=os.environ.get("TRANSLATOR_PIPELINE", "v3"))
     parser.add_argument("--series-title", default="Anime")
     parser.add_argument("--episode-title", default="Episode")
     parser.add_argument("--no-fallback", action="store_true")
@@ -360,10 +511,15 @@ def main() -> int:
             result = _run_pipeline(args, pipeline, primary, source_language)
         except Exception as primary_error:
             message = str(primary_error).lower()
-            transport_failure = any(token in message for token in (
-                "connectionerror", "timeout", "connection refused", "max retries",
-                "temporarily unavailable", "name or service not known",
-            ))
+            if pipeline in {"v3", "v3_0_0"}:
+                from v3_runtime import is_v3_transport_error
+
+                transport_failure = is_v3_transport_error(primary_error)
+            else:
+                transport_failure = any(token in message for token in (
+                    "connectionerror", "timeout", "connection refused", "max retries",
+                    "temporarily unavailable", "name or service not known",
+                ))
             if args.no_fallback or fallback is None or not transport_failure:
                 raise
             result = None

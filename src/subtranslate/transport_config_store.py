@@ -33,9 +33,14 @@ from transport_providers import (
 
 ALLOWED_PROVIDERS = {"ollama", "openai_compat", "groq", "gemini", "nvidia", "deepseek"}
 ALLOWED_PIPELINES = {"legacy", "v2_3_0", "v2_3_8", "v3"}
-DEFAULT_PIPELINE = "v2_3_8"
+DEFAULT_PIPELINE = "v3"
+PIPELINE_MIGRATIONS = {
+    "legacy": "v3",
+    "v2_3_0": "v3",
+    "v2_3_8": "v3",
+}
 DEFAULT_CONFIG = {
-    "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
+    "primary": {"provider": "ollama", "model": "qwen2.5:14b"},
     "fallback": None,
     "keys": {},
     "credential_refs": {},
@@ -180,6 +185,13 @@ def _apply_environment_transport_defaults(merged: dict[str, Any]) -> dict[str, A
     return merged
 
 
+def _migrate_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Route retired complete plans to V3 without rewriting old evidence."""
+    pipeline = str(config.get("pipeline") or DEFAULT_PIPELINE).strip().casefold()
+    config["pipeline"] = PIPELINE_MIGRATIONS.get(pipeline, pipeline)
+    return config
+
+
 def _effective_ollama_base_url(engine: dict[str, Any] | None) -> str | None:
     """Resolve the Ollama endpoint for the current runtime.
 
@@ -231,10 +243,11 @@ def _fsync_dir(path: Path) -> None:
 def load_transport_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
         # Defaults must carry the same model identity as a persisted config.
-        # Without this, a first-run V2.3.8 web job enters LIVE_CAPTURED with
+        # Without this, a first-run V3 web job enters LIVE_CAPTURED with
         # ``model_digest=None`` and fails before making its first call.
         merged = json.loads(json.dumps(DEFAULT_CONFIG))
         merged = _apply_environment_transport_defaults(merged)
+        _migrate_pipeline_config(merged)
         primary = dict(merged.get("primary") or {})
         if str(primary.get("provider") or "").lower() == "gemini":
             primary["model"] = migrate_gemini_model(primary.get("model") or "")
@@ -253,6 +266,7 @@ def load_transport_config(path: Path) -> dict[str, Any]:
         raise TransportConfigError("transport config inválido")
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update({k: v for k, v in value.items() if k in merged})
+    _migrate_pipeline_config(merged)
     # Keep a persisted Docker-network alias from shadowing the endpoint that
     # the current runtime explicitly configured (for example, a host Ollama
     # published at ``host.docker.internal``).  Recompute the model identity
@@ -430,7 +444,10 @@ def _save_transport_config_unlocked(path: Path, payload: dict[str, Any]) -> dict
         if text:
             keys_clean[provider] = text
 
-    pipeline = str(payload.get("pipeline") or DEFAULT_PIPELINE).strip().lower()
+    pipeline = PIPELINE_MIGRATIONS.get(
+        str(payload.get("pipeline") or DEFAULT_PIPELINE).strip().lower(),
+        str(payload.get("pipeline") or DEFAULT_PIPELINE).strip().lower(),
+    )
     if pipeline not in ALLOWED_PIPELINES:
         raise TransportConfigError(f"pipeline inválido: {pipeline}")
     authorized = _authorized_model_prefixes(primary_clean)

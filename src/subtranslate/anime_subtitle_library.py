@@ -386,6 +386,11 @@ class AnimeSubtitleLibrary:
         before the atomic replace, then verify it rather than silently storing
         an inaccessible object.
         """
+        if os.name == "nt":
+            # The Desktop data root inherits the current user's Windows ACL.
+            # Python's chmod exposes only the read-only bit on Windows and
+            # cannot express the POSIX 0600 owner/group contract.
+            return
         library_stat = self.root.stat()
         expected_uid, expected_gid = library_stat.st_uid, library_stat.st_gid
         try:
@@ -421,11 +426,12 @@ class AnimeSubtitleLibrary:
                     raise ObjectIntegrityError("hash divergente durante staging")
                 self._set_canonical_object_permissions(staged)
                 os.replace(staged, target)
-                dir_fd = os.open(target.parent, os.O_RDONLY)
-                try:
-                    os.fsync(dir_fd)
-                finally:
-                    os.close(dir_fd)
+                if os.name != "nt":
+                    dir_fd = os.open(target.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
             finally:
                 staged.unlink(missing_ok=True)
         rel = target.relative_to(self.root).as_posix()
@@ -628,10 +634,19 @@ class AnimeSubtitleLibrary:
                     shutil.copyfileobj(inp, out, length=1024 * 1024); out.flush(); os.fsync(out.fileno())
                 if self._hash_file(staged)[0] != row["sha256"]:
                     raise ObjectIntegrityError("hash mudou durante publicação")
-                os.replace(staged, target)
-                dir_fd = os.open(target.parent, os.O_RDONLY)
-                try: os.fsync(dir_fd)
-                finally: os.close(dir_fd)
+                if allow_replace:
+                    os.replace(staged, target)
+                else:
+                    try:
+                        os.link(staged, target)
+                    except FileExistsError:
+                        if not target.is_file() or self._hash_file(target)[0] != row["sha256"]:
+                            raise PublicationConflict("destino surgiu durante publicação; nenhum arquivo foi sobrescrito")
+                    staged.unlink(missing_ok=True)
+                if os.name != "nt":
+                    dir_fd = os.open(target.parent, os.O_RDONLY)
+                    try: os.fsync(dir_fd)
+                    finally: os.close(dir_fd)
             finally:
                 staged.unlink(missing_ok=True)
             status = "PUBLISHED"

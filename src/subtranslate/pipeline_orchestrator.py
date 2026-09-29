@@ -165,6 +165,19 @@ def _call_full_adapter(plan_id: str, source: Path, output: Path, context: dict[s
         raise UnsupportedPipelineError(f"pipeline plan has no full adapter: {plan_id}")
     function: Callable[..., Any] = getattr(importlib.import_module(module_name), function_name)
     glossary = context.get("glossary")
+    if plan_id in {"v3", "v3_0_0"}:
+        transport_call = context.get("transport_call")
+        if not callable(transport_call):
+            raise UnsupportedPipelineError("V3_TRANSPORT_CALL_REQUIRED")
+        return function(
+            source,
+            output,
+            transport_call=transport_call,
+            target_batch_size=int(context.get("target_batch_size", 16) or 16),
+            enable_visual_effects=bool(context.get("enable_visual_effects", True)),
+            enable_karaoke=bool(context.get("enable_karaoke", True)),
+            source_language=str(context.get("source_language") or "inglês"),
+        )
     if plan_id in {"v2_1_2", "v2_1_3"}:
         return function(source, output, glossary=glossary)
     kwargs = dict(

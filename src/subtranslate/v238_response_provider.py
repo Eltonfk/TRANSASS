@@ -70,7 +70,7 @@ class DurableResponseProvider:
     """Provider with explicit LIVE_CAPTURED/OFFLINE_REPLAY/TEST_FAKE modes."""
 
     MODES = {"LIVE_CAPTURED", "OFFLINE_REPLAY", "TEST_FAKE"}
-    TRANSPORTS = {"OLLAMA_MODEL", "NETWORK_NON_MODEL", "LOCAL_TEST", "OFFLINE_REPLAY", "TEST_FAKE"}
+    TRANSPORTS = {"OLLAMA_MODEL", "HOSTED_MODEL", "NETWORK_NON_MODEL", "LOCAL_TEST", "OFFLINE_REPLAY", "TEST_FAKE"}
 
     def __init__(
         self,
@@ -82,6 +82,7 @@ class DurableResponseProvider:
         expected_capture_ids: Mapping[str, str] | None = None,
         transport_semantics: str | None = None,
         provider_name: str | None = None,
+        response_parser: Callable[[bytes], Mapping[str, Any]] | None = None,
     ) -> None:
         self.mode = str(mode or "").upper()
         if self.mode not in self.MODES:
@@ -109,6 +110,7 @@ class DurableResponseProvider:
         self.operation_budget: Any = None
         self.operation_budget_phase = "V238_SEMANTIC"
         self.provider_name = str(provider_name or "").strip().casefold()
+        self.response_parser = response_parser or _parse_response
         self.operation_budget_provider = self.provider_name or None
         self.before_call: Callable[[], bool] | None = None
         if self.mode in {"LIVE_CAPTURED", "OFFLINE_REPLAY"} and self.capture_root is None:
@@ -128,6 +130,10 @@ class DurableResponseProvider:
     def attach_before_call(self, callback: Callable[[], bool] | None) -> None:
         """Install a cooperative gate checked before every provider call."""
         self.before_call = callback
+
+    def parse_response(self, raw: bytes) -> dict[str, Any]:
+        """Parse a captured response through the configured provider contract."""
+        return _parse_response(self.response_parser(raw))
 
     def _capture_dir(self, request: Mapping[str, Any], capture_id: str | None) -> tuple[str, Path]:
         raw_id = capture_id or str(request.get("capture_id") or "")
@@ -207,24 +213,34 @@ class DurableResponseProvider:
                         model_tag=model_tag,
                         model_digest=model_digest,
                         phase=self.operation_budget_phase,
+                        reservation_id=call_id,
                         provider=self.operation_budget_provider,
                     )
                 except TypeError:
-                    # Keep compatibility with injected test budgets using the
-                    # pre-provider-identity reserve signature.
-                    self.operation_budget.reserve(
-                        model_tag=model_tag,
-                        model_digest=model_digest,
-                        phase=self.operation_budget_phase,
-                    )
+                    # Keep compatibility with older injected budgets while
+                    # retaining idempotent reservations on the production
+                    # OperationCallBudget implementation.
+                    try:
+                        self.operation_budget.reserve(
+                            model_tag=model_tag,
+                            model_digest=model_digest,
+                            phase=self.operation_budget_phase,
+                            provider=self.operation_budget_provider,
+                        )
+                    except TypeError:
+                        self.operation_budget.reserve(
+                            model_tag=model_tag,
+                            model_digest=model_digest,
+                            phase=self.operation_budget_phase,
+                        )
             call_dir.parent.mkdir(parents=True, exist_ok=True)
             capture = DurableResponseCaptureV1(call_dir, call_id=call_id)
             capture.prepare(payload, {"mode": self.mode, "capture_id": call_id})
             self.metrics["durable_capture_writes"] += 1
             self.metrics["physical_client_calls"] += 1
-            if self.transport_semantics in {"OLLAMA_MODEL", "NETWORK_NON_MODEL"}:
+            if self.transport_semantics in {"OLLAMA_MODEL", "HOSTED_MODEL", "NETWORK_NON_MODEL"}:
                 self.metrics["application_network_calls"] += 1
-            if self.transport_semantics == "OLLAMA_MODEL":
+            if self.transport_semantics in {"OLLAMA_MODEL", "HOSTED_MODEL"}:
                 self.metrics["model_generation_calls"] += 1
             def invoke_client() -> bytes:
                 raw = self.client(payload)
@@ -236,7 +252,7 @@ class DurableResponseProvider:
             )
             self.metrics["durable_capture_writes"] += 1
             try:
-                response = _parse_response(raw_bytes)
+                response = self.parse_response(raw_bytes)
             except ResponseSchemaError as exc:
                 self.metrics["parse_failures"] += 1
                 self.metrics["schema_failures"] += 1

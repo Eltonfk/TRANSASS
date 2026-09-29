@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -45,15 +46,19 @@ from pipeline_registry import (
     pipeline_info,
 )
 from queue_helpers import build_job_batch
+from pipeline_lineage import LineageContractError
 from runtime_config import RuntimeConfig, execution_identity, load_project_env
 from runtime_paths import configure_binary_path, resource_root
 from gpu_thermal_guard import GpuThermalGuard, ThermalGuardConfig, ThermalSnapshot
+from failure_ledger import retain_staging
 from web_audit_retranslation import (
+    _canonical_language_code,
     _sidecar_candidates,
     _public_source_status,
     archive_eligibility,
     audit_record,
     compare_records,
+    detect_source_options,
     record_audit_status,
     resolve_episode_source,
     resolve_source_record,
@@ -76,7 +81,7 @@ RUNTIME_ROOT = Path(__file__).resolve().parent
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".webm"}
 TARGET_SUFFIX = "pt-BR"
 SUBTITLE_EXTENSIONS = {".ass", ".ssa", ".srt"}
-PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
+PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "v3").strip().lower()
 MODEL = os.environ.get("TRANSLATOR_OLLAMA_MODEL", "").strip()
 STATE_DIR = RUNTIME_CONFIG.state_dir
 STATE_FILE = STATE_DIR / "jobs.json"
@@ -117,29 +122,29 @@ def _now() -> str:
 
 
 def _pipeline() -> str:
-    return os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
+    return os.environ.get("TRANSLATOR_PIPELINE", "v3").strip().lower()
 
 
 def _effective_pipeline() -> str:
     """C4: pipeline efetivo — transport_config.json primeiro, env como fallback.
 
-    Quando o arquivo de configuração não existe, o valor da variável de
-    ambiente ``TRANSLATOR_PIPELINE`` é usado diretamente.  O DEFAULT_CONFIG
-    do módulo ``transport_config_store`` define ``legacy`` como padrão e
-    sobrescreveria a variável de ambiente se o arquivo não fosse verificado
-    antes.
+    A configuração carregada centraliza também os defaults de primeiro uso e
+    migra IDs retirados para V3 em memória. Se o arquivo estiver ilegível,
+    aplica-se a mesma tabela de migração ao override do ambiente.
     """
     from transport_config_store import TransportConfigError, load_transport_config
 
-    if TRANSPORT_CONFIG_PATH.is_file():
-        try:
-            config = load_transport_config(TRANSPORT_CONFIG_PATH)
-            pipeline = str(config.get("pipeline") or "").strip().lower()
-            if pipeline:
-                return pipeline
-        except TransportConfigError:
-            pass
-    return _pipeline()
+    try:
+        config = load_transport_config(TRANSPORT_CONFIG_PATH)
+        pipeline = str(config.get("pipeline") or "").strip().lower()
+        if pipeline:
+            return pipeline
+    except TransportConfigError:
+        pass
+    from transport_config_store import PIPELINE_MIGRATIONS
+
+    configured = _pipeline()
+    return PIPELINE_MIGRATIONS.get(configured, configured)
 
 
 def _model() -> str:
@@ -218,6 +223,94 @@ def _library_episode_for_video(video: Path) -> dict | None:
         return None
 
 
+def _require_v3_library_episode(video: Path, job: dict) -> dict:
+    """Require a real, path-matched anime episode before V3 can call a model."""
+    episode = _library_episode_for_video(video)
+    if not episode:
+        raise RuntimeError("V3_LIBRARY_EPISODE_NOT_REGISTERED")
+    relative = _safe_relative(video)
+    if str(episode.get("media_relative_path") or "") != relative:
+        raise RuntimeError("V3_LIBRARY_EPISODE_PATH_MISMATCH")
+    requested_id = job.get("episode_id")
+    if requested_id is not None and int(requested_id) != int(episode["id"]):
+        raise RuntimeError("V3_LIBRARY_EPISODE_ID_MISMATCH")
+    requested_series_id = job.get("anime_series_id")
+    if requested_series_id is not None and int(requested_series_id) != int(episode["series_id"]):
+        raise RuntimeError("V3_LIBRARY_SERIES_ID_MISMATCH")
+    job["episode_id"] = int(episode["id"])
+    job["anime_series_id"] = int(episode["series_id"])
+    return episode
+
+
+def _v3_source_record(job: dict, episode_id: int, source_path: Path, source_language: str) -> dict:
+    """Resolve or archive the exact source bytes for truthful V3 lineage."""
+    from web_audit_retranslation import _canonical_language_code
+
+    source_sha, _size = subtitle_library._hash_file(source_path)
+    explicit_id = job.get("source_record_id")
+    if explicit_id is not None:
+        record = subtitle_library.get_record(int(explicit_id))
+        if (
+            not record
+            or int(record.get("episode_id") or -1) != int(episode_id)
+            or str(record.get("sha256") or "") != source_sha
+        ):
+            raise RuntimeError("V3_SOURCE_RECORD_IDENTITY_MISMATCH")
+        return record
+
+    source_kinds = {"EXTRACTED", "EXTERNAL", "IMPORTED_EXISTING"}
+    for record in reversed(subtitle_library.list_records(episode_id=int(episode_id))):
+        if (
+            record.get("source_kind") in source_kinds
+            and str(record.get("sha256") or "") == source_sha
+        ):
+            job["source_record_id"] = int(record["id"])
+            return record
+
+    source_kind = "EXTRACTED" if job.get("source_stream_index") is not None else "EXTERNAL"
+    language_code = _canonical_language_code(source_language)
+    record = subtitle_library.ingest_file(
+        source_path,
+        episode_id=int(episode_id),
+        language=language_code,
+        source_kind=source_kind,
+        source_language=language_code,
+        original_filename=str(job.get("source_sidecar") or source_path.name),
+        job_id=str(job.get("id") or "") or None,
+        validation_status="EXTRACTED" if source_kind == "EXTRACTED" else "IMPORTED",
+        review_status="GENERATED",
+        preferred=False,
+        created_by="transass-v3-source",
+        require_authorized_path=False,
+    )
+    job["source_record_id"] = int(record["id"])
+    return record
+
+
+def _v3_failure_state(
+    error: Exception,
+    *,
+    thermal_stop: bool,
+    cancel_requested: bool,
+    thermal_error: str | None = None,
+) -> dict[str, str]:
+    """Map cooperative V3 exits to truthful queue outcomes."""
+    if thermal_stop:
+        return {
+            "status": "FAILED", "stage": "FAILED", "reason": "gpu_thermal_guard",
+            "error": thermal_error or "GPU atingiu o limite térmico; job interrompido preventivamente",
+        }
+    if cancel_requested:
+        return {
+            "status": "CANCELLED", "stage": "STOPPED", "reason": "stopped_by_user",
+            "error": "Job interrompido pelo usuário",
+        }
+    return {
+        "status": "FAILED", "stage": "FAILED", "reason": "translator_exception",
+        "error": str(error) if error is not None else "exceção sem mensagem",
+    }
+
+
 def _episode_records_for_library(episode_id: int) -> list[dict]:
     try:
         return subtitle_library.list_records(episode_id=episode_id)
@@ -235,6 +328,52 @@ def _preferred_library_record(episode_id: int | None) -> dict | None:
     return next((item for item in records if item.get("preferred")), None) or (published[0] if published else records[0])
 
 
+def _existing_ptbr_sidecar_for_episode(episode_id: int | None) -> Path | None:
+    """Return a safe, already-published PT-BR sidecar not yet in the Library.
+
+    Retranslation is lineage-aware, but older jobs could publish the sidecar
+    before their Library ingest completed.  The sidecar is only discovered
+    here; importing it is an explicit step in the retranslation queue path.
+    """
+    if episode_id is None:
+        return None
+    try:
+        video = subtitle_library._episode_video(int(episode_id))
+        target = _existing_output(video)
+        if target is None or not target.is_file() or target.is_symlink():
+            return None
+        return target.resolve(strict=True)
+    except (FileNotFoundError, OSError, LibraryError):
+        return None
+
+
+def _import_existing_ptbr_record(
+    episode_id: int, target: Path, *, source_language: str,
+) -> dict:
+    """Reconcile one legacy PT-BR sidecar into immutable Library storage."""
+    digest, _size = subtitle_library._hash_file(target)
+    for record in subtitle_library.list_records(episode_id=int(episode_id), language="pt-BR"):
+        if str(record.get("sha256") or "") == digest:
+            return record
+    return subtitle_library.ingest_file(
+        target,
+        episode_id=int(episode_id),
+        language="pt-BR",
+        source_kind="IMPORTED_EXISTING",
+        source_language=source_language,
+        original_filename=target.name,
+        validation_status="IMPORTED",
+        review_status="GENERATED",
+        preferred=True,
+        created_by="retranslation-legacy-reconciliation",
+        notes=(
+            "Legenda PT-BR existente reconciliada antes da retradução; "
+            "arquivo original preservado e não sobrescrito."
+        ),
+        require_authorized_path=True,
+    )
+
+
 def _global_source_language() -> str:
     """Read the configured source language from the transport config (global)."""
     try:
@@ -243,6 +382,30 @@ def _global_source_language() -> str:
         return public_transport_config(TRANSPORT_CONFIG_PATH).get("source_language") or "inglês"
     except Exception:
         return "inglês"
+
+
+def _auto_source_language_for_episode(episode_id: int, configured: str) -> str | None:
+    """Choose a sole known non-PT-BR textual source when the default is absent."""
+    try:
+        video = subtitle_library._episode_video(int(episode_id))
+        options = detect_source_options(video)
+    except (OSError, LibraryError, ValueError):
+        return None
+    candidates = {
+        str(option.get("language") or "").strip()
+        for option in options
+        if option.get("textual")
+        and not option.get("bitmap")
+        and not option.get("signs_songs_only")
+        and str(option.get("language") or "").strip().casefold() in {
+            "inglês", "espanhol", "japonês", "francês", "coreano", "chinês",
+            "alemão", "italiano", "russo",
+        }
+    }
+    if str(configured or "").strip().casefold() in {item.casefold() for item in candidates}:
+        return None
+    candidates.discard(str(configured or "").strip())
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _source_status_for_episode(
@@ -261,6 +424,12 @@ def _source_status_for_episode(
     """
     if source_language is None:
         source_language = _global_source_language()
+        detected_language = (
+            _auto_source_language_for_episode(int(episode_id), source_language)
+            if episode_id is not None else None
+        )
+        if detected_language:
+            source_language = detected_language
     if episode_id is None:
         return {"available": False, "status": "SOURCE_NOT_FOUND", "display": "Fonte original não disponível", "reason": "episódio não catalogado"}
     key = f"{int(episode_id)}:{source_language}"
@@ -284,6 +453,7 @@ def _source_status_for_episode(
             "display": "Status da fonte indisponível",
             "reason": str(error)[:240],
         }
+    result["source_language"] = source_language
     public = _public_source_status(result)
     if not materialize:
         state.setdefault("source_status", {})[key] = public
@@ -565,13 +735,28 @@ def _job_ledger_dir(job: dict) -> Path | None:
 
 
 def _semantic_capture_telemetry(job: dict) -> dict[str, Any]:
-    """Summarize V238 semantic captures without exposing request contents."""
+    """Summarize durable model captures without exposing request contents."""
     job_id = str(job.get("id") or "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", job_id):
         return {"total": 0, "completed": 0, "in_progress": 0, "incomplete": 0,
                 "current_event_id": None, "last_activity_at": None}
-    capture_root = STATE_DIR / "v238-runs" / job_id / "captures"
-    if not capture_root.is_dir():
+    capture_roots: list[Path] = []
+    v238_root = STATE_DIR / "v238-runs" / job_id / "captures"
+    if v238_root.is_dir():
+        capture_roots.append(v238_root)
+    run_id = str(job.get("v3_run_id") or job_id)
+    run_token = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:24]
+    v3_root = STATE_DIR / "v3-runs" / run_token
+    if v3_root.is_dir():
+        try:
+            capture_roots.extend(
+                operation_dir / "captures"
+                for operation_dir in v3_root.iterdir()
+                if operation_dir.is_dir() and (operation_dir / "captures").is_dir()
+            )
+        except OSError:
+            pass
+    if not capture_roots:
         return {"total": 0, "completed": 0, "in_progress": 0, "incomplete": 0,
                 "current_event_id": None, "last_activity_at": None}
     states: dict[str, int] = {}
@@ -580,29 +765,30 @@ def _semantic_capture_telemetry(job: dict) -> dict[str, Any]:
     active_mtime = 0.0
     active_call_id = None
     total = 0
-    try:
-        for call_dir in capture_root.iterdir():
-            if not call_dir.is_dir():
-                continue
-            state_path = call_dir / "capture_state.json"
-            if not state_path.is_file():
-                continue
-            try:
-                value = json.loads(state_path.read_text(encoding="utf-8"))
-                state_name = str(value.get("state") or "UNKNOWN")
-                modified = state_path.stat().st_mtime
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-            total += 1
-            states[state_name] = states.get(state_name, 0) + 1
-            if modified >= latest_mtime:
-                latest_mtime = modified
-                latest_call_id = str(value.get("call_id") or call_dir.name)
-            if state_name == "TRANSPORT_IN_PROGRESS" and modified >= active_mtime:
-                active_mtime = modified
-                active_call_id = str(value.get("call_id") or call_dir.name)
-    except OSError:
-        pass
+    for capture_root in capture_roots:
+        try:
+            for call_dir in capture_root.iterdir():
+                if not call_dir.is_dir():
+                    continue
+                state_path = call_dir / "capture_state.json"
+                if not state_path.is_file():
+                    continue
+                try:
+                    value = json.loads(state_path.read_text(encoding="utf-8"))
+                    state_name = str(value.get("state") or "UNKNOWN")
+                    modified = state_path.stat().st_mtime
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                total += 1
+                states[state_name] = states.get(state_name, 0) + 1
+                if modified >= latest_mtime:
+                    latest_mtime = modified
+                    latest_call_id = str(value.get("call_id") or call_dir.name)
+                if state_name == "TRANSPORT_IN_PROGRESS" and modified >= active_mtime:
+                    active_mtime = modified
+                    active_call_id = str(value.get("call_id") or call_dir.name)
+        except OSError:
+            continue
     event_match = re.search(r"event-(\d+)$", active_call_id or latest_call_id or "")
     completed = sum(states.get(name, 0) for name in ("RESPONSE_DURABLE", "VALIDATED_PASS"))
     in_progress = states.get("TRANSPORT_IN_PROGRESS", 0)
@@ -693,6 +879,11 @@ def _job_telemetry(job: dict) -> dict:
         calls = len(summary["calls"])
     elif calls is None:
         calls = summary.get("calls")
+    if calls is None and semantic["total"]:
+        # V3 writes durable captures under v3-runs and may fail before its
+        # compact stdout summary is emitted. Count persisted requests rather
+        # than reporting zero for a run that already contacted the model.
+        calls = semantic["total"]
     retries = summary.get("actual_retry_ollama_calls", summary.get("retry_calls", summary.get("retries")))
     if calls is None and attempts:
         calls = len(attempts)
@@ -838,7 +1029,7 @@ def _preserve_retranslation_diagnostic(
         "source_record_id": job.get("source_record_id"),
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "candidate_sha256": candidate_hash,
-        "pipeline": _pipeline(),
+        "pipeline": _effective_pipeline(),
         "model": _model(),
         "captured_at": _now(),
         "audit": audit,
@@ -887,11 +1078,12 @@ def _persist_locked() -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, STATE_FILE)
-        directory_fd = os.open(str(STATE_DIR), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if os.name != "nt":
+            directory_fd = os.open(str(STATE_DIR), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         # Wake SSE clients only after the durable state replacement completed.
         try:
             state_condition.notify_all()
@@ -1025,16 +1217,28 @@ def _job_uses_ollama(transport_config: dict) -> bool:
     )
 
 
-def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
-    """Start the vendor-neutral thermal guard for jobs that can call Ollama."""
+def _thermal_guard_for_job(job: dict, *, force: bool = False) -> GpuThermalGuard | None:
+    """Start thermal monitoring only for an attempt that actually uses Ollama."""
     try:
         from transport_config_store import load_transport_config
 
         transport_config = load_transport_config(TRANSPORT_CONFIG_PATH)
     except Exception:
         return None
-    if not _job_uses_ollama(transport_config):
-        return None
+    pipeline = _effective_pipeline()
+    if not force:
+        if job.get("operation") == "RETRANSLATE" and pipeline in {"v3", "v3_0_0"}:
+            # The V3 runner is a child process and owns a provider-specific
+            # guard. A parent guard here could kill a hosted fallback.
+            return None
+        if pipeline in {"v3", "v3_0_0"}:
+            primary = transport_config.get("primary") or {}
+            if str(primary.get("provider") or "").casefold() != "ollama":
+                # A hosted primary is not coupled to local GPU temperature.
+                # V3 creates a guard lazily if an Ollama fallback is selected.
+                return None
+        elif not _job_uses_ollama(transport_config):
+            return None
     config = ThermalGuardConfig.from_environment()
 
     def record(status: str, snapshot: ThermalSnapshot, *, error: str | None = None) -> None:
@@ -1248,6 +1452,23 @@ def _thermal_guard_for_job(job: dict) -> GpuThermalGuard | None:
     return guard
 
 
+def _v3_thermal_gate_for_provider(
+    provider_name: str,
+    guard: GpuThermalGuard | None,
+):
+    """Apply GPU cooling only to local inference; always honor user cancel."""
+    uses_local_gpu = str(provider_name or "").casefold() == "ollama"
+
+    def thermal_gate() -> bool:
+        if state.get("cancel_requested"):
+            return True
+        if uses_local_gpu and guard is not None and not guard.wait_for_cooling():
+            return True
+        return bool(state.get("cancel_requested"))
+
+    return thermal_gate
+
+
 def _mark_thermal_guard_prestart(job: dict) -> None:
     with state_lock:
         job["status"] = "FAILED"
@@ -1261,6 +1482,7 @@ def _mark_thermal_guard_prestart(job: dict) -> None:
             job_id=job.get("id"),
         )
         _persist_locked()
+    _cleanup_candidate_source_staging(job)
 
 
 def _apply_canonical_pipeline_summary(job: dict, summary: dict) -> None:
@@ -1619,6 +1841,7 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
 
     source = Path(job["source_abs"])
     destination = source.with_suffix(f".{TARGET_SUFFIX}.ass")
+    source_language = job.get("source_language") or _global_source_language()
     temporary_root = Path(tempfile.mkdtemp(prefix=".subtranslate-v238-", dir=str(source.parent)))
     _job_temporary_roots[str(job.get("id") or "")] = temporary_root
     temporary_dir = temporary_root / source.parent.name
@@ -1633,7 +1856,6 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
     # Signs/Songs); um sidecar só é usado como fallback quando o MKV não tem
     # faixa textual. Mais de uma opção sem desempate seguro falha explicitamente.
     if source.suffix.lower() in VIDEO_EXTENSIONS:
-        source_language = job.get("source_language") or _global_source_language()
         import anime_subtitle_translator as subtitle_translator
 
         # ``anime_subtitle_translator`` is imported once by the web process,
@@ -2010,7 +2232,7 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
                 try:
                     new_record = subtitle_library.ingest_file(
                         destination, episode_id=int(job["episode_id"]), language="pt-BR",
-                        source_kind="TRANSLATED", source_language="eng",
+                        source_kind="TRANSLATED", source_language=source_language,
                         original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
                         job_id=job["id"], pipeline_version="v2_3_8", model=_model(),
                         validation_status="VALIDATED", events_total=projected.get("events"),
@@ -2022,9 +2244,18 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
                 except Exception as ingest_error:
                     job["new_record_id"] = None
                     job["ingest_error"] = str(ingest_error)
-                job["status"] = "COMPLETED"
-                job["stage"] = "COMPLETED"
-                job["reason"] = "atomic_publish"
+                if job.get("ingest_error"):
+                    job["status"] = "FAILED"
+                    job["stage"] = "FAILED"
+                    job["reason"] = "library_ingest_failed"
+                    job["error"] = (
+                        "A legenda foi escrita no destino, mas não foi registrada na Library; "
+                        f"o arquivo foi preservado para reconciliação: {job['ingest_error']}"
+                    )
+                else:
+                    job["status"] = "COMPLETED"
+                    job["stage"] = "COMPLETED"
+                    job["reason"] = "atomic_publish"
             _apply_canonical_pipeline_summary(job, projected)
             job["finished_at"] = _now()
             if job["status"] == "COMPLETED":
@@ -2036,16 +2267,12 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
             _persist_locked()
     except Exception as error:
         with state_lock:
-            if state.get("thermal_stop_requested"):
-                job["status"] = "FAILED"
-                job["stage"] = "FAILED"
-                job["reason"] = "gpu_thermal_guard"
-                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
-            else:
-                job["status"] = "FAILED"
-                job["stage"] = "FAILED"
-                job["reason"] = "translator_exception"
-                job["error"] = str(error) if error is not None else "exceção sem mensagem"
+            job.update(_v3_failure_state(
+                error,
+                thermal_stop=bool(state.get("thermal_stop_requested")),
+                cancel_requested=bool(state.get("cancel_requested")),
+                thermal_error=job.get("thermal_error"),
+            ))
             job["finished_at"] = _now()
             _append_log(f"Falhou: {job['name']} — {job['error']}", level="error", job_id=job["id"])
             _persist_locked()
@@ -2107,9 +2334,8 @@ def _consume_worker_output_line(job: dict, line: str) -> None:
 def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> None:
     """Caminho in-process Transass V3 Unificado (em memória) para _run_episode."""
     import shutil
-    import hashlib as _hashlib
     from transport_config_store import load_transport_config
-    from transport_providers import API_KEY_PROVIDERS, api_key_from_env, transport_from_config
+    from transport_providers import API_KEY_PROVIDERS, api_key_from_env
     from pipeline_v3 import translate_subtitle_file_v3, make_v3_transport_call
 
     source = Path(job["source_abs"])
@@ -2122,6 +2348,7 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
     linked_video.symlink_to(source)
     staged_source = linked_video
     staged_output = temporary_dir / (source.stem + f".{TARGET_SUFFIX}.ass")
+    local_thermal_guards: list[GpuThermalGuard] = []
 
     try:
         if source.suffix.lower() in VIDEO_EXTENSIONS:
@@ -2161,59 +2388,22 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                 else:
                     raise RuntimeError("V3_NO_SUBTITLE_STREAM_FOUND")
 
+        v3_library_episode = None
+        if not job.get("dry_run"):
+            v3_library_episode = _require_v3_library_episode(source, job)
+
         transport_cfg = load_transport_config(TRANSPORT_CONFIG_PATH)
         primary_section = dict(transport_cfg.get("primary") or {})
         primary_provider = str(primary_section.get("provider", "ollama")).lower()
         primary_keys = transport_cfg.get("keys") or {}
-
-        if primary_provider in API_KEY_PROVIDERS and not str(primary_keys.get(primary_provider) or api_key_from_env(primary_provider) or "").strip():
-            raise RuntimeError(
-                f"{primary_provider.upper()}_API_KEY_MISSING: configure a credencial antes de traduzir"
-            )
-
-        section = dict(primary_section)
-        provider_name = str(section.get("provider", "")).lower()
-        if not section.get("api_key") and provider_name in primary_keys and primary_keys[provider_name]:
-            section["api_key"] = primary_keys[provider_name]
-        if provider_name == "ollama" and not section.get("base_url"):
-            ollama_url = os.environ.get("TRANSLATOR_OLLAMA_URL", "")
-            if ollama_url:
-                section["base_url"] = ollama_url.rsplit("/api/chat", 1)[0]
-        if provider_name == "gemini":
-            section["delay_between_calls"] = float(
-                (transport_cfg.get("gemini_profile") or {}).get("delay_between_calls", 0.5)
-            )
-        elif provider_name == "groq":
-            section["delay_between_calls"] = float(
-                (transport_cfg.get("groq_profile") or {}).get("delay_between_calls", 2.5)
-            )
-        elif provider_name == "deepseek":
-            section["delay_between_calls"] = float(
-                (transport_cfg.get("deepseek_profile") or {}).get("delay_between_calls", 2.0)
-            )
-
-        transport = transport_from_config(section, {"model": section.get("model")})
-
-        def thermal_gate() -> bool:
-            if state.get("cancel_requested"):
-                return True
-            if thermal_guard is not None and not thermal_guard.wait_for_cooling():
-                return True
-            return bool(state.get("cancel_requested"))
+        configured_fallback = transport_cfg.get("fallback")
+        if (
+            primary_provider in API_KEY_PROVIDERS
+            and str((configured_fallback or {}).get("provider", "")).lower() == "ollama"
+        ):
+            configured_fallback = None
 
         source_language = job.get("source_language") or _global_source_language()
-        transport_call = make_v3_transport_call(
-            transport,
-            source_language=source_language,
-            target_language="português do Brasil (pt-BR)",
-            thermal_gate=thermal_gate,
-        )
-
-        batch_size = 16
-        if provider_name == "groq":
-            batch_size = int((transport_cfg.get("groq_profile") or {}).get("batch_size", 4) or 4)
-        elif provider_name == "deepseek":
-            batch_size = int((transport_cfg.get("deepseek_profile") or {}).get("batch_size", 16) or 16)
 
         def progress_callback(current_batch: int, total_batches: int) -> None:
             with state_lock:
@@ -2238,13 +2428,154 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
             job["stage"] = "TRANSLATING"
             _persist_locked()
 
-        result = translate_subtitle_file_v3(
-            staged_source,
-            staged_output,
-            transport_call=transport_call,
-            target_batch_size=batch_size,
-            progress_callback=progress_callback,
-        )
+        result = None
+        active_provider_name = "dry-run"
+        provider_metrics: dict[str, Any] = {}
+        operation_budget_summary: dict[str, Any] = {}
+        fallback_used = False
+        active_operation_id: str | None = None
+        transport_error: Exception | None = None
+        if job.get("dry_run"):
+            result = translate_subtitle_file_v3(
+                staged_source,
+                staged_output,
+                transport_call=lambda payload: {
+                    str(item["id"]): str(item["source_text"]) for item in payload
+                },
+                target_batch_size=16,
+                allow_source_copy=True,
+                progress_callback=progress_callback,
+            )
+        else:
+            from v3_runtime import create_v3_live_transport, is_v3_transport_error, v3_batch_size
+
+            attempts = [("primary", primary_section)]
+            if configured_fallback:
+                attempts.append(("fallback", dict(configured_fallback)))
+            run_id = str(job.get("v3_run_id") or job.get("id") or "unknown")
+            job_token = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:24]
+            job_capture_root = STATE_DIR / "v3-runs" / job_token
+
+            for attempt_index, (attempt_name, section) in enumerate(attempts):
+                if not section:
+                    continue
+                section = dict(section)
+                provider_name = str(section.get("provider") or "").casefold()
+                if provider_name != "ollama" and thermal_guard is not None:
+                    # Once a failed local attempt falls back to a hosted
+                    # provider, local GPU temperature must no longer gate or
+                    # terminate that hosted attempt.
+                    thermal_guard.stop()
+                    thermal_guard = None
+                attempt_guard = thermal_guard if provider_name == "ollama" else None
+                if provider_name == "ollama" and attempt_guard is None:
+                    attempt_guard = _thermal_guard_for_job(job, force=True)
+                    if attempt_guard is not None:
+                        local_thermal_guards.append(attempt_guard)
+
+                thermal_gate = _v3_thermal_gate_for_provider(provider_name, attempt_guard)
+
+                if provider_name in API_KEY_PROVIDERS and not str(
+                    section.get("api_key")
+                    or primary_keys.get(provider_name)
+                    or api_key_from_env(provider_name)
+                    or ""
+                ).strip():
+                    raise RuntimeError(
+                        f"{provider_name.upper()}_API_KEY_MISSING: configure a credencial antes de traduzir"
+                    )
+
+                operation_id = hashlib.sha256(
+                    f"v3:{run_id}:{attempt_name}:{provider_name}:{section.get('model')}".encode("utf-8")
+                ).hexdigest()[:32]
+                active_operation_id = operation_id
+                capture_root = job_capture_root / attempt_name / "captures"
+                transport, response_provider = create_v3_live_transport(
+                    transport_cfg,
+                    section,
+                    capture_root=capture_root,
+                    before_call=thermal_gate,
+                )
+                active_provider_name = provider_name
+                transport_call = make_v3_transport_call(
+                    transport,
+                    response_provider=response_provider,
+                    capture_id_prefix=f"v3-{job_token}-{attempt_name}",
+                    operation_id=operation_id,
+                    source_language=source_language,
+                    target_language="português do Brasil (pt-BR)",
+                    thermal_gate=thermal_gate,
+                )
+                batch_size = v3_batch_size(transport_cfg, provider_name)
+                with state_lock:
+                    _append_log(
+                        f"V3 transport ativo: perfil={attempt_name}, provedor={provider_name}, "
+                        f"modelo={transport.model}, lote={batch_size}",
+                        level="info", job_id=job["id"],
+                    )
+                try:
+                    result = translate_subtitle_file_v3(
+                        staged_source,
+                        staged_output,
+                        transport_call=transport_call,
+                        target_batch_size=batch_size,
+                        source_language=source_language,
+                        progress_callback=progress_callback,
+                    )
+                    provider_metrics = dict(response_provider.metrics)
+                    budget = response_provider.operation_budget
+                    budget_snapshot = budget.snapshot() if hasattr(budget, "snapshot") else {}
+                    operation_budget_summary = {
+                        key: value for key, value in budget_snapshot.items()
+                        if key != "reservations"
+                    }
+                    fallback_used = attempt_name == "fallback"
+                    break
+                except Exception as exc:
+                    if (
+                        attempt_index + 1 < len(attempts)
+                        and not staged_output.exists()
+                        and response_provider.metrics.get("physical_client_calls", 0) == 0
+                        and is_v3_transport_error(exc)
+                    ):
+                        transport_error = exc
+                        fallback_used = True
+                        with state_lock:
+                            _append_log(
+                                f"V3 transporte primário indisponível; tentando o fallback configurado: {exc}",
+                                level="warning", job_id=job["id"],
+                            )
+                        continue
+                    raise
+            if result is None:
+                raise transport_error or RuntimeError("V3_NO_TRANSPORT_ATTEMPT_SUCCEEDED")
+
+        audit_result: dict[str, Any] | None = None
+        if not job.get("dry_run"):
+            audit_result = audit_record(
+                staged_source,
+                staged_output,
+                source_language=source_language,
+            )
+            eligibility = archive_eligibility(audit_result)
+            result["audit"] = {
+                "status": audit_result.get("status"),
+                "eligible_for_archive": eligibility["eligible_for_archive"],
+                "blocking_flags": eligibility["blocking_flags"],
+                "review_flags": eligibility["review_flags"],
+            }
+            if not eligibility["eligible_for_archive"]:
+                raise RuntimeError(
+                    "V3_ARCHIVE_VALIDATION_BLOCKED:"
+                    + json.dumps(eligibility["blocking_flags"], ensure_ascii=False)
+                )
+        result["transport"] = {
+            "provider": active_provider_name,
+            "operation_id": active_operation_id,
+            "fallback_used": fallback_used,
+            "metrics": provider_metrics,
+            "operation_budget": operation_budget_summary,
+        }
 
         with state_lock:
             if state.get("thermal_stop_requested"):
@@ -2274,49 +2605,58 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                 job["stage"] = "ARCHIVING"
                 _append_log(f"Publicando (V3): {job['name']}", level="summary", job_id=job["id"])
                 _persist_locked()
-                os.replace(staged_output, destination)
-
-                # Ingestão na Library
-                if not job.get("episode_id") or not job.get("anime_series_id"):
-                    library_episode = _library_episode_for_video(source)
-                    if library_episode:
-                        job["episode_id"] = job.get("episode_id") or library_episode.get("id")
-                        job["anime_series_id"] = job.get("anime_series_id") or library_episode.get("series_id")
-                    else:
-                        series_name = source.parent.parent.name if source.parent.parent else source.parent.name
-                        episode_name = source.stem
-                        job["anime_series_id"] = job.get("anime_series_id") or (
-                            int(_hashlib.sha256(series_name.encode("utf-8")).hexdigest()[:8], 16) % 100000)
-                        job["episode_id"] = job.get("episode_id") or (
-                            int(_hashlib.sha256(episode_name.encode("utf-8")).hexdigest()[:8], 16) % 100000)
-
                 try:
+                    source_record = _v3_source_record(
+                        job,
+                        int(v3_library_episode["id"]),
+                        staged_source,
+                        source_language,
+                    )
                     new_record = subtitle_library.ingest_file(
-                        destination,
-                        episode_id=int(job["episode_id"]),
+                        staged_output,
+                        episode_id=int(v3_library_episode["id"]),
                         language="pt-BR",
                         source_kind="TRANSLATED",
-                        source_language="eng",
+                        source_language=source_language,
                         original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
                         job_id=job["id"],
-                        pipeline_version="v3",
+                        pipeline_version=str(result.get("pipeline") or "v3_0_0"),
                         model=_model(),
                         validation_status="VALIDATED",
                         events_total=result.get("total_events"),
-                        preferred=True,
-                        review_status="VALIDATED",
+                        preferred=False,
+                        review_status="GENERATED",
                         created_by="transass-v3",
-                        notes="Tradução Transass V3 Unificado em memória; publicação atômica.",
+                        notes=json.dumps({
+                            "pipeline": result.get("pipeline"),
+                            "audit": result.get("audit"),
+                            "transport": result.get("transport"),
+                        }, ensure_ascii=False, separators=(",", ":")),
                         require_authorized_path=False,
                     )
                     job["new_record_id"] = int(new_record["id"])
-                except Exception as ingest_error:
-                    job["new_record_id"] = None
-                    job["ingest_error"] = str(ingest_error)
-
-                job["status"] = "COMPLETED"
-                job["stage"] = "COMPLETED"
-                job["reason"] = "atomic_publish"
+                    subtitle_library.add_lineage(
+                        int(new_record["id"]), int(source_record["id"]), "TRANSLATED_FROM"
+                    )
+                    subtitle_library.publish(
+                        int(new_record["id"]), target_path=destination, allow_replace=False
+                    )
+                    subtitle_library.set_record_review_status(
+                        int(new_record["id"]), "GENERATED", preferred=True
+                    )
+                    job["published"] = True
+                except Exception as publish_error:
+                    job["status"] = "FAILED"
+                    job["stage"] = "FAILED"
+                    job["reason"] = "library_or_publication_failed"
+                    job["error"] = (
+                        "V3 não concluiu o registro de origem, lineage e publicação; "
+                        f"nenhum arquivo existente foi sobrescrito: {publish_error}"
+                    )
+                else:
+                    job["status"] = "COMPLETED"
+                    job["stage"] = "COMPLETED"
+                    job["reason"] = "library_lineage_and_atomic_publish"
                 job["progress"] = {
                     "scope": "episode",
                     "current": result.get("batches_processed", 1),
@@ -2326,10 +2666,13 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
 
             job["pipeline_summary"] = {
                 "pipeline": "v3",
+                "pipeline_version": result.get("pipeline"),
                 "events_total": result.get("total_events"),
                 "batches_processed": result.get("batches_processed"),
                 "sign_groups_aligned": result.get("sign_groups_aligned"),
                 "effects_stats": result.get("effects_stats"),
+                "audit": result.get("audit"),
+                "transport": result.get("transport"),
                 "elapsed_seconds": result.get("elapsed_seconds"),
             }
             job["finished_at"] = _now()
@@ -2356,6 +2699,8 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
             _append_log(f"Falhou (V3): {job['name']} — {job['error']}", level="error", job_id=job["id"])
             _persist_locked()
     finally:
+        for local_guard in local_thermal_guards:
+            local_guard.stop()
         shutil.rmtree(temporary_root, ignore_errors=True)
         _job_temporary_roots.pop(str(job.get("id") or ""), None)
 
@@ -2520,10 +2865,88 @@ def _candidate_artifact(job: dict) -> Path | None:
     return candidate
 
 
+_RETRANSLATION_THERMAL_SAMPLE_PREFIX = "V3_THERMAL_SAMPLE "
+
+
+def _is_retranslation_thermal_trip_line(line: str) -> bool:
+    """Recognize only the reserved trip event, not arbitrary log contents."""
+    return line.startswith("V3_THERMAL_GUARD_TRIPPED:")
+
+
+def _consume_retranslation_thermal_sample(job: dict, line: str) -> bool:
+    """Publish one child-process sensor sample in memory, without a disk write.
+
+    The caller holds ``state_condition``. Later durable job updates capture the
+    latest snapshot; sensor polling itself must not fsync ``jobs.json`` each
+    second.
+    """
+    if not line.startswith(_RETRANSLATION_THERMAL_SAMPLE_PREFIX):
+        return False
+    try:
+        sample = json.loads(line[len(_RETRANSLATION_THERMAL_SAMPLE_PREFIX):])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(sample, dict) or sample.get("status") not in {
+        "MONITORING", "COOLING_OBSERVATION", "TEMPORARY_OVERRIDE", "TRIPPED",
+    }:
+        return False
+    temperatures = sample.get("temperatures_c")
+    if not isinstance(temperatures, dict):
+        return False
+
+    def valid_number(value) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+
+    if any(not isinstance(name, str) or not valid_number(value) for name, value in temperatures.items()):
+        return False
+    for key in ("hottest_c", "fan_rpm", "power_w"):
+        value = sample.get(key)
+        if value is not None and not valid_number(value):
+            return False
+
+    job["thermal_guard"] = sample
+    state["thermal_guard"] = sample
+    hottest = sample.get("hottest_c")
+    temperature = (
+        f"{sample.get('hottest_sensor') or 'sensor'}={hottest:.1f}°C"
+        if hottest is not None else "temperatura indisponível"
+    )
+    fan_rpm = sample.get("fan_rpm")
+    fan = f"ventoinha={fan_rpm:.0f} RPM" if fan_rpm is not None else "ventoinha=indisponível"
+    power_w = sample.get("power_w")
+    power = f"potência={power_w:.1f} W" if power_w is not None else "potência=indisponível"
+    if sample["status"] == "TEMPORARY_OVERRIDE":
+        remaining = sample.get("override_remaining_s", 0.0)
+        window = f" · proteção suspensa={remaining:.1f}s restantes" if valid_number(remaining) else ""
+    elif sample["status"] == "COOLING_OBSERVATION":
+        elapsed = sample.get("cooling_elapsed_s", 0.0)
+        duration = sample.get("cooling_window_s", 0.0)
+        window = (
+            f" · resfriamento={elapsed:.1f}/{duration:.0f}s"
+            if valid_number(elapsed) and valid_number(duration) else ""
+        )
+    else:
+        window = ""
+    _append_log(
+        f"Telemetria GPU: {temperature} · {fan} · {power}{window}",
+        level="thermal",
+        job_id=job.get("id"),
+    )
+    state_condition.notify_all()
+    return True
+
+
 def _run_retranslation_episode(job: dict) -> None:
     """Retranslate from an archived source into a new immutable library record."""
     try:
-        _validate_retranslation_job_integrity(job)
+        if job.get("candidate_only"):
+            _validate_candidate_source_integrity(job)
+        else:
+            _validate_retranslation_job_integrity(job)
     except Exception as error:
         with state_lock:
             state["process"] = None
@@ -2534,6 +2957,7 @@ def _run_retranslation_episode(job: dict) -> None:
             job["finished_at"] = _now()
             _append_log(f"Falhou retradução por integridade: {job.get('name', '')} — {error}", level="error", job_id=job.get("id"))
             _persist_locked()
+        _cleanup_candidate_source_staging(job)
         return
     source = Path(job["source_abs"])
     staging_root = STATE_DIR / "staging" / f"retranslation-{job['id']}"
@@ -2545,6 +2969,7 @@ def _run_retranslation_episode(job: dict) -> None:
         "--source", str(source), "--output", str(output),
         "--memory-root", str(LIBRARY_ROOT), "--pipeline", effective_pipeline,
         "--job-id", str(job["id"]),
+        "--v3-run-id", str(job.get("v3_run_id") or job["id"]),
     ]
     if job.get("series_id") is not None:
         command.extend(["--anime-series-id", str(job["series_id"])])
@@ -2581,6 +3006,13 @@ def _run_retranslation_episode(job: dict) -> None:
         assert proc.stdout is not None
         for raw_line in proc.stdout:
             line = raw_line.rstrip("\n")
+            if line.startswith(_RETRANSLATION_THERMAL_SAMPLE_PREFIX):
+                with state_condition:
+                    if _consume_retranslation_thermal_sample(job, line):
+                        continue
+            if _is_retranslation_thermal_trip_line(line):
+                with state_lock:
+                    job["child_thermal_trip"] = True
             if line.startswith(("WEB_RETRANSLATION_SUMMARY ", "V2_2_4_FAILURE_SUMMARY ")):
                 try:
                     parsed_summary = json.loads(line.split(" ", 1)[1])
@@ -2680,12 +3112,20 @@ def _run_retranslation_episode(job: dict) -> None:
             )
             new_record = lineage_result["final_record"]
         else:
+            source_record = subtitle_library.get_record(source_id)
+            if source_record is None:
+                raise LineageContractError("retranslation_integrity_source_record_not_found")
+            source_language_code = str(source_record.get("language") or "").strip().casefold()
+            if not source_language_code:
+                source_language_code = _canonical_language_code(
+                    job.get("source_language") or _global_source_language()
+                )
             new_record = subtitle_library.ingest_file(
                 output, episode_id=int(job["episode_id"]), language="pt-BR", source_kind="TRANSLATED",
-                source_language="eng", original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
+                source_language=source_language_code, original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
                 job_id=job["id"], pipeline_version=effective_pipeline, model=_model(),
                 validation_status="VALIDATED", events_total=summary.get("events") if isinstance(summary, dict) else audit.get("output_events"),
-                preferred=False, review_status="VALIDATED", created_by="web-retranslation",
+                preferred=False, review_status="GENERATED", created_by="web-retranslation",
                 notes="Retradução solicitada pela camada web; publicação separada.", require_authorized_path=False,
             )
             subtitle_library.add_lineage(int(new_record["id"]), source_id, "TRANSLATED_FROM")
@@ -2707,26 +3147,33 @@ def _run_retranslation_episode(job: dict) -> None:
             job["finished_at"] = _now()
             _append_log(f"Retradução concluída; nova versão arquivada: {job.get('name', '')}", level="summary", job_id=job["id"])
             _persist_locked()
-        # G2: publicar o arquivo no diretório do vídeo (publicação separada
-        # do registro na Library).  O destino é o .pt-BR.ass ao lado do vídeo.
+        # Publicação é separada do arquivamento. Delegar ao contrato da Library
+        # para resolver o caminho pelo episódio, publicar sem sobrescrever e
+        # registrar a publicação de forma durável. ``source_abs`` é uma cópia
+        # temporária em staging, não o caminho do vídeo.
         try:
-            destination = Path(job["source_abs"]).with_suffix(f".{TARGET_SUFFIX}.ass")
-            if not destination.exists():
-                os.replace(output, destination)
-                with state_lock:
-                    job["published"] = True
-                    job["reason"] = "library_record_created_and_published"
-                    _append_log(f"Publicado: {destination.name}", level="summary", job_id=job["id"])
-                    _persist_locked()
-            else:
-                with state_lock:
-                    job["published"] = False
-                    job["reason"] = "library_record_created_no_publication"
-                    job["error"] = "Destino já existe; nada sobrescrito"
-                    _persist_locked()
+            allow_replace = bool(job.get("force_current") or job.get("confirm_replace"))
+            publication = subtitle_library.publish(int(new_record["id"]), allow_replace=allow_replace)
+            if publication.get("status") != "PUBLISHED":
+                raise LibraryError("Library não confirmou a publicação do registro")
+            with state_lock:
+                job["published"] = True
+                job["reason"] = "library_record_created_and_published"
+                _append_log(
+                    f"Publicado: {publication.get('target_relative_path') or job.get('name', '')}",
+                    level="summary", job_id=job["id"],
+                )
+                _persist_locked()
+        except PublicationConflict as publish_error:
+            with state_lock:
+                job["published"] = False
+                job["reason"] = "library_record_created_no_publication"
+                job["error"] = str(publish_error)
+                _persist_locked()
         except Exception as publish_error:
             with state_lock:
                 job["published"] = False
+                job["reason"] = "library_record_created_no_publication"
                 job["error"] = f"Falha ao publicar: {publish_error}"
                 _persist_locked()
     except Exception as error:
@@ -2740,21 +3187,40 @@ def _run_retranslation_episode(job: dict) -> None:
         ledger_dir = failure_payload.get("ledger_dir")
         snapshot = failure_payload.get("failure_snapshot")
         retained_staging = None
-        if ledger_dir:
-            retained_staging = retain_staging(staging_root, ledger_dir)
-        elif staging_root.exists():
-            # Failures before the adapter can create a ledger still retain a
-            # bounded web-level staging reference; this is not a semantic
-            # retry and is pruned with the normal failure-artifact policy.
-            fallback_dir = STATE_DIR / "failure-ledger" / "web-jobs" / str(job["id"])
-            retained_staging = retain_staging(staging_root, fallback_dir)
+        retention_error = None
+        retention_target = None
+        try:
+            if ledger_dir:
+                retention_target = Path(ledger_dir) / "staging"
+                retained_staging = retain_staging(staging_root, ledger_dir)
+            elif staging_root.exists():
+                # Failures before the adapter can create a ledger still retain a
+                # bounded web-level staging reference; this is not a semantic
+                # retry and is pruned with the normal failure-artifact policy.
+                fallback_dir = STATE_DIR / "failure-ledger" / "web-jobs" / str(job["id"])
+                retention_target = fallback_dir / "staging"
+                retained_staging = retain_staging(staging_root, fallback_dir)
+        except Exception as staging_error:
+            # Artifact preservation is secondary to the translation failure:
+            # never let a filesystem error replace the original failure reason.
+            retention_error = f"{type(staging_error).__name__}: {staging_error}"
+            if retention_target is not None and retention_target.exists():
+                retained_staging = str(retention_target)
+            elif staging_root.exists():
+                retained_staging = str(staging_root)
         with state_lock:
             state["process"] = None
+            if job.get("child_thermal_trip") and not state.get("thermal_stop_requested"):
+                state["thermal_stop_requested"] = True
+                job["thermal_error"] = (
+                    "GPU não resfriou até o limite de retomada; "
+                    "a retradução V3 foi interrompida preventivamente"
+                )
             if state.get("thermal_stop_requested"):
                 job["status"] = "FAILED"
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
-                job["error"] = "GPU atingiu o limite térmico; job interrompido preventivamente"
+                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
             else:
                 job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
                 job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
@@ -2766,8 +3232,15 @@ def _run_retranslation_episode(job: dict) -> None:
                 job["failure_snapshot"] = str(snapshot)
             if retained_staging:
                 job["failure_staging_path"] = str(retained_staging)
+            if retention_error:
+                job["failure_artifact_retention_error"] = retention_error
             job["finished_at"] = _now()
             _append_log(f"Falhou retradução: {job.get('name', '')} — {error}", level="error", job_id=job["id"])
+            if retention_error:
+                _append_log(
+                    f"Aviso: não foi possível arquivar os artefatos de falha da retradução: {retention_error}",
+                    level="warning", job_id=job["id"],
+                )
             _persist_locked()
     finally:
         if not job.get("failure_staging_path") and _candidate_artifact(job) is None:
@@ -2796,6 +3269,49 @@ def _validate_retranslation_job_integrity(job: dict) -> None:
     old_episode = old_record.get("episode_id")
     if source_episode != episode_id or old_episode != episode_id:
         raise LineageContractError("retranslation_integrity_episode_mismatch")
+
+
+def _validate_candidate_source_integrity(job: dict) -> None:
+    """Validate a candidate's staged source without requiring or writing Library records."""
+    try:
+        episode_id = int(job["episode_id"])
+        episode = _episode_row(episode_id)
+        if episode.get("classification") != "ANIME":
+            raise ValueError("candidate_source_episode_not_anime")
+        if job.get("series_id") is not None and int(job["series_id"]) != int(episode["series_id"]):
+            raise ValueError("candidate_source_series_mismatch")
+
+        trusted_root = (STATE_DIR / "candidate-source-staging").resolve(strict=True)
+        staging_dir = Path(str(job["source_staging_path"]))
+        source_path = Path(str(job["source_abs"]))
+        if staging_dir.is_symlink() or source_path.is_symlink():
+            raise ValueError("candidate_source_symlink_rejected")
+        staging_dir = staging_dir.resolve(strict=True)
+        source_path = source_path.resolve(strict=True)
+        staging_dir.relative_to(trusted_root)
+        if source_path.parent != staging_dir or not source_path.is_file():
+            raise ValueError("candidate_source_path_mismatch")
+
+        digest = hashlib.sha256()
+        size = 0
+        with source_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if size <= 0:
+            raise ValueError("candidate_source_empty")
+        expected_hash = str(job.get("source_sha256") or "")
+        expected_size = job.get("source_size_bytes")
+        if expected_hash and digest.hexdigest() != expected_hash:
+            raise ValueError("candidate_source_hash_mismatch")
+        if expected_size is not None and int(expected_size) != size:
+            raise ValueError("candidate_source_size_mismatch")
+        job["source_sha256"] = digest.hexdigest()
+        job["source_size_bytes"] = size
+    except Exception as error:
+        raise LineageContractError(
+            f"candidate_source_integrity_failed:{type(error).__name__}:{error}"
+        ) from error
 
 
 def _finish_session_locked() -> None:
@@ -2852,6 +3368,7 @@ def _mark_unhandled_worker_failure(job: dict, error: BaseException) -> None:
             job_id=job.get("id"),
         )
         _persist_locked()
+    _cleanup_candidate_source_staging(job)
 
 
 def _cleanup_job_temporary_root(job: dict) -> None:
@@ -2859,6 +3376,29 @@ def _cleanup_job_temporary_root(job: dict) -> None:
     root = _job_temporary_roots.pop(str(job.get("id") or ""), None)
     if root is not None:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _cleanup_candidate_source_staging(job: dict) -> None:
+    """Remove only this candidate's staged source, never captures or Library data."""
+    if not job.get("candidate_only") or not job.get("source_staging_path"):
+        return
+    configured_root = STATE_DIR / "candidate-source-staging"
+    try:
+        state_root = STATE_DIR.resolve(strict=True)
+        if configured_root.is_symlink():
+            return
+        trusted_root = configured_root.resolve(strict=True)
+        trusted_root.relative_to(state_root)
+        target = Path(str(job["source_staging_path"]))
+        if target.is_symlink():
+            return
+        resolved_target = target.resolve(strict=True)
+        if resolved_target == trusted_root:
+            return
+        resolved_target.relative_to(trusted_root)
+    except (OSError, ValueError, RuntimeError):
+        return
+    shutil.rmtree(resolved_target, ignore_errors=True)
 
 
 def _worker_loop() -> None:
@@ -2871,6 +3411,7 @@ def _worker_loop() -> None:
                         item["reason"] = "gpu_thermal_guard"
                         item["error"] = "Fila interrompida pela proteção térmica da GPU"
                         item["finished_at"] = _now()
+                        _cleanup_candidate_source_staging(item)
                 state["running"] = False
                 _finish_session_locked()
                 state["worker"] = None
@@ -2881,6 +3422,7 @@ def _worker_loop() -> None:
                         job["status"] = "CANCELLED"
                         job["reason"] = "stopped_by_user"
                         job["finished_at"] = _now()
+                        _cleanup_candidate_source_staging(job)
                 state["running"] = False
                 _finish_session_locked()
                 state["worker"] = None
@@ -2936,6 +3478,7 @@ def _worker_loop() -> None:
                     item["reason"] = "failure_before_start"
                     item["error"] = "Temporada interrompida após falha anterior; episódio não iniciado"
                     item["finished_at"] = _now()
+                    _cleanup_candidate_source_staging(item)
                 if remaining:
                     _append_log(
                         f"Temporada interrompida após falha em {job.get('episode') or job.get('name')}; "
@@ -3045,7 +3588,7 @@ def translation_preflight():
     except FileNotFoundError:
         return jsonify({"error": "pasta não encontrada"}), 404
     try:
-        plan = get_pipeline_plan(_pipeline())
+        plan = get_pipeline_plan(_effective_pipeline())
     except UnsupportedPipelineError as error:
         return jsonify({"error": str(error), "code": "unsupported_pipeline"}), 400
     raw_langs = data.get("source_languages") or {}
@@ -3253,7 +3796,7 @@ def pipeline_config_post():
     payload = request.get_json(silent=True) or {}
     try:
         current = load_transport_config(TRANSPORT_CONFIG_PATH)
-        pipeline = str(payload.get("pipeline") or current.get("pipeline") or "legacy").strip().lower()
+        pipeline = str(payload.get("pipeline") or current.get("pipeline") or "v3").strip().lower()
         if pipeline not in ALLOWED_PIPELINES:
             return jsonify({"error": f"pipeline inválido: {pipeline}"}), 400
         current["pipeline"] = pipeline
@@ -3812,6 +4355,7 @@ def retry_failed():
             old["reason"] = "retry_scheduled"
             clone = dict(old)
             clone.update({"id": uuid.uuid4().hex, "session_id": state["session_id"], "status": "WAITING", "attempt": old.get("attempt", 1) + 1, "retry_count": old.get("retry_count", 0) + 1, "created_at": _now(), "started_at": None, "finished_at": None, "error": None, "reason": "retry_failed", "summary": None, "progress": None, "flags": {}, "critical_flags": []})
+            clone["v3_run_id"] = old.get("v3_run_id") or old.get("id") or clone["id"]
             state["jobs"].append(clone)
         _append_log(f"Reprocessando {len(failed)} episódio(s) falho(s)", level="summary")
         _persist_locked()
@@ -4037,12 +4581,14 @@ def _episode_row(episode_id: int) -> dict:
 
 def _current_validated_record(episode_id: int) -> dict | None:
     """Return a current-pipeline validated translation, independent of preferred flags."""
-    current = _pipeline()
+    from pipeline_registry import canonical_pipeline_id
+
+    current = canonical_pipeline_id(_effective_pipeline())
     records = _episode_records_for_library(int(episode_id))
     candidates = [
         item for item in records
         if str(item.get("language") or "").casefold() not in {"eng", "en", "english"}
-        and str(item.get("pipeline_version") or "").casefold() == current.casefold()
+        and canonical_pipeline_id(item.get("pipeline_version")) == current
         and str(item.get("validation_status") or "").upper() in {"VALIDATED", "OK", "PUBLISHED"}
     ]
     return max(candidates, key=lambda item: int(item.get("id", 0))) if candidates else None
@@ -4080,24 +4626,37 @@ def _retranslation_preflight(
                 "reason": "já existe versão VALIDATED do pipeline atual",
             }
             results.append(item); skipped.append(item); continue
-        old = _preferred_library_record(episode_id)
-        if not old:
-            item = {"episode_id": episode_id, "episode": episode.get("episode"), "status": "SOURCE_NOT_FOUND", "reason": "episódio sem versão para retraduzir"}
-            results.append(item); blocked.append(item); continue
         source_language = selected_languages.get(int(episode_id)) or _global_source_language()
+        old = _preferred_library_record(episode_id)
+        legacy_target = None if old else _existing_ptbr_sidecar_for_episode(episode_id)
+        if not old and legacy_target is None:
+            item = {
+                "episode_id": episode_id,
+                "episode": episode.get("episode"),
+                "status": "SOURCE_NOT_FOUND",
+                "reason": "nenhuma versão PT-BR arquivada ou sidecar PT-BR encontrado",
+            }
+            results.append(item); blocked.append(item); continue
+        if not selected_languages.get(int(episode_id)):
+            detected_language = _auto_source_language_for_episode(episode_id, source_language)
+            if detected_language:
+                source_language = detected_language
         source = resolve_episode_source(
             subtitle_library,
             episode_id,
-            int(old["id"]),
+            int(old["id"]) if old else None,
             materialize=False,
             source_language=source_language,
             refresh_from_media=True,
         )
-        state.setdefault("source_status", {})[str(int(episode_id))] = _public_source_status(source)
+        state.setdefault("source_status", {})[f"{int(episode_id)}:{source_language}"] = _public_source_status(source)
         if not source.get("available"):
             item = {
                 "episode_id": episode_id, "episode": episode.get("episode"),
-                "media_filename": episode.get("media_filename"), "old_record_id": int(old["id"]),
+                "media_filename": episode.get("media_filename"),
+                "old_record_id": int(old["id"]) if old else None,
+                "legacy_target": bool(legacy_target),
+                "source_language": source_language,
                 "status": str(source.get("status") or "SOURCE_NOT_FOUND"),
                 "source_status": _public_source_status(source),
                 "reason": source.get("reason") or source.get("display") or "Fonte original não disponível",
@@ -4105,15 +4664,24 @@ def _retranslation_preflight(
             results.append(item); blocked.append(item); continue
         item = {
             "episode_id": episode_id, "episode": episode.get("episode"),
-            "media_filename": episode.get("media_filename"), "old_record_id": int(old["id"]),
+            "media_filename": episode.get("media_filename"),
+            "old_record_id": int(old["id"]) if old else None,
+            "legacy_target": bool(legacy_target),
+            "source_language": source_language,
             "status": "ELIGIBLE", "action": "QUEUE",
             "source_record_id": source.get("record_id"), "source_status": _public_source_status(source),
-            "pipeline": _pipeline(),
+            "pipeline": _effective_pipeline(),
         }
-        results.append(item); eligible.append({"episode": episode, "old": old, "source_status": source, "preflight": item})
+        results.append(item); eligible.append({
+            "episode": episode,
+            "old": old,
+            "legacy_target_path": str(legacy_target) if legacy_target else None,
+            "source_status": source,
+            "preflight": item,
+        })
     return {
         "ok": not blocked, "bulk": bool(bulk), "force_current": bool(force_current),
-        "pipeline": _pipeline(), "model": _model(), "total": len(unique_ids),
+        "pipeline": _effective_pipeline(), "model": _model(), "total": len(unique_ids),
         "results": results, "eligible": eligible, "skipped": skipped, "blocked": blocked,
         "counts": {"eligible": len(eligible), "skipped_current_validated": len(skipped), "blocked": len(blocked)},
     }
@@ -4146,22 +4714,65 @@ def _queue_retranslation(
             }, ensure_ascii=False))
         source_job_id = f"source-resolve-{uuid.uuid4().hex}"
         prepared = []
-        for item in preflight["eligible"]:
-            episode, old = item["episode"], item["old"]
-            job_source_language = selected_languages.get(int(episode["id"])) or _global_source_language()
-            source = resolve_episode_source(
-                subtitle_library,
-                int(episode["id"]),
-                int(old["id"]),
-                materialize=True,
-                job_id=source_job_id,
-                source_language=job_source_language,
-                refresh_from_media=True,
-            )
-            if not source.get("available"):
-                raise LibraryError(f"{episode.get('media_filename')}: fonte deixou de estar disponível após o pré-flight")
-            state.setdefault("source_status", {})[str(int(episode["id"]))] = _public_source_status(source)
-            prepared.append((episode, old, source, job_source_language))
+        candidate_staging_dirs: list[str] = []
+        try:
+            for item in preflight["eligible"]:
+                episode, old = item["episode"], item["old"]
+                job_id = uuid.uuid4().hex
+                job_source_language = (
+                    selected_languages.get(int(episode["id"]))
+                    or item["preflight"].get("source_language")
+                    or _global_source_language()
+                )
+                source_root = (
+                    STATE_DIR / "candidate-source-staging" / job_id
+                    if candidate_only else None
+                )
+                source_kwargs = {
+                    "materialize": True,
+                    "job_id": job_id if candidate_only else source_job_id,
+                    "source_language": job_source_language,
+                    "refresh_from_media": True,
+                }
+                if source_root is not None:
+                    source_kwargs["staging_root"] = source_root
+                source = resolve_episode_source(
+                    subtitle_library,
+                    int(episode["id"]),
+                    int(old["id"]) if old else None,
+                    **source_kwargs,
+                )
+                if not source.get("available"):
+                    raise LibraryError(f"{episode.get('media_filename')}: fonte deixou de estar disponível após o pré-flight")
+                if candidate_only and source.get("staging_path"):
+                    candidate_staging_dirs.append(str(source["staging_path"]))
+                if old is None:
+                    legacy_path = Path(str(item.get("legacy_target_path") or ""))
+                    current_target = _existing_ptbr_sidecar_for_episode(int(episode["id"]))
+                    if current_target is None or legacy_path != current_target:
+                        raise LibraryError(f"{episode.get('media_filename')}: sidecar PT-BR legado mudou após o pré-flight")
+                    if not candidate_only:
+                        old = _import_existing_ptbr_record(
+                            int(episode["id"]), current_target, source_language=job_source_language,
+                        )
+                prepared_job = {
+                    "id": job_id,
+                    "episode_id": int(episode["id"]),
+                    "series_id": int(episode["series_id"]),
+                    "source_abs": source.get("path"),
+                    "source_staging_path": source.get("staging_path"),
+                }
+                if candidate_only:
+                    _validate_candidate_source_integrity(prepared_job)
+                state.setdefault("source_status", {})[
+                    f"{int(episode['id'])}:{job_source_language}"
+                ] = _public_source_status(source)
+                prepared.append((episode, old, source, job_source_language, job_id))
+        except Exception:
+            if candidate_only:
+                for staged_dir in candidate_staging_dirs:
+                    shutil.rmtree(staged_dir, ignore_errors=True)
+            raise
         session_id = uuid.uuid4().hex
         state["session_id"] = session_id
         state["session_created_at"] = _now()
@@ -4197,12 +4808,14 @@ def _queue_retranslation(
                 "ollama_only": bool(ollama_only),
             }
             jobs.append(job); state["jobs"].append(job)
-        for episode, old, source, job_source_language in prepared:
+        for episode, old, source, job_source_language, job_id in prepared:
             job = {
-                "id": uuid.uuid4().hex, "session_id": session_id, "operation": "RETRANSLATE",
+                "id": job_id, "session_id": session_id, "operation": "RETRANSLATE",
                 "folder": state["folder"], "source": source.get("record_id"), "source_abs": source["path"],
-                "source_record_id": source.get("record_id"), "old_record_id": old.get("id"),
+                "source_record_id": source.get("record_id"), "old_record_id": old.get("id") if old else None,
                 "source_staging_path": source.get("staging_path"),
+                "source_sha256": hashlib.sha256(Path(source["path"]).read_bytes()).hexdigest() if candidate_only else None,
+                "source_size_bytes": Path(source["path"]).stat().st_size if candidate_only else None,
                 "episode_id": episode["id"], "series_id": episode["series_id"],
                 "source_language": job_source_language,
                 "series_title": episode.get("series_title") or "Anime", "episode_title": episode.get("episode_title") or episode.get("media_filename") or "Episode",
@@ -4212,6 +4825,7 @@ def _queue_retranslation(
                 "summary": None, "progress": None, "flags": {}, "critical_flags": [],
                 "attempt": 1, "retry_count": 0, "dry_run": False, "published": False,
                 "bulk_fail_fast": bulk,
+                "force_current": bool(force_current),
                 "candidate_only": bool(candidate_only),
                 "ollama_only": bool(ollama_only),
             }
@@ -4307,8 +4921,11 @@ def library_legacy():
             if not record:
                 continue
             audit = _audit_for_record(int(record["id"]))
-            current = _pipeline()
-            legacy = record.get("source_kind") == "IMPORTED_EXISTING" or not record.get("pipeline_version") or record.get("pipeline_version") != current or record_audit_status(audit) == "PROBLEMAS DETECTADOS"
+            from pipeline_registry import canonical_pipeline_id
+
+            current = canonical_pipeline_id(_effective_pipeline())
+            record_pipeline = canonical_pipeline_id(record.get("pipeline_version"))
+            legacy = record.get("source_kind") == "IMPORTED_EXISTING" or not record.get("pipeline_version") or record_pipeline != current or record_audit_status(audit) == "PROBLEMAS DETECTADOS"
             if legacy:
                 selected.append({"episode_id": episode["id"], "record_id": record["id"], "reason": "legacy_or_audit"})
         return jsonify({"series_id": series_id, "episode_ids": [item["episode_id"] for item in selected], "items": selected, "pipeline": _pipeline_info()})

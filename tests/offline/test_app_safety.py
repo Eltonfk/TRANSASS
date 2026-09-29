@@ -50,6 +50,141 @@ class AppSafetyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), {"status": "ok"})
 
+    def test_v3_cooperative_cancel_is_not_reported_as_failure(self):
+        outcome = web._v3_failure_state(
+            RuntimeError("TRANSLATION_CANCELLED_OR_THERMAL_STOP"),
+            thermal_stop=False,
+            cancel_requested=True,
+        )
+        self.assertEqual(outcome["status"], "CANCELLED")
+        self.assertEqual(outcome["reason"], "stopped_by_user")
+
+    def test_v3_thermal_stop_has_precedence_over_user_cancel(self):
+        outcome = web._v3_failure_state(
+            RuntimeError("stop"),
+            thermal_stop=True,
+            cancel_requested=True,
+            thermal_error="trip",
+        )
+        self.assertEqual(outcome["status"], "FAILED")
+        self.assertEqual(outcome["reason"], "gpu_thermal_guard")
+        self.assertEqual(outcome["error"], "trip")
+
+    def test_v3_thermal_monitor_follows_the_active_local_transport(self):
+        import transport_config_store
+
+        class FakeGuard:
+            latest = None
+
+            def __init__(self, **_callbacks):
+                self.started = False
+
+            def start(self):
+                self.started = True
+                return False
+
+        with patch.object(web, "GpuThermalGuard", FakeGuard), \
+             patch.object(web, "_effective_pipeline", return_value="v3"), \
+             patch.object(
+                 transport_config_store,
+                 "load_transport_config",
+                 return_value={
+                     "primary": {"provider": "deepseek", "model": "deepseek-v4-flash"},
+                     "fallback": {"provider": "ollama", "model": "qwen3.5:9b"},
+                 },
+             ):
+            self.assertIsNone(web._thermal_guard_for_job({"operation": "TRANSLATE"}))
+            self.assertIsNone(web._thermal_guard_for_job({"operation": "RETRANSLATE"}))
+            fallback_guard = web._thermal_guard_for_job(
+                {"operation": "TRANSLATE"}, force=True
+            )
+
+        self.assertIsInstance(fallback_guard, FakeGuard)
+        self.assertTrue(fallback_guard.started)
+
+    def test_v3_gate_ignores_gpu_temperature_for_hosted_models(self):
+        class HotGuard:
+            waits = 0
+
+            def wait_for_cooling(self):
+                self.waits += 1
+                return False
+
+        guard = HotGuard()
+        with web.state_lock:
+            web.state["cancel_requested"] = False
+        hosted_gate = web._v3_thermal_gate_for_provider("deepseek", guard)
+        ollama_gate = web._v3_thermal_gate_for_provider("ollama", guard)
+
+        self.assertFalse(hosted_gate())
+        self.assertEqual(guard.waits, 0)
+        self.assertTrue(ollama_gate())
+        self.assertEqual(guard.waits, 1)
+
+        with web.state_lock:
+            web.state["cancel_requested"] = True
+        self.assertTrue(hosted_gate())
+
+    def test_retranslation_thermal_samples_are_live_without_durable_write(self):
+        job = {"id": "retranslation-sample-test"}
+        sample = {
+            "available": True,
+            "status": "MONITORING",
+            "temperatures_c": {"junction": 64.0},
+            "hottest_c": 64.0,
+            "hottest_sensor": "junction",
+            "fan_rpm": 1200.0,
+            "power_w": 95.0,
+        }
+        line = web._RETRANSLATION_THERMAL_SAMPLE_PREFIX + json.dumps(sample)
+
+        with patch.object(web, "_persist_locked", side_effect=AssertionError("sample must stay in memory")):
+            with web.state_condition:
+                consumed = web._consume_retranslation_thermal_sample(job, line)
+
+        self.assertTrue(consumed)
+        self.assertEqual(job["thermal_guard"]["hottest_c"], 64.0)
+        self.assertEqual(web.state["thermal_guard"]["fan_rpm"], 1200.0)
+        self.assertEqual(web.state["log"][-1]["level"], "thermal")
+        self.assertIn("junction=64.0°C", web.state["log"][-1]["line"])
+
+    def test_retranslation_thermal_trip_requires_reserved_event_prefix(self):
+        self.assertTrue(web._is_retranslation_thermal_trip_line(
+            "V3_THERMAL_GUARD_TRIPPED: junction=111.0°C",
+        ))
+        self.assertFalse(web._is_retranslation_thermal_trip_line(
+            "worker text mentions V3_THERMAL_GUARD_TRIPPED: but is not an event",
+        ))
+        self.assertFalse(web._is_retranslation_thermal_trip_line(
+            "V3_THERMAL_SAMPLE {\"trip_reason\":null}",
+        ))
+
+    def test_v3_requires_real_path_matched_library_episode(self):
+        video = Path(_TEST_STATE_ROOT) / "media" / "Anime" / "episode.mkv"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"fixture")
+        episode = {
+            "id": 17, "series_id": 4,
+            "media_relative_path": "Anime/episode.mkv",
+        }
+        with patch.object(web, "_library_episode_for_video", return_value=episode), \
+             patch.object(web, "_safe_relative", return_value="Anime/episode.mkv"):
+            job = {}
+            self.assertEqual(web._require_v3_library_episode(video, job), episode)
+            self.assertEqual(job["episode_id"], 17)
+            self.assertEqual(job["anime_series_id"], 4)
+            with self.assertRaisesRegex(RuntimeError, "V3_LIBRARY_EPISODE_ID_MISMATCH"):
+                web._require_v3_library_episode(video, {"episode_id": 99})
+
+    def test_current_v3_preflight_recognizes_v3_artifact_version(self):
+        record = {
+            "id": 8, "language": "pt-BR", "pipeline_version": "v3_0_0",
+            "validation_status": "VALIDATED",
+        }
+        with patch.object(web, "_effective_pipeline", return_value="v3"), \
+             patch.object(web, "_episode_records_for_library", return_value=[record]):
+            self.assertEqual(web._current_validated_record(12), record)
+
     def test_version_endpoint_exposes_safe_runtime_provenance(self):
         response = self.client.get("/version")
         payload = response.get_json()

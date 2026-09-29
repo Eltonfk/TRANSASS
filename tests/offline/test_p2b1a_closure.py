@@ -153,7 +153,7 @@ class ContractAndControlPlaneTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 409)
                 self.assertEqual(payload["code"], "pipeline_deprecated")
                 self.assertEqual(payload["pipeline"], "v2_1_3")
-                self.assertEqual(payload["replacement_pipeline"], "v2_3_8")
+                self.assertEqual(payload["replacement_pipeline"], "v3")
                 start_worker.assert_not_called()
             finally:
                 app.BASE_LIBRARY = old_base
@@ -188,24 +188,17 @@ class ContractAndControlPlaneTests(unittest.TestCase):
                 else:
                     os.environ["TRANSLATOR_PIPELINE"] = old_env
 
-    def test_normal_archive_receives_final_v230_output(self):
+    def test_deprecated_v230_cannot_start_a_new_job(self):
         import anime_subtitle_translator as translator
         import anime_library_hooks
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             video = root / "source.mkv"
             video.write_bytes(b"video")
-            archived = []
-            def execute(plan, source, output, context):
-                Path(output).write_text("final", encoding="utf-8")
-                return {"pipeline": plan, "plan_id": plan, "output": Path(output).name, "events": 1, "resolved": 1, "flags": {}, "critical_flags": [], "retry_budget": {}, "retry_calls": 0, "calls": 0, "stages": []}
-            def archive_translation(*args, **kwargs):
-                archived.append((args, kwargs))
-            with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "v2_3_0"}), patch.object(translator, "TRANSLATOR_PIPELINE", "v2_3_0"), patch.object(translator, "VIDEO_EXTENSIONS", {".mkv"}), patch.object(translator, "has_pt_subtitle", return_value=False), patch.object(translator, "is_ready_for_translation", return_value=True), patch.object(translator, "find_subtitle_stream", return_value=(0, "eng", ".ass")), patch.object(translator, "extract_subtitle", side_effect=lambda v, i, p: Path(p).write_text("source", encoding="utf-8")), patch.object(translator, "load_glossary_for_folder", return_value={}), patch.object(anime_library_hooks, "archive_source", return_value={"series_id": 1, "episode_id": 2}), patch.object(anime_library_hooks, "archive_translation", side_effect=archive_translation), patch.object(anime_library_hooks, "archive_v230_pipeline", side_effect=archive_translation), patch.object(translator, "execute_pipeline_plan", side_effect=execute):
-                self.assertEqual(translator.process_folder(root), 0)
-            self.assertEqual(len(archived), 1)
-            self.assertEqual(Path(archived[0][0][1]).name, "source.pt-BR.ass")
-            self.assertEqual(archived[0][1]["execution_result"]["pipeline"], "v2_3_0")
+            with patch.dict(os.environ, {"TRANSLATOR_PIPELINE": "v2_3_0"}), patch.object(translator, "TRANSLATOR_PIPELINE", "v2_3_0"), patch.object(translator, "execute_pipeline_plan") as execute, patch.object(anime_library_hooks, "archive_source") as archive_source:
+                self.assertEqual(translator.process_folder(root), 1)
+            execute.assert_not_called()
+            archive_source.assert_not_called()
 
 
 class DockerClosureTests(unittest.TestCase):

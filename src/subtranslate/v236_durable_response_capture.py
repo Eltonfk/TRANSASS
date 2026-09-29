@@ -42,6 +42,11 @@ def _sha(value: bytes) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    # Windows does not expose POSIX directory descriptors for fsync. The file
+    # contents are still fsynced before os.replace; directory durability is
+    # best-effort on this platform, while POSIX keeps the full barrier.
+    if os.name == "nt":
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)

@@ -17,8 +17,10 @@ def build_job_batch(
     jobs = []
     for source in sources:
         rel = safe_relative(source)
+        job_id = id_factory()
         jobs.append({
-            "id": id_factory(), "session_id": session_id, "folder": folder,
+            "id": job_id, "v3_run_id": job_id,
+            "session_id": session_id, "folder": folder,
             "source": rel, "source_abs": str(source),
             "name": source.name, "episode": friendly_number(source.name),
             "source_language": source_languages.get(rel) or source_languages.get(str(source)) or "inglês",

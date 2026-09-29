@@ -48,7 +48,7 @@ def main() -> int:
             status, onboarding = request_json(base + "onboarding/status")
             assert status == 200 and onboarding["media"]["available"]
             checks.append("onboarding")
-            payload = {"primary": {"provider": "ollama", "model": "beta-smoke", "base_url": "http://127.0.0.1:9"}, "fallback": None, "keys": {}, "pipeline": "v2_3_8"}
+            payload = {"primary": {"provider": "ollama", "model": "beta-smoke", "base_url": "http://127.0.0.1:9"}, "fallback": None, "keys": {}, "pipeline": "v3"}
             status, _ = request_json(base + "transport-config", "POST", payload)
             assert status == 200
             status, provider = request_json(base + "onboarding/provider-test", "POST", {})

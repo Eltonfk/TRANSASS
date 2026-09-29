@@ -467,8 +467,15 @@ class CanonicalV238EnforcementTests(unittest.TestCase):
             source_text, target_text, event_id=2592, provider=provider, model="test", counters=counters,
         )
         self.assertIsNotNone(rendered)
-        self.assertEqual(details["path"], "VISUAL_GLYPH_BASE_FALLBACK")
-        self.assertEqual(rendered, target_text)
+        self.assertEqual(details["path"], "VISUAL_GLYPH")
+
+        with unittest.mock.patch("v238_full_translation_stage.reconstruct_visual_glyph_envelope", return_value=(None, {"valid": False})):
+            fallback_rendered, fallback_details = _render_event(
+                source_text, target_text, event_id=2592, provider=provider, model="test", counters=counters,
+            )
+            self.assertEqual(fallback_details["path"], "VISUAL_GLYPH_BASE_FALLBACK")
+            self.assertEqual(fallback_rendered, target_text)
+            self.assertEqual(counters.get("visual_glyph_fallback"), 1)
 
 
 if __name__ == "__main__":

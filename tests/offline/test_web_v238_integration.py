@@ -416,8 +416,8 @@ def test_m10_build_context_does_not_inject_for_live():
 # ---------------------------------------------------------------------------
 
 
-def test_c4_default_pipeline_is_v238():
-    assert c4.DEFAULT_PIPELINE == "v2_3_8"
+def test_c4_default_pipeline_is_v3():
+    assert c4.DEFAULT_PIPELINE == "v3"
     assert c4.ALLOWED_PIPELINES == {"legacy", "v2_3_0", "v2_3_8", "v3"}
 
 
@@ -564,13 +564,32 @@ def test_c4_save_and_load_pipeline():
             "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
             "pipeline": "v2_3_8",
         })
-        assert saved["pipeline"] == "v2_3_8"
+        assert saved["pipeline"] == "v3"
         assert "qwen" in saved["authorized_primary_models"]
         assert saved["model_digest"]
         loaded = c4.load_transport_config(path)
-        assert loaded["pipeline"] == "v2_3_8"
+        assert loaded["pipeline"] == "v3"
         assert loaded["model_digest"] == saved["model_digest"]
         assert loaded["authorized_primary_models"] == saved["authorized_primary_models"]
+
+
+@pytest.mark.parametrize("retired", ["legacy", "v2_3_0", "v2_3_8"])
+def test_c4_migrates_retired_pipeline_without_rewriting_historical_config(tmp_path, retired):
+    path = Path(tmp_path) / "historical-transport.json"
+    original = {
+        "primary": {"provider": "ollama", "model": "qwen3.5:9b"},
+        "pipeline": retired,
+    }
+    path.write_text(json.dumps(original), encoding="utf-8")
+
+    loaded = c4.load_transport_config(path)
+
+    assert loaded["pipeline"] == "v3"
+    assert json.loads(path.read_text(encoding="utf-8")) == original
+
+    saved = c4.save_transport_config(path, loaded)
+    assert saved["pipeline"] == "v3"
+    assert json.loads(path.read_text(encoding="utf-8"))["pipeline"] == "v3"
 
 
 def test_c4_rejects_invalid_pipeline():
@@ -594,5 +613,5 @@ def test_c4_public_exposes_pipeline():
             "pipeline": "v2_3_0",
         })
         public = c4.public_transport_config(path)
-        assert public["pipeline"] == "v2_3_0"
+        assert public["pipeline"] == "v3"
         assert "authorized_primary_models" in public

@@ -141,6 +141,143 @@ def test_run_pipeline_passes_source_language(tmp_path, monkeypatch):
     assert captured["context"]["operation"] == "RETRANSLATE"
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "model_name", "transport_name", "uses_local_thermal_guard"),
+    [
+        ("ollama", "qwen2.5:14b", "ollama", True),
+        ("deepseek", "deepseek-v4-flash", "deepseek", False),
+        # The config is reloaded after the transport object is created; the
+        # selected config determines the actual transport built by V3.
+        ("deepseek", "deepseek-v4-flash", "ollama", False),
+    ],
+)
+def test_v3_retranslation_runner_builds_stable_operation_identity(
+    tmp_path, monkeypatch, provider_name, model_name, transport_name,
+    uses_local_thermal_guard, capsys,
+):
+    """The V3 runner must not depend on entering the retired V2.3.8 branch."""
+    import hashlib
+
+    import gpu_thermal_guard
+    import pipeline_v3
+    import v3_runtime
+
+    source = tmp_path / "source.ass"
+    source.write_text("[Script Info]\n", encoding="utf-8")
+    args = argparse.Namespace(
+        source=source,
+        output=tmp_path / "output.pt-BR.ass",
+        memory_root=None,
+        anime_series_id=9,
+        episode_id=295,
+        job_id="test-job",
+        v3_run_id="stable-replay-id",
+        series_title="Shiki",
+        episode_title="S01E08",
+    )
+    config = {
+        "pipeline": "v3",
+        "primary": {"provider": provider_name, "model": model_name},
+        "fallback": None,
+    }
+    active_transport = SimpleNamespace(name=transport_name, model=model_name)
+    fake_response_provider = object()
+    fake_transport_call = object()
+    captured = {}
+    guard_state = {"started": False, "stopped": False, "waits": 0, "cooled": True}
+
+    class FakeThermalGuard:
+        def __init__(self, **callbacks):
+            guard_state["callbacks"] = callbacks
+
+        def start(self):
+            guard_state["started"] = True
+            return True
+
+        def wait_for_cooling(self):
+            guard_state["waits"] += 1
+            return guard_state["cooled"]
+
+        def stop(self):
+            guard_state["stopped"] = True
+
+    monkeypatch.setattr(wrr, "load_transport_config", lambda _path: config)
+    monkeypatch.setattr(wrr, "default_state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(gpu_thermal_guard, "GpuThermalGuard", FakeThermalGuard)
+
+    def fake_create_transport(*_args, **kwargs):
+        captured["create_transport_kwargs"] = kwargs
+        return SimpleNamespace(name=provider_name, model=model_name), fake_response_provider
+
+    monkeypatch.setattr(
+        v3_runtime,
+        "create_v3_live_transport",
+        fake_create_transport,
+    )
+    monkeypatch.setattr(v3_runtime, "v3_batch_size", lambda *_args: 8)
+
+    def fake_make_transport_call(*_args, **kwargs):
+        captured["transport_call_kwargs"] = kwargs
+        return fake_transport_call
+
+    def fake_execute(plan_id, semantic_source, output, context):
+        captured.update(
+            plan_id=plan_id,
+            semantic_source=semantic_source,
+            output=output,
+            context=context,
+        )
+        return {"status": "COMPLETED", "pipeline": "v3"}
+
+    monkeypatch.setattr(pipeline_v3, "make_v3_transport_call", fake_make_transport_call)
+    monkeypatch.setattr(wrr, "execute_pipeline_plan", fake_execute)
+
+    result = wrr._run_pipeline(args, "v3", active_transport, "francês")
+
+    expected_operation_id = hashlib.sha256(
+        f"v3:stable-replay-id:{provider_name}:{model_name}".encode("utf-8")
+    ).hexdigest()[:32]
+    assert result == {"status": "COMPLETED", "pipeline": "v3"}
+    assert captured["plan_id"] == "v3"
+    assert captured["context"]["transport_call"] is fake_transport_call
+    assert captured["context"]["source_language"] == "francês"
+    assert captured["context"]["target_batch_size"] == 8
+    assert captured["transport_call_kwargs"]["operation_id"] == expected_operation_id
+    before_call = captured["create_transport_kwargs"]["before_call"]
+    transport_gate = captured["transport_call_kwargs"]["thermal_gate"]
+    if uses_local_thermal_guard:
+        assert callable(before_call)
+        assert before_call() is False
+        assert callable(transport_gate)
+        assert transport_gate() is False
+        assert guard_state["started"] is True
+        assert guard_state["stopped"] is True
+        assert guard_state["waits"] == 2
+        guard_state["cooled"] = False
+        with pytest.raises(RuntimeError, match="V3_THERMAL_GUARD_TRIPPED"):
+            transport_gate()
+        sample = gpu_thermal_guard.ThermalSnapshot(
+            available=True,
+            temperatures_c={"junction": 64.0},
+            fan_rpm=1200.0,
+            power_w=95.0,
+        )
+        config_sample = gpu_thermal_guard.ThermalGuardConfig(interval_s=1.0)
+        guard_state["callbacks"]["on_sample"](sample, config_sample)
+        emitted = capsys.readouterr().err.strip()
+        assert emitted.startswith("V3_THERMAL_SAMPLE ")
+        import json
+
+        sample_payload = json.loads(emitted.split(" ", 1)[1])
+        assert sample_payload["hottest_c"] == 64.0
+        assert sample_payload["fan_rpm"] == 1200.0
+        assert sample_payload["power_w"] == 95.0
+    else:
+        assert before_call is None
+        assert transport_gate is None
+        assert guard_state["started"] is False
+
+
 def test_orchestrator_passes_context_to_v230_full_adapter(tmp_path, monkeypatch):
     source = tmp_path / "source.ass"
     output = tmp_path / "output.ass"
@@ -433,6 +570,7 @@ def test_preflight_uses_per_episode_language(monkeypatch):
     _fake_flask.jsonify = MagicMock()
     _fake_flask.request = MagicMock()
     _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
     sys.modules.setdefault("flask", _fake_flask)
 
     # app.py materializes its state dir at import time; keep it off /app.
@@ -470,6 +608,94 @@ def test_preflight_uses_per_episode_language(monkeypatch):
     assert captured["refresh_from_media"] is True
 
 
+def test_retranslation_accepts_unregistered_ptbr_sidecar(monkeypatch, tmp_path):
+    """A published legacy PT-BR sidecar can be reconciled before retranslation."""
+    import os
+    import tempfile
+    import types as _types
+
+    _fake_flask = _types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
+    sys.modules.setdefault("flask", _fake_flask)
+    os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
+    os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
+    os.environ.setdefault("ANIME_LIBRARY_ROOTS", tempfile.mkdtemp(prefix="media-"))
+
+    import app as app_module
+
+    target = tmp_path / "Shiki - S01E05.pt-BR.ass"
+    target.write_text("[Script Info]\n", encoding="utf-8")
+    episode = {"id": 292, "classification": "ANIME", "episode": "05", "media_filename": "Shiki E05.mkv"}
+    monkeypatch.setattr(app_module, "_episode_row", lambda eid: episode)
+    monkeypatch.setattr(app_module, "_current_validated_record", lambda eid: None)
+    monkeypatch.setattr(app_module, "_preferred_library_record", lambda eid: None)
+    monkeypatch.setattr(app_module, "_existing_ptbr_sidecar_for_episode", lambda eid: target)
+    monkeypatch.setattr(
+        app_module, "resolve_episode_source",
+        lambda *args, **kwargs: {"available": True, "status": "SOURCE_AVAILABLE_SIDECAR", "record_id": None},
+    )
+
+    result = app_module._retranslation_preflight([292], source_languages={292: "francês"})
+
+    assert result["counts"]["eligible"] == 1
+    assert result["results"][0]["legacy_target"] is True
+    assert result["eligible"][0]["old"] is None
+    assert result["eligible"][0]["legacy_target_path"] == str(target)
+
+
+def test_retranslation_autodetects_single_french_source(monkeypatch, tmp_path):
+    """A sole French source is selected when the global default is English."""
+    import os
+    import tempfile
+    import types as _types
+
+    _fake_flask = _types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
+    sys.modules.setdefault("flask", _fake_flask)
+    os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
+    os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
+    os.environ.setdefault("ANIME_LIBRARY_ROOTS", tempfile.mkdtemp(prefix="media-"))
+
+    import app as app_module
+
+    target = tmp_path / "Shiki - S01E06.pt-BR.ass"
+    target.write_text("[Script Info]\n", encoding="utf-8")
+    episode = {"id": 293, "classification": "ANIME", "episode": "06", "media_filename": "Shiki E06.mkv"}
+    calls = []
+    monkeypatch.setattr(app_module, "_episode_row", lambda eid: episode)
+    monkeypatch.setattr(app_module, "_current_validated_record", lambda eid: None)
+    monkeypatch.setattr(app_module, "_preferred_library_record", lambda eid: None)
+    monkeypatch.setattr(app_module, "_existing_ptbr_sidecar_for_episode", lambda eid: target)
+    monkeypatch.setattr(app_module, "_auto_source_language_for_episode", lambda eid, configured: "francês")
+
+    def fake_resolve(*args, **kwargs):
+        calls.append(kwargs["source_language"])
+        return {
+            "available": kwargs["source_language"] == "francês",
+            "status": "SOURCE_AVAILABLE_SIDECAR" if kwargs["source_language"] == "francês" else "SOURCE_NOT_FOUND",
+            "record_id": None,
+        }
+
+    monkeypatch.setattr(app_module, "resolve_episode_source", fake_resolve)
+    result = app_module._retranslation_preflight([293])
+
+    assert result["counts"]["eligible"] == 1
+    assert result["results"][0]["source_language"] == "francês"
+    assert calls == ["francês"]
+
+
 def test_retranslation_can_queue_only_eligible_selected_episodes(tmp_path, monkeypatch):
     """Mixed selections may explicitly queue eligible items only.
 
@@ -488,6 +714,7 @@ def test_retranslation_can_queue_only_eligible_selected_episodes(tmp_path, monke
     _fake_flask.jsonify = MagicMock()
     _fake_flask.request = MagicMock()
     _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
     sys.modules.setdefault("flask", _fake_flask)
     os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
     os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
@@ -583,6 +810,208 @@ def test_retranslation_can_queue_only_eligible_selected_episodes(tmp_path, monke
             app_module.state.update(state_snapshot)
 
 
+def test_candidate_only_queue_stages_source_without_library_import(tmp_path, monkeypatch):
+    """Candidate-only queues need neither source nor previous-target Library IDs."""
+    import os
+    import tempfile
+    import types as _types
+
+    _fake_flask = _types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
+    sys.modules.setdefault("flask", _fake_flask)
+    os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
+    os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
+    os.environ.setdefault("ANIME_LIBRARY_ROOTS", tempfile.mkdtemp(prefix="media-"))
+
+    import app as app_module
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(app_module, "STATE_DIR", state_dir)
+    episode = {
+        "id": 297, "series_id": 9, "classification": "ANIME", "episode": "10",
+        "media_filename": "Shiki E10.mkv", "series_title": "Shiki",
+    }
+    legacy_target = tmp_path / "Shiki E10.pt-BR.ass"
+    legacy_target.write_text("[Script Info]\n", encoding="utf-8")
+    preflight = {
+        "ok": True, "bulk": False, "force_current": False,
+        "pipeline": "v3", "model": "qwen2.5:14b", "total": 1,
+        "results": [], "skipped": [], "blocked": [],
+        "eligible": [{
+            "episode": episode,
+            "old": None,
+            "legacy_target_path": str(legacy_target),
+            "preflight": {"episode_id": 297, "status": "ELIGIBLE", "source_language": "francês"},
+        }],
+        "counts": {"eligible": 1, "skipped_current_validated": 0, "blocked": 0},
+    }
+    monkeypatch.setattr(app_module, "_retranslation_preflight", lambda *a, **k: preflight)
+    monkeypatch.setattr(app_module, "_episode_row", lambda _episode_id: episode)
+    monkeypatch.setattr(app_module, "_existing_ptbr_sidecar_for_episode", lambda _episode_id: legacy_target)
+    monkeypatch.setattr(
+        app_module,
+        "_import_existing_ptbr_record",
+        lambda *a, **k: pytest.fail("candidate-only must not import the legacy sidecar"),
+    )
+    resolved = {}
+
+    def fake_resolve(_library, episode_id, _record_id=None, **kwargs):
+        root = Path(kwargs["staging_root"])
+        staged_dir = root / f"source-{episode_id}-test"
+        staged_dir.mkdir(parents=True)
+        source = staged_dir / f"source-{episode_id}.ass"
+        source.write_text("[Script Info]\nTitle: French\n", encoding="utf-8")
+        resolved.update(kwargs)
+        return {
+            "available": True, "status": "SOURCE_AVAILABLE_INTERNAL_TEXT",
+            "record_id": None, "path": str(source), "staging_path": str(staged_dir),
+        }
+
+    monkeypatch.setattr(app_module, "resolve_episode_source", fake_resolve)
+    monkeypatch.setattr(app_module, "_persist_locked", lambda: None)
+    monkeypatch.setattr(app_module, "_start_worker_locked", MagicMock())
+
+    state_snapshot = dict(app_module.state)
+    with app_module.state_lock:
+        app_module.state.update({
+            "running": False, "jobs": [], "session_id": None,
+            "log": app_module.deque(maxlen=app_module.MAX_LOGS), "log_sequence": 0,
+        })
+    try:
+        result = app_module._queue_retranslation(
+            [297], source_languages={297: "francês"}, candidate_only=True, ollama_only=True,
+        )
+
+        assert result["queued"] == 1
+        assert resolved["materialize"] is True
+        assert resolved["source_language"] == "francês"
+        assert Path(resolved["staging_root"]).is_relative_to(state_dir / "candidate-source-staging")
+        job = app_module.state["jobs"][0]
+        assert job["candidate_only"] is True
+        assert job["source_record_id"] is None
+        assert job["old_record_id"] is None
+        assert job["published"] is False
+        assert job["source_sha256"]
+        assert job["source_size_bytes"] > 0
+
+        Path(job["source_abs"]).write_text("tampered", encoding="utf-8")
+        with pytest.raises(app_module.LineageContractError, match="candidate_source_hash_mismatch"):
+            app_module._validate_candidate_source_integrity(job)
+        outside = tmp_path / "must-preserve"
+        outside.mkdir()
+        app_module._cleanup_candidate_source_staging({
+            "candidate_only": True, "source_staging_path": str(outside),
+        })
+        assert outside.is_dir()
+        app_module._cleanup_candidate_source_staging(job)
+        assert not Path(job["source_staging_path"]).exists()
+    finally:
+        with app_module.state_lock:
+            app_module.state.clear()
+            app_module.state.update(state_snapshot)
+
+
+def test_candidate_only_worker_completes_without_library_or_publication(tmp_path, monkeypatch):
+    """The candidate worker validates staged bytes and returns before archival."""
+    import hashlib
+    import io
+    import os
+    import tempfile
+    import types as _types
+
+    _fake_flask = _types.ModuleType("flask")
+    _fake_flask.Flask = MagicMock()
+    _fake_flask.Flask.return_value.route = lambda *a, **k: (lambda f: f)
+    _fake_flask.Response = MagicMock()
+    _fake_flask.jsonify = MagicMock()
+    _fake_flask.request = MagicMock()
+    _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
+    sys.modules.setdefault("flask", _fake_flask)
+    os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
+    os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
+    os.environ.setdefault("ANIME_LIBRARY_ROOTS", tempfile.mkdtemp(prefix="media-"))
+
+    import app as app_module
+
+    state_dir = tmp_path / "state"
+    source_dir = state_dir / "candidate-source-staging" / "job-1" / "source-297-unit"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "source.ass"
+    source.write_text("[Script Info]\nTitle: source\n", encoding="utf-8")
+    source_bytes = source.read_bytes()
+    job = {
+        "id": "job-1", "session_id": "session-1", "operation": "RETRANSLATE",
+        "episode_id": 297, "series_id": 9, "episode": "10", "name": "Shiki E10.mkv",
+        "source_abs": str(source), "source_staging_path": str(source_dir),
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "source_size_bytes": len(source_bytes), "source_record_id": None,
+        "old_record_id": None, "source_language": "francês", "candidate_only": True,
+        "ollama_only": True,
+    }
+    monkeypatch.setattr(app_module, "STATE_DIR", state_dir)
+    monkeypatch.setattr(app_module, "_episode_row", lambda _episode_id: {
+        "id": 297, "series_id": 9, "classification": "ANIME",
+    })
+    monkeypatch.setattr(app_module, "_effective_pipeline", lambda: "v3")
+    monkeypatch.setattr(app_module, "_validate_retranslation_job_integrity", lambda _job: pytest.fail("candidate must not require Library record IDs"))
+    monkeypatch.setattr(app_module, "audit_record", lambda *_a, **_k: {
+        "status": "VALID", "flags": [], "blocking_flags": [], "review_flags": [],
+        "eligible_for_archive": True, "output_events": 1,
+    })
+    monkeypatch.setattr(app_module, "archive_eligibility", lambda _audit: {
+        "eligible_for_archive": True, "blocking_flags": [], "review_flags": [],
+    })
+
+    output_bytes = b"[Script Info]\nTitle: translated\n"
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            self.command = command
+            self.stdout = io.StringIO("")
+            Path(command[command.index("--output") + 1]).write_bytes(output_bytes)
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(app_module.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(app_module, "_persist_locked", lambda: None)
+    monkeypatch.setattr(app_module, "_append_log", lambda *a, **k: None)
+    monkeypatch.setattr(app_module.subtitle_library, "ingest_file", MagicMock(side_effect=AssertionError("Library ingest")))
+    monkeypatch.setattr(app_module.subtitle_library, "publish", MagicMock(side_effect=AssertionError("Library publish")))
+
+    state_snapshot = dict(app_module.state)
+    with app_module.state_lock:
+        app_module.state.update({
+            "process": None, "stop_requested": False, "cancel_requested": False,
+            "thermal_stop_requested": False, "log": app_module.deque(maxlen=app_module.MAX_LOGS),
+        })
+    try:
+        app_module._run_retranslation_episode(job)
+
+        assert job["status"] == "COMPLETED"
+        assert job["stage"] == "CANDIDATE_READY"
+        assert job["published"] is False
+        assert job["library_record_created"] is False
+        assert job["source_record_id"] is None
+        assert job["old_record_id"] is None
+        assert app_module.subtitle_library.ingest_file.call_count == 0
+        assert app_module.subtitle_library.publish.call_count == 0
+        candidate = state_dir / "staging" / "retranslation-job-1" / job["candidate_output_name"]
+        assert candidate.read_bytes() == output_bytes
+        assert not source_dir.exists()
+    finally:
+        with app_module.state_lock:
+            app_module.state.clear()
+            app_module.state.update(state_snapshot)
+
+
 def test_state_persistence_is_durable_and_surfaces_write_failure(tmp_path, monkeypatch):
     """State commits sync both the file and its containing directory."""
     import os
@@ -596,6 +1025,7 @@ def test_state_persistence_is_durable_and_surfaces_write_failure(tmp_path, monke
     _fake_flask.jsonify = MagicMock()
     _fake_flask.request = MagicMock()
     _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
     sys.modules.setdefault("flask", _fake_flask)
     os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
     os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))
@@ -649,6 +1079,7 @@ def test_load_state_marks_inflight_jobs_for_persisted_recovery(tmp_path, monkeyp
     _fake_flask.jsonify = MagicMock()
     _fake_flask.request = MagicMock()
     _fake_flask.send_file = MagicMock()
+    _fake_flask.stream_with_context = lambda iterable: iterable
     sys.modules.setdefault("flask", _fake_flask)
     os.environ.setdefault("TRANSLATOR_WEB_STATE_DIR", tempfile.mkdtemp(prefix="st-"))
     os.environ.setdefault("ANIME_SUBTITLE_LIBRARY_ROOT", tempfile.mkdtemp(prefix="lib-"))

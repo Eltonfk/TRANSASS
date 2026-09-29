@@ -87,21 +87,22 @@ class PipelineDeprecatedError(UnsupportedPipelineError):
 _PLANS = {
     "legacy": _plan(
         "legacy", "Legacy", ("LEGACY_TRANSLATION",), verify=True,
-        retranslation=False,
-        notes="Explicit legacy plan; it is never an implicit unknown-token fallback.",
+        retranslation=False, deprecated=True, replacement_pipeline_id="v3",
+        deprecation_reason="fluxo substituído pelo pipeline unificado V3",
+        notes="Compatibilidade histórica e replay explícito; não aceita novos jobs.",
     ),
     "v2_1_2": _plan(
         "v2_1_2", "V2.1.2", ("FULL_TRANSLATION_V212",),
-        deprecated=True, replacement_pipeline_id="v2_3_8",
-        deprecation_reason="plano histórico substituído pelo fluxo canônico V2.3.8",
+        deprecated=True, replacement_pipeline_id="v3",
+        deprecation_reason="plano histórico substituído pelo fluxo canônico V3",
         notes="Compatibilidade histórica e replay explícito; não aceita novos jobs.",
         adapter_module="production_v2_1_2_adapter",
         adapter_function="translate_subtitle_file_v2_1_2",
     ),
     "v2_1_3": _plan(
         "v2_1_3", "V2.1.3", ("FULL_TRANSLATION_V213",),
-        deprecated=True, replacement_pipeline_id="v2_3_8",
-        deprecation_reason="núcleo histórico substituído pelo fluxo canônico V2.3.8",
+        deprecated=True, replacement_pipeline_id="v3",
+        deprecation_reason="núcleo histórico substituído pelo fluxo canônico V3",
         notes="Compatibilidade histórica e replay explícito; não aceita novos jobs.",
         archive_translation=True,
         adapter_module="production_v2_1_3_adapter",
@@ -116,12 +117,16 @@ _PLANS = {
     "v2_2_6": _plan("v2_2_6", "V2.2.6", ("FULL_TRANSLATION_V226",), archive_translation=True, adapter_module="production_v2_2_6_adapter", adapter_function="translate_subtitle_file_v2_2_6"),
     "v2_3_0": _plan(
         "v2_3_0", "V2.3.0", ("FULL_TRANSLATION_V226", "KARAOKE_AUGMENTATION_V230"),
+        deprecated=True, replacement_pipeline_id="v3",
+        deprecation_reason="etapa de karaokê histórica incorporada ao fluxo V3",
         notes="Complete plan: V2.2.6 linguistic materialization followed by V2.3.0 karaoke augmentation.",
         adapter_module="production_v2_2_6_adapter", adapter_function="translate_subtitle_file_v2_2_6",
         augmentation_module="production_v2_3_0_adapter", augmentation_function="augment_karaoke_candidate_v2_3_0", archive_translation=True,
     ),
     "v2_3_8": _plan(
         "v2_3_8", "V2.3.8", ("FULL_TRANSLATION_V238", "KARAOKE_AUGMENTATION_V230"),
+        deprecated=True, replacement_pipeline_id="v3",
+        deprecation_reason="plano substituído pelo fluxo unificado V3",
         notes="Candidate complete plan: reusable V2.3.8 full translation stage followed by the canonical V2.3.0 karaoke augmentation stage. The V2.3.8 intermediate is durable and non-publishable until final composition succeeds.",
         adapter_module="production_v2_3_8_adapter", adapter_function="translate_subtitle_file_v2_3_8",
         augmentation_module="production_v2_3_0_adapter", augmentation_function="augment_karaoke_candidate_v2_3_0", archive_translation=True,
@@ -139,6 +144,8 @@ PLANS: Mapping[str, PipelinePlan] = MappingProxyType(_PLANS)
 
 def get_pipeline_plan(plan_id: str) -> PipelinePlan:
     token = str(plan_id or "").strip().lower()
+    if token == "v3_0_0":
+        token = "v3"
     try:
         plan = PLANS[token]
     except KeyError as exc:
@@ -146,6 +153,12 @@ def get_pipeline_plan(plan_id: str) -> PipelinePlan:
     if not plan.supported:
         raise UnsupportedPipelineError(f"pipeline plan is not supported: {token}")
     return plan
+
+
+def canonical_pipeline_id(plan_id: str) -> str:
+    """Normalize a persisted artifact version to its plan-level ID."""
+    token = str(plan_id or "").strip().casefold()
+    return "v3" if token == "v3_0_0" else token
 
 
 def resolve_pipeline(plan_id: str) -> PipelinePlan:
