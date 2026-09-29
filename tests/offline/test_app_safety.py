@@ -190,7 +190,7 @@ class AppSafetyTests(unittest.TestCase):
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["version"], "2.5.2")
+        self.assertEqual(payload["version"], "3.0.0")
         self.assertIn("pipeline", payload)
         self.assertTrue(payload["candidate_commit"])
         self.assertTrue(payload["candidate_image_id"])
