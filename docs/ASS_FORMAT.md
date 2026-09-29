@@ -178,13 +178,12 @@ alterar somente o payload linguístico comprovadamente elegível.
 
 ### Implementação compartilhada
 
-As regras básicas ficam em `src/subtranslate/ass_structure.py` e são usadas
-pelos componentes históricos V2.1.x, pelo V2.3.8 e pela camada de karaokê
-V2.3.0. O helper `replace_source_payload` é a única rota compartilhada para
-reconstruir o texto em torno das tags; os adaptadores apenas o delegam. Isso
-evita que cada pipeline interprete ASS de uma maneira diferente. A mudança é
-compatível com as legendas já concluídas: elas não são reescritas
-automaticamente; a proteção passa a valer em novas traduções, retries e
+As regras básicas ficam em `src/subtranslate/ass_structure.py`. O V3 usa essa
+camada compartilhada para reconstruir o texto em torno das tags; adaptadores
+históricos também a reutilizam. O helper `replace_source_payload` é a rota
+comum para esse trabalho, evitando interpretações diferentes do ASS em cada
+pipeline. A proteção é compatível com legendas já concluídas: elas não são
+reescritas automaticamente; a regra vale para novas traduções, retries e
 validações futuras.
 
 O módulo compartilhado registra e preserva:

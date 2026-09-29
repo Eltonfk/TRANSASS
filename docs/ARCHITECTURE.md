@@ -12,7 +12,7 @@ Fonte ASS/SSA ou faixa MKV
   → classificação dos eventos
   → tradução linguística em lotes
   → reconstrução da estrutura ASS
-  → complemento OP/ED ainda pendente
+  → complemento OP/ED no mesmo plano semântico
   → validação e checkpoint
   → acervo/revisão
   → publicação .pt-BR.ass
@@ -27,10 +27,13 @@ por aproximadamente três segundos.
 - `app.py`: API Flask, fila, eventos e interface.
 - `pipeline_registry.py`: planos permitidos e seus estágios.
 - `pipeline_orchestrator.py`: execução, orçamento e validação entre estágios.
-- `pipeline_v2_1_3.py`: núcleo histórico de tradução, classificação e
-  reconstrução, mantido como dependência interna durante a retirada gradual dos
-  planos V2.1.x.
-- `production_v2_3_0_adapter.py`: complemento de letras OP/ED.
+- `pipeline_v3.py`: fluxo unificado atual de classificação, lotes, remontagem,
+  auditoria e publicação.
+- `translation_quality.py`: qualidade linguística determinística, normalização de
+  espaçamento, proteção de nomes próprios e heurísticas gramaticais desacopladas.
+- `pipeline_v2_1_3.py` e `production_v2_3_0_adapter.py`: componentes históricos
+  cujos classificadores ainda são reutilizados pelo V3; não são planos de novos
+  jobs.
 - `v238_*`: durabilidade por chamada, normalização e propriedade estrutural.
 - `transport_providers.py`: Ollama e APIs hospedadas.
 - `anime_subtitle_library.py`: acervo, objetos e lineage.
@@ -42,9 +45,10 @@ somente para compatibilidade e replay explícito, porque parte do materializador
 histórico ainda reutiliza suas primitivas. A remoção do código só poderá ocorrer
 depois da extração dessas primitivas para módulos neutros.
 
-Planos desconhecidos, quebra estrutural, perda de cobertura e cruzamento de
-episódios falham fechados. Ausência de sensor térmico, por outro lado, degrada
-para modo passivo: segurança não deve virar superstição.
+Planos desconhecidos, quebra estrutural, perda de cobertura, identidade de mídia
+incerta e cruzamento de episódios falham fechados. V3 só publica após auditar,
+registrar a fonte e criar lineage para o resultado. Ausência de sensor térmico,
+por outro lado, degrada para modo passivo: segurança não deve virar superstição.
 
 ## Contratos de custo e retenção
 

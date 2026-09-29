@@ -19,7 +19,7 @@ programa numa terça-feira à noite.
 - [Arquitetura](ARCHITECTURE.md)
 - [Pipelines](PIPELINES.md)
 - [Biblioteca e lineage](LIBRARY_AND_LINEAGE.md)
-- [Contratos canônicos V2.3.8](canonical-contracts-v2_3_8.md)
+- [Contratos canônicos V2.3.8 (histórico)](canonical-contracts-v2_3_8.md)
 - [Decisões arquiteturais](adr/)
 
 ## Para desenvolver e distribuir

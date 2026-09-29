@@ -23,7 +23,7 @@ tem trabalho suficiente traduzindo legendas.
 
 | Variável | Padrão |
 |---|---|
-| `TRANSLATOR_PIPELINE` | `v2_3_8` |
+| `TRANSLATOR_PIPELINE` | `v3` |
 | `TRANSLATOR_SOURCE_LANGUAGE` | `inglês` |
 | `TRANSLATOR_OLLAMA_MODEL` | `qwen3.5:9b` |
 | `TRANSLATOR_OLLAMA_URL` | definido pela embalagem |
@@ -51,8 +51,9 @@ padrão é `16777216` (16 MiB); respostas maiores falham fechadas.
 
 ## Thermal Guard
 
-O caminho V2.3.8 registra telemetria por segundo e pode suspender a proteção
-preventiva inicial enquanto o firmware acelera as ventoinhas:
+O guard do aplicativo verifica cancelamento/resfriamento antes de cada lote; a
+telemetria contínua é registrada durante a tradução. O firmware continua sendo
+responsável por controlar as ventoinhas. Os limites configuráveis incluem:
 
 ```env
 TRANSASS_GPU_THERMAL_GUARD=1
@@ -65,10 +66,22 @@ TRANSASS_GPU_THERMAL_TRIP_OVERRIDE_S=60
 TRANSASS_GPU_THERMAL_RESUME_C=
 ```
 
-O módulo agnóstico para integrações novas usa histerese (`95/85/105 °C`) e
-timeout de 300 segundos. Ele detecta NVIDIA, AMD e Intel em Linux/Windows e
-entra em modo passivo quando o sistema não fornece sensores. O Transass não
-controla ventoinhas nem substitui firmware, driver ou uma limpeza física que
-está sendo adiada desde o último verão.
+Em hosts NVIDIA com Docker, o Compose padrão não concede acesso à GPU. Para
+habilitar somente a capacidade `utility` (NVML/`nvidia-smi`, sem CUDA compute),
+use o override opcional `deploy/compose.nvidia.yaml`:
+
+```sh
+docker compose --env-file .env \
+  -f deploy/compose.yaml \
+  -f deploy/compose.nvidia.yaml up -d
+```
+
+O host precisa ter driver NVIDIA e NVIDIA Container Toolkit funcionais. Sem
+esse override, ou sem sensores disponíveis, o guard mantém a degradação passiva.
+
+O módulo agnóstico de integração usa histerese (`95/85/105 °C`) e timeout de
+300 segundos. Ele detecta NVIDIA, AMD e Intel em Linux/Windows e entra em modo
+passivo quando o sistema não fornece sensores. O Transass não controla
+ventoinhas nem substitui firmware, driver ou limpeza física.
 
 Consulte `.env.example` para a lista completa e valores documentados.

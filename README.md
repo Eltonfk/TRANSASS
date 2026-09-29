@@ -15,8 +15,8 @@ aconteceu quando um modelo decide improvisar jazz.
 O nome junta *translation* com o formato ASS. A coincidência anatômica foi
 aceita pelo comitê de uma pessoa só.
 
-> Versão do aplicativo: **2.5.2**. O identificador `v2_3_8` é o pipeline
-> canônico; ele não é a versão exibida ao usuário.
+> Versão do aplicativo: **2.5.2**. O pipeline canônico é `v3`; sua versão
+> técnica é `v3_0_0`. São identificadores diferentes da versão do aplicativo.
 
 ## O que ele faz
 
@@ -27,6 +27,8 @@ aceita pelo comitê de uma pessoa só.
 - reconhece faixas cujo rótulo está errado pelo conteúdo real da legenda;
 - traduz letras OP/ED em inglês sem confundir elenco, créditos e timecodes com
   karaokê;
+- exige cobertura integral das unidades planejadas, registra respostas por
+  chamada e reaproveita respostas completas sem reenviar chamadas ambíguas;
 - preserva tags, estilos, tempos, camadas e quebras ASS;
 - publica `.pt-BR.ass`, mantém acervo com lineage e oferece revisão humana;
 - monitora temperatura em Linux e Windows sem assumir que toda GPU é NVIDIA;

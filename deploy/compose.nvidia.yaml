@@ -1,0 +1,8 @@
+# Optional NVIDIA telemetry override for compose.yaml.
+# Use this only on a host configured with NVIDIA Container Toolkit.
+services:
+  transass:
+    gpus: all
+    environment:
+      # Supplies NVML/nvidia-smi for telemetry; CUDA compute is not enabled.
+      NVIDIA_DRIVER_CAPABILITIES: utility
