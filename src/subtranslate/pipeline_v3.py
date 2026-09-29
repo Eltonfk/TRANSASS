@@ -46,6 +46,7 @@ from translation_quality import (
     _is_portuguese_target_language,
     _normalize_translated_punctuation_spacing,
     extract_repeated_french_names,
+    extract_repeated_names,
     french_ptbr_context_hints,
     is_clean_romaji_token,
     is_french_de_protected_name_phrase,
@@ -79,7 +80,7 @@ V3_OLLAMA_RETRY_DELAY_SECONDS = 1.0
 # causes later batches to fail even when each correction succeeds; the provider's
 # physical-call budget remains the hard upper bound for the whole translation.
 V3_MAX_QUALITY_REPAIR_CALLS = 64
-V3_MAX_UNMETERED_QUALITY_REPAIR_CALLS = 3
+V3_MAX_UNMETERED_QUALITY_REPAIR_CALLS = 32
 V3_MAX_REFLOW_WORDS = 256
 V3_MAX_REFLOW_LINES = 8
 
@@ -463,13 +464,18 @@ def _is_untranslated_source_copy(
     common_words = ENGLISH_COMMON if language == "english" else (
         FRENCH_INDICATORS if language == "french" else set()
     )
+    if language == "english":
+        common_words = common_words | _SOURCE_COPY_SINGLETONS["english"]
+    elif language == "french":
+        common_words = common_words | _SOURCE_COPY_SINGLETONS["french"]
+
     # Preserve title-cased names/titles before applying the long-copy rule.
     # Sentence-like copies (e.g. "Run away with me!") remain rejectable.
     title_case = (
         len(words) >= 2
-        and not terminal_punctuation
         and not source.strip().isupper()
         and all(word[:1].isupper() or word.casefold() in _TITLE_CONNECTORS for word in words)
+        and (not terminal_punctuation or not all(w.casefold() in common_words for w in words))
     )
     if title_case:
         if language == "french":
@@ -478,10 +484,6 @@ def _is_untranslated_source_copy(
             # identities were handled above with exact text/target checks.
             return True
         return False
-    if language == "english":
-        common_words = common_words | _SOURCE_COPY_SINGLETONS["english"]
-    elif language == "french":
-        common_words = common_words | _SOURCE_COPY_SINGLETONS["french"]
     if len(normalized_source) >= 4:
         return True
     return bool(set(normalized_source) & common_words) or terminal_punctuation
@@ -737,6 +739,8 @@ def make_v3_transport_call(
                         "tempo verbal, gênero/número e se a fala é pergunta, afirmação ou ordem. "
                         "Não omita nem invente informação. Mantenha nomes próprios, títulos e romanização "
                         "quando não houver tradução estabelecida; traduza o restante integralmente. "
+                        "Traduza também letras de músicas e canções (inclusive linhas demarcadas com notas musicais ♪), "
+                        "preservando os símbolos musicais ♪ ao redor da tradução em português. "
                         "O item contém somente texto visível, não comandos ASS. Não invente nem acrescente "
                         "tags, chaves de estilo ou escapes de formatação. Preserve a quantidade de quebras "
                         "de linha recebida e nunca divida uma palavra. Preserve também a quantidade e a "
@@ -882,6 +886,13 @@ def make_v3_transport_call(
         for item, flags in flagged:
             item_id = str(item["id"])
             draft = translations.get(item_id) or translations.get(item["id"]) or ""
+            if "V3_TRANSLATION_SOURCE_COPY" in flags and _is_untranslated_source_copy(
+                str(item["source_text"]),
+                draft,
+                source_language,
+                target_language=target_language,
+            ):
+                draft = f"(texto não traduzido da fonte; traduza integralmente para {target_language})"
             repair_items.append({
                 "id": item_id,
                 "source_text": str(item["source_text"]),
@@ -903,8 +914,9 @@ def make_v3_transport_call(
             target_language,
         )
         source_copy_guidance = (
-            "Tradução obrigatória: não copie o texto em língua estrangeira (francês) para a tradução; "
-            "traduza termos, expressões comuns, títulos e placas integralmente para o português do Brasil."
+            f"Tradução obrigatória: não copie o texto em língua estrangeira ({source_language}) para a tradução; "
+            f"traduza termos, expressões comuns, títulos, versos e músicas (incluindo linhas demarcadas com notas musicais ♪) "
+            f"integralmente para o português do Brasil, mantendo os símbolos musicais ♪ ao redor da tradução."
             if any({"SOURCE_LANGUAGE_RESIDUE", "V3_TRANSLATION_SOURCE_COPY"}.intersection(flags) for _item, flags in flagged)
             else ""
         )
@@ -1026,6 +1038,8 @@ def make_v3_transport_call(
             "quem recebe a ação, negação, tempo verbal, gênero/número e a intenção da fala (pergunta, "
             "afirmação ou ordem). Não omita nem invente informação. Mantenha nomes próprios, títulos e "
             "romanização quando não houver tradução estabelecida; traduza o restante integralmente. "
+            "Traduza também letras de músicas e canções (inclusive linhas demarcadas com notas musicais ♪), "
+            "preservando os símbolos musicais ♪ ao redor da tradução em português. "
             "Os itens contêm somente texto visível, não comandos ASS. Não invente nem acrescente "
             "tags, chaves de estilo ou escapes de formatação. Preserve exatamente a quantidade de "
             "quebras de linha de cada item e nunca divida uma palavra. Preserve também a quantidade "
@@ -1343,10 +1357,24 @@ def translate_subtitle_file_v3(
     for g in sign_groups:
         sign_member_indices.update(g["member_indices"])
 
-    allowed_break_words_by_event = {
-        node.index: names_in_source(node.visible, protected_source_names)
-        for node in original_doc.events
-    }
+    break_adjacent_re = re.compile(r"([\wÀ-ÿ]+)?[ \t]*\\(?:[Nn]|h)[ \t]*([\wÀ-ÿ]+)?", re.UNICODE)
+    short_titlecase_re = re.compile(r"(?<!\w)([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]{1,2})(?!\w)")
+
+    allowed_break_words_by_event = {}
+    for node in original_doc.events:
+        tokens = set()
+        for name in names_in_source(node.visible, protected_source_names):
+            for part in re.findall(r"[\wÀ-ÿ]+", name):
+                if len(part) < 4:
+                    tokens.add(part)
+        for match in break_adjacent_re.finditer(node.text or ""):
+            for g in match.groups():
+                if g and len(g) < 4:
+                    tokens.add(g)
+        visible = visible_text(str(node.visible or ""), line_break=" ")
+        for match in short_titlecase_re.finditer(visible):
+            tokens.add(match.group(1))
+        allowed_break_words_by_event[node.index] = tuple(tokens)
 
     validation = validate_document_structure(
         original_doc,

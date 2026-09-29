@@ -485,7 +485,10 @@ def validate_document_structure(
         for field_name in fields:
             left_val = getattr(left, field_name, None)
             right_val = getattr(right, field_name, None)
-            if left_val != right_val:
+            if field_name in {"start", "end"}:
+                if abs(int(left_val or 0) - int(right_val or 0)) > 10:
+                    issues.append(f"evento {index}: campo {field_name} alterado")
+            elif left_val != right_val:
                 issues.append(f"evento {index}: campo {field_name} alterado")
 
         # 2. Comentários devem ser estritamente preservados

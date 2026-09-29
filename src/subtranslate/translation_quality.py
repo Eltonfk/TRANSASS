@@ -20,6 +20,7 @@ from ass_engine import (
 
 
 _FRENCH_ALIASES = {"fr", "fra", "fre", "french", "francais", "français", "francês"}
+_ENGLISH_ALIASES = {"en", "eng", "english", "ingles", "inglês"}
 _PT_BR_ALIASES = {"pt-br", "pt_br", "português do brasil", "portugues do brasil", "brazilian portuguese"}
 _TRAILING_ASCII_QUOTE_RUN = re.compile(r'(?P<quotes>"+)(?P<suffix>[.!?…,:;]*\s*)\Z')
 
@@ -108,6 +109,29 @@ _FRENCH_NAME_STOPWORDS = {
     "enfin", "tiens", "hein", "docteur", "docteure", "monsieur", "madame",
     "mademoiselle", "mme", "mlle", "dr", "alors", "après", "apres",
     "ensuite", "maintenant", "pourtant", "cependant", "toutefois",
+}
+
+_ENGLISH_NAME_STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can", "can't", "cannot", "could",
+    "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down",
+    "during", "each", "few", "for", "from", "further", "had", "hadn't", "has",
+    "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her",
+    "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's",
+    "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it",
+    "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or",
+    "other", "ought", "our", "ours", "ourselves", "out", "over", "own", "same",
+    "shan't", "she", "she'd", "she'll", "she's", "should", "shouldn't", "so",
+    "some", "such", "than", "that", "that's", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "there's", "these", "they", "they'd", "they'll",
+    "they're", "they've", "this", "those", "through", "to", "too", "under", "until",
+    "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were",
+    "weren't", "what", "what's", "when", "when's", "where", "where's", "which",
+    "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
+    "yourself", "yourselves", "yes", "yeah", "no", "oh", "ah", "hey", "well", "ok", "okay",
 }
 
 _CAPITALIZED_WORD = re.compile(r"(?<!\w)([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]{1,})(?!\w)")
@@ -334,7 +358,11 @@ _FRENCH_PTBR_ADVISORY_HINTS = (
 
 def _canonical_source_language(language: str | None) -> str:
     value = str(language or "").strip().casefold()
-    return "french" if value in _FRENCH_ALIASES else value
+    if value in _FRENCH_ALIASES:
+        return "french"
+    if value in _ENGLISH_ALIASES:
+        return "english"
+    return value
 
 
 def _is_pt_br(language: str | None) -> bool:
@@ -526,17 +554,21 @@ def is_french_name_stopword(token: str) -> bool:
     return str(token or "").strip().casefold() in _FRENCH_NAME_STOPWORDS
 
 
-def extract_repeated_french_names(source_texts: Iterable[str], source_language: str | None) -> tuple[str, ...]:
-    """Find conservative, repeated title-cased French-source names.
+def extract_repeated_names(source_texts: Iterable[str], source_language: str | None) -> tuple[str, ...]:
+    """Find conservative, repeated title-cased source names (supporting French and English).
 
     A token must recur in the subtitle and have at least one mid-clause
     occurrence. This avoids treating ordinary sentence-initial words as names.
     """
-    if _canonical_source_language(source_language) != "french":
+    canonical = _canonical_source_language(source_language)
+    if canonical == "french":
+        stopwords = _FRENCH_NAME_STOPWORDS
+    elif canonical == "english":
+        stopwords = _ENGLISH_NAME_STOPWORDS
+    else:
         return ()
 
     texts = tuple(str(text) for text in source_texts)
-    stopwords = _FRENCH_NAME_STOPWORDS
     occurrences: Counter[str] = Counter()
     mid_clause: Counter[str] = Counter()
     spellings: dict[str, str] = {}
@@ -569,6 +601,13 @@ def extract_repeated_french_names(source_texts: Iterable[str], source_language: 
         for key in sorted(spellings)
         if occurrences[key] >= 2 and (mid_clause[key] >= 1 or len(texts) < 20)
     )
+
+
+def extract_repeated_french_names(source_texts: Iterable[str], source_language: str | None) -> tuple[str, ...]:
+    """Find conservative, repeated title-cased French-source names (legacy helper)."""
+    if _canonical_source_language(source_language) != "french":
+        return ()
+    return extract_repeated_names(source_texts, "french")
 
 
 def names_in_source(text: str, protected_names: Iterable[str]) -> tuple[str, ...]:

@@ -2287,6 +2287,7 @@ def test_pipeline_v3_detects_short_copy_and_preserves_long_proper_title():
         "The Legend of the Galactic Heroes",
         "inglês",
     ) is False
+    assert _is_untranslated_source_copy("He Yu.", "He Yu.", "inglês") is False
     assert _is_untranslated_source_copy(
         "- Hein ?\n- Kyôko.",
         "- Hein?\n- Kyôko.",
@@ -2897,4 +2898,65 @@ def test_pipeline_v3_preserves_romaji_title_and_sign_identity(tmp_path: Path):
     doc = ASSDocumentAST.from_file(output)
     assert doc[0].text == "SHI KI"
     assert doc[1].text == "YAMAIRI"
+
+
+def test_v3_quality_risks_excludes_apostrophe_and_delimiter_mismatch():
+    from pipeline_v3 import make_v3_transport_call
+
+    class FakeTransport:
+        def endpoint(self): return "http://fake"
+        def headers(self): return {}
+        def build_request(self, payload): return payload
+        def extract_content(self, raw_bytes): return ""
+
+    # Call maker builds transport_call with inner _quality_risks_for_payload
+    # We test via translate_subtitle_file_v3 with transport returning translation lacking apostrophe
+    payload = [
+        {"id": "1", "source_text": "I'm just worried about you.\\NThat's why I'm here.", "protected_names": ()},
+    ]
+    # In Portuguese, "Eu só estou preocupado com você.\NÉ por isso que estou aqui." has no apostrophes
+    translated_map = {
+        "1": "Eu só estou preocupado com você.\\NÉ por isso que estou aqui.",
+    }
+    transport_call = make_v3_transport_call(
+        FakeTransport(),
+        source_language="inglês",
+        target_language="português do Brasil (pt-BR)",
+    )
+    # Reconstructing the quality risk function check by checking that transport_call accepts this translation without raising contract error
+    # We can test translate_subtitle_file_v3 with a lambda returning this translation
+    from ass_engine import ASSDocumentAST
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "s.ass"
+        out = Path(tmp) / "o.ass"
+        src.write_text(_small_ass_source(
+            r"Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,I'm just worried about you.\NThat's why I'm here."
+        ), encoding="utf-8")
+        result = translate_subtitle_file_v3(
+            src,
+            out,
+            source_language="inglês",
+            transport_call=lambda p: {"0": "Eu só estou preocupado com você.\\NÉ por isso que estou aqui."},
+        )
+        assert result["status"] == "COMPLETED"
+        assert ASSDocumentAST.from_file(out)[0].text == r"Eu só estou preocupado com você.\NÉ por isso que estou aqui."
+
+
+def test_v3_accepts_translated_song_lines_with_musical_notes():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "song.ass"
+        out = Path(tmp) / "song.pt-BR.ass"
+        src.write_text(_small_ass_source(
+            "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,♪ Bright & sky, reflected in my eyes ♪"
+        ), encoding="utf-8")
+        result = translate_subtitle_file_v3(
+            src,
+            out,
+            source_language="inglês",
+            transport_call=lambda p: {"0": "♪ Céu brilhante, refletido nos meus olhos ♪"},
+        )
+        assert result["status"] == "COMPLETED"
+        assert ASSDocumentAST.from_file(out)[0].text == "♪ Céu brilhante, refletido nos meus olhos ♪"
 

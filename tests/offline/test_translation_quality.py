@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from translation_quality import (
     extract_repeated_french_names,
+    extract_repeated_names,
     french_ptbr_context_hints,
     is_likely_romanized_japanese_name_token,
     is_reviewed_romanized_japanese_name_token,
@@ -450,4 +451,25 @@ def test_restore_source_enclosing_ascii_quotes():
         '"Déjà cité"',
         '"Já citado"',
     ) == '"Já citado"'
+
+
+def test_extract_repeated_names_english_and_french():
+    sources_en = (
+        "I know Chao He is dangerous.",
+        "We must arrest Chao He immediately!",
+        "His Hex Talent magic is powerful.",
+        "The Hex power came from Bow City.",
+    )
+    names_en = extract_repeated_names(sources_en, "inglês")
+    assert "Chao" in names_en
+    assert "Hex" in names_en
+
+    # French legacy behavior preserved
+    sources_fr = (
+        "Je pense que Toshio est parti.",
+        "Tu sais bien que Toshio reviendra.",
+    )
+    names_fr = extract_repeated_names(sources_fr, "francês")
+    assert "Toshio" in names_fr
+    assert extract_repeated_french_names(sources_fr, "francês") == names_fr
 

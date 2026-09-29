@@ -262,3 +262,35 @@ def test_line_break_legitimate_short_verbs():
     assert line_break_inside_word(r"Quem\Ncrê sempre alcança.") is False
     assert line_break_inside_word(r"Eles voltarão a si\Ndentro de algum tempo.") is False
     assert line_break_inside_word(r"Eu disse a ti\Nque viria.") is False
+
+
+def test_validate_document_structure_centisecond_quantization_tolerance():
+    source = ASSDocumentAST.from_string(
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:01.23,0:00:03.45,Default,,0,0,0,,Olá mundo!"
+        "\n"
+    )
+    # 4ms difference (within 10ms centisecond tolerance)
+    candidate_close = ASSDocumentAST.from_string(
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:01.23,0:00:03.45,Default,,0,0,0,,Olá mundo!"
+        "\n"
+    )
+    candidate_close.events[0].start = source.events[0].start + 4
+    candidate_close.events[0].end = source.events[0].end - 5
+    result_close = validate_document_structure(source, candidate_close)
+    assert result_close["valid"] is True
+
+    # 15ms difference (exceeds 10ms tolerance)
+    candidate_far = ASSDocumentAST.from_string(
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:01.23,0:00:03.45,Default,,0,0,0,,Olá mundo!"
+        "\n"
+    )
+    candidate_far.events[0].start = source.events[0].start + 15
+    result_far = validate_document_structure(source, candidate_far)
+    assert result_far["valid"] is False
+    assert "evento 0: campo start alterado" in result_far["issues"]
