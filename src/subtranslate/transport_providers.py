@@ -358,6 +358,15 @@ class OllamaTransport(BaseTransport):
             raise TransportBlocked(f"OLLAMA_ERROR:{envelope['error']}")
         message = envelope.get("message") or {}
         content = message.get("content")
+        if envelope.get("done") is False:
+            done_reason = str(envelope.get("done_reason") or "unknown")
+            thinking = bool(str(message.get("thinking") or "").strip())
+            content_length = len(content) if isinstance(content, str) else 0
+            raise TransportBlocked(
+                "OLLAMA_INCOMPLETE_RESPONSE:"
+                f"done_reason={done_reason}:content_chars={content_length}:"
+                f"thinking_present={str(thinking).lower()}"
+            )
         if not isinstance(content, str):
             raise TransportBlocked("OLLAMA_RESPONSE_CONTENT_MISSING")
         if not content.strip():

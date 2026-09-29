@@ -103,7 +103,7 @@ CONTEXT_MAX_CHARS = max(80, int(os.environ.get("TRANSLATOR_CONTEXT_MAX_CHARS", "
 REVIEW_MODEL = os.environ.get("TRANSLATOR_REVIEW_MODEL", "")
 REVIEW_MAX_PER_FILE = max(0, int(os.environ.get("TRANSLATOR_REVIEW_MAX_PER_FILE", "30")))
 GLOSSARY_FILE = Path(os.environ.get("TRANSLATOR_GLOSSARY_FILE", str(default_glossary_path())))
-TRANSLATOR_PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "legacy").strip().lower()
+TRANSLATOR_PIPELINE = os.environ.get("TRANSLATOR_PIPELINE", "v3").strip().lower()
 # Idioma de origem da legenda (destino sempre português do Brasil). Configurável
 # por episódio via variável de ambiente, definida pela camada web no start.
 SOURCE_LANGUAGE = (os.environ.get("TRANSLATOR_SOURCE_LANGUAGE") or "inglês").strip() or "inglês"

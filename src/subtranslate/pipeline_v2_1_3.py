@@ -81,8 +81,8 @@ LEGITIMATE_SHORT_WORDS = {
     "meu", "teu", "seu", "sua", "meus", "teus", "seus", "suas",
     "isso", "isto", "esse", "essa", "este", "esta",
     "já", "só", "lá", "cá", "ali", "aqui", "bem", "mal", "mau", "não", "sim",
-    "é", "era", "foi", "vai", "vem", "dar", "ver", "ter", "ser", "sou", "são",
-    "tem", "diz", "faz", "vou", "fiz", "deu", "viu", "sai", "ia",
+    "é", "era", "foi", "vai", "vem", "vir", "vão", "vêm", "dar", "ver", "ter", "ser", "sou", "são",
+    "tem", "diz", "faz", "vou", "fiz", "deu", "viu", "sai", "ia", "dê", "pôr", "pôs",
     "dia", "sol", "lua", "mar", "céu", "fim", "paz", "dor", "som", "tom", "voz",
     "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês",
     "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua",
@@ -1266,6 +1266,12 @@ FRENCH_RESIDUE_WORDS = frozenset({
 })
 
 _FRENCH_ELISION_RE = re.compile(r"\b(?:l|d|j|n|s|c|qu|m|t)['’]", re.IGNORECASE)
+_FRENCH_STRONG_ELISION_RE = re.compile(
+    r"\b(?:j|n|qu)['’]"
+    r"|\bd['’](?:accord|abord|habitude|ailleurs|ici|un|une|où)\b"
+    r"|\bl['’](?:homme|enfant|eau|île|heure|histoire|amour|autre|adresse)\b",
+    re.IGNORECASE,
+)
 _FRENCH_NE_PAS_RE = re.compile(r"\bne\s+[\w'’]+\s+(?:pas|plus|jamais|rien)\b", re.IGNORECASE)
 # Diacríticos que o pt-BR nunca usa (é/è/ê/à/ç/ô/â são compartilhados).
 _FRENCH_STRONG_DIACRITICS_RE = re.compile(r"[ùûîïëœæ]", re.IGNORECASE)
@@ -1289,16 +1295,18 @@ def source_residue_evidence(text: str, source_language: str | None) -> dict[str,
     language = canonical_source_language(source_language)
     empty: dict[str, Any] = {
         "language": language, "word_hits": [], "pattern_hits": 0,
-        "diacritic_hits": 0, "count": 0,
+        "strong_pattern_hits": 0, "diacritic_hits": 0, "count": 0,
     }
     if language != "french" or not text:
         return empty
     lowered = text.lower()
     word_hits = sorted({word for word in WORD_RE.findall(lowered) if word in FRENCH_RESIDUE_WORDS})
     pattern_hits = len(_FRENCH_ELISION_RE.findall(text)) + len(_FRENCH_NE_PAS_RE.findall(text))
+    strong_pattern_hits = len(_FRENCH_STRONG_ELISION_RE.findall(text)) + len(_FRENCH_NE_PAS_RE.findall(text))
     diacritic_hits = len(_FRENCH_STRONG_DIACRITICS_RE.findall(text))
     return {
         "language": language, "word_hits": word_hits, "pattern_hits": pattern_hits,
+        "strong_pattern_hits": strong_pattern_hits,
         "diacritic_hits": diacritic_hits, "count": len(word_hits) + pattern_hits,
     }
 
@@ -1307,13 +1315,15 @@ def source_residue_strong(evidence: dict[str, Any], overlap: float | None = None
     """Whether residue evidence is strong enough to justify an automatic retry."""
     if evidence.get("language") != "french":
         return False
-    if evidence["count"] >= 2:
+    word_hits = evidence.get("word_hits") or []
+    if len(word_hits) >= 2:
         return True
-    if evidence["count"] >= 1 and (
-        evidence["pattern_hits"] >= 1 or (overlap is not None and overlap >= 0.60)
-    ):
+    if evidence.get("strong_pattern_hits", 0) >= 1:
         return True
-    if evidence["pattern_hits"] >= 1 and evidence["diacritic_hits"] >= 1:
+    # A known French marker copied from the source is strong.  An ambiguous
+    # elision such as d' or l' alone is not: it also occurs in romanized names
+    # (e.g. D'Etsuko) and must not trigger a false translation failure.
+    if word_hits and overlap is not None and overlap >= 0.60:
         return True
     return False
 

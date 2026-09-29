@@ -69,6 +69,18 @@ def test_ollama_empty_content_is_blocked_with_reason():
         t.extract_content(json.dumps({
             "done_reason": "length",
             "message": {"content": "", "thinking": ""},
+    }).encode())
+
+
+def test_ollama_incomplete_response_is_blocked_even_with_partial_content():
+    t = tp.OllamaTransport(model="qwen3.5:9b")
+    with pytest.raises(
+        tp.TransportBlocked,
+        match=r"OLLAMA_INCOMPLETE_RESPONSE:done_reason=unknown:content_chars=2",
+    ):
+        t.extract_content(json.dumps({
+            "done": False,
+            "message": {"content": "{\n", "thinking": ""},
         }).encode())
 
 
