@@ -65,8 +65,11 @@ LEGITIMATE_SHORT_WORDS: frozenset[str] = frozenset({
     "dia", "sol", "lua", "mar", "céu", "fim", "paz", "dor", "som", "tom", "voz",
     "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês", "mim",
     "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua", "fé", "pó",
+    "pau", "cão", "chá", "rio", "bar", "lar", "mel", "sal", "gel", "lã", "nó", "pá",
+    "asa", "aço", "ovo", "uso",
     # Interjeições comuns de dublagem/legendagem
     "oba", "olá", "alô", "opa", "uau", "ai", "ui", "ah", "oh", "ei",
+    "au", "hein", "psiu", "hum", "uh", "eh",
 })
 
 # These fragments are not ordinary standalone PT-BR words. Ambiguous tokens

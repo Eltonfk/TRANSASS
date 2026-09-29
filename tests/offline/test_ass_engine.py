@@ -294,3 +294,13 @@ def test_validate_document_structure_centisecond_quantization_tolerance():
     result_far = validate_document_structure(source, candidate_far)
     assert result_far["valid"] is False
     assert "evento 0: campo start alterado" in result_far["issues"]
+
+
+def test_line_break_accepts_common_short_nouns_and_interjections():
+    from ass_engine import line_break_inside_word
+
+    assert not line_break_inside_word(r"Eu construí este lugar com meu pau\Ne martelei com meus testículos.")
+    assert not line_break_inside_word(r"Au, au, au, au\Nau, au, au!")
+    assert not line_break_inside_word(r"O cão\Nlatia sem parar.")
+    assert not line_break_inside_word(r"Tome um chá\Nantes de dormir.")
+
