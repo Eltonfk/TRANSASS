@@ -208,6 +208,30 @@ def _existing_output(video: Path) -> Path | None:
     return None
 
 
+_EPISODE_RE = re.compile(r"S(?P<season>\d{1,3})E(?P<episode>\d{1,3})", re.IGNORECASE)
+
+
+def _parse_season_episode(name: str | Path) -> tuple[str | None, str | None]:
+    path = Path(name) if isinstance(name, (str, Path)) else Path(str(name))
+    filename = path.name
+    match = _EPISODE_RE.search(filename)
+    if match:
+        return f"{int(match.group('season')):02d}", f"{int(match.group('episode')):02d}"
+
+    season = None
+    if len(path.parts) > 1:
+        parent_match = re.search(r"(?:Season|Temporada|S)\s*(\d{1,3})", path.parts[-2], re.IGNORECASE)
+        if parent_match:
+            season = f"{int(parent_match.group(1)):02d}"
+
+    ep_match = re.search(r"(?:^|[^\w])(?:EP?|#)?\s*(\d{1,3})(?:[^\w]|$)", filename, re.IGNORECASE)
+    if ep_match:
+        episode = f"{int(ep_match.group(1)):02d}"
+        return season, episode
+
+    return season, None
+
+
 def _library_episode_for_video(video: Path) -> dict | None:
     """Resolve a registered anime episode by internal relative media path."""
     try:
@@ -218,7 +242,49 @@ def _library_episode_for_video(video: Path) -> dict | None:
                 "JOIN media_series s ON s.id=e.series_id WHERE e.media_relative_path=? AND s.classification='ANIME'",
                 (relative,),
             ).fetchone()
-        return dict(row) if row else None
+            if row:
+                return dict(row)
+
+            # Resilient fallback: episode was renamed or media file was replaced/upgraded on disk
+            season, episode = _parse_season_episode(video)
+            if season and episode:
+                parts = Path(relative).parts
+                series_relative = parts[0] if parts else ""
+                series_row = db.execute(
+                    "SELECT id FROM media_series WHERE classification='ANIME' AND (library_relative_path=? OR series_key=?)",
+                    (series_relative, series_relative),
+                ).fetchone()
+                if series_row:
+                    series_id = series_row["id"]
+                    ep_row = db.execute(
+                        "SELECT e.*,s.title AS series_title,s.classification FROM media_episode e "
+                        "JOIN media_series s ON s.id=e.series_id WHERE e.series_id=? AND e.season=? AND e.episode=? AND s.classification='ANIME'",
+                        (series_id, season, episode),
+                    ).fetchone()
+                    if ep_row:
+                        db.execute(
+                            "UPDATE media_episode SET media_relative_path=?, media_filename=?, episode_title=? WHERE id=?",
+                            (relative, video.name, video.stem, ep_row["id"]),
+                        )
+                        updated = db.execute(
+                            "SELECT e.*,s.title AS series_title,s.classification FROM media_episode e "
+                            "JOIN media_series s ON s.id=e.series_id WHERE e.id=?",
+                            (ep_row["id"],),
+                        ).fetchone()
+                        return dict(updated) if updated else dict(ep_row)
+                    else:
+                        cur = db.execute(
+                            "INSERT INTO media_episode(series_id,season,episode,episode_title,media_relative_path,media_filename,release,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (series_id, season, episode, video.stem, relative, video.name, None, _now()),
+                        )
+                        new_id = cur.lastrowid
+                        created = db.execute(
+                            "SELECT e.*,s.title AS series_title,s.classification FROM media_episode e "
+                            "JOIN media_series s ON s.id=e.series_id WHERE e.id=?",
+                            (new_id,),
+                        ).fetchone()
+                        return dict(created) if created else None
+        return None
     except Exception:
         return None
 
@@ -4113,16 +4179,6 @@ def source_options_route():
     return jsonify({"episode_id": resolved_episode_id, "path": str(video_path), "options": options})
 
 
-_EPISODE_RE = re.compile(r"S(?P<season>\d{1,3})E(?P<episode>\d{1,3})", re.IGNORECASE)
-
-
-def _parse_season_episode(name: str) -> tuple[str | None, str | None]:
-    match = _EPISODE_RE.search(name)
-    if not match:
-        return None, None
-    return f"{int(match.group('season')):02d}", f"{int(match.group('episode')):02d}"
-
-
 def _auto_classify_anime(folder_name: str) -> dict:
     """Auto-classify a folder as ANIME when any video has embedded ASS/SSA.
 
@@ -4141,18 +4197,6 @@ def _auto_classify_anime(folder_name: str) -> dict:
     series_relative = folder_name.strip("/").split("/")[0]
     series_title = series_relative
 
-    has_embedded_ass = False
-    for video in videos:
-        try:
-            options = detect_source_options(video)
-        except Exception:
-            continue
-        if any(str(opt.get("codec", "")).lower() in ("ass", "ssa") and opt.get("textual") for opt in options):
-            has_embedded_ass = True
-            break
-    if not has_embedded_ass:
-        return {"classified": False, "reason": "no_embedded_ass_ssa"}
-
     existing = next(
         (s for s in subtitle_library.list_series()
          if (s.get("library_relative_path") or "").strip("/") == series_relative),
@@ -4163,14 +4207,27 @@ def _auto_classify_anime(folder_name: str) -> dict:
 
     if existing and existing.get("classification") == "ANIME":
         series_id = existing["id"]
-    elif existing:
-        result = subtitle_library.set_classification(existing["id"], "ANIME", source="AUTO_EMBEDDED_SUBTITLE")
-        series_id = result["id"]
     else:
-        result = subtitle_library.register_series(
-            series_title, series_relative, classification="ANIME", source="AUTO_EMBEDDED_SUBTITLE"
-        )
-        series_id = result["id"]
+        has_embedded_ass = False
+        for video in videos:
+            try:
+                options = detect_source_options(video)
+            except Exception:
+                continue
+            if any(str(opt.get("codec", "")).lower() in ("ass", "ssa") and opt.get("textual") for opt in options):
+                has_embedded_ass = True
+                break
+        if not has_embedded_ass:
+            return {"classified": False, "reason": "no_embedded_ass_ssa"}
+
+        if existing:
+            result = subtitle_library.set_classification(existing["id"], "ANIME", source="AUTO_EMBEDDED_SUBTITLE")
+            series_id = result["id"]
+        else:
+            result = subtitle_library.register_series(
+                series_title, series_relative, classification="ANIME", source="AUTO_EMBEDDED_SUBTITLE"
+            )
+            series_id = result["id"]
 
     registered = 0
     for video in videos:

@@ -114,3 +114,13 @@ def test_no_videos_not_classified():
     assert result["classified"] is False
     assert result["reason"] == "no_videos"
     lib.register_series.assert_not_called()
+
+
+def test_existing_anime_registers_episodes_without_ass_track():
+    result, lib = _run([{"library_relative_path": "Show", "classification": "ANIME", "id": 7}], [_pgs_track()])
+    assert result["classified"] is True
+    assert result["classification"] == "ANIME"
+    assert result["episodes_registered"] == 1
+    lib.set_classification.assert_not_called()
+    lib.register_episode_for_path.assert_called_once()
+

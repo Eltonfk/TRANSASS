@@ -327,8 +327,16 @@ class AnimeSubtitleLibrary:
         with self._db() as db:
             self._require_anime_series(db, series_id)
             existing = db.execute("SELECT id FROM media_episode WHERE series_id=? AND media_relative_path=?", (series_id, media_relative_path)).fetchone()
+            if not existing and season is not None and episode is not None:
+                existing = db.execute(
+                    "SELECT id FROM media_episode WHERE series_id=? AND season=? AND episode=?",
+                    (series_id, season, episode),
+                ).fetchone()
             if existing:
-                db.execute("UPDATE media_episode SET season=?,episode=?,episode_title=?,media_filename=?,release=? WHERE id=?", (season, episode, episode_title, media_filename, release, existing["id"]))
+                db.execute(
+                    "UPDATE media_episode SET season=?,episode=?,episode_title=?,media_relative_path=?,media_filename=?,release=? WHERE id=?",
+                    (season, episode, episode_title, media_relative_path, media_filename, release, existing["id"]),
+                )
                 episode_id = existing["id"]
             else:
                 cur = db.execute(
