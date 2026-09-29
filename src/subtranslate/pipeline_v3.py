@@ -297,8 +297,14 @@ def _is_untranslated_source_copy(
     target_language: str = "português do Brasil (pt-BR)",
 ) -> bool:
     """Reject high-confidence verbatim source copies without blocking names."""
-    words = re.findall(r"[\wÀ-ÿ]+(?:['’][\wÀ-ÿ]+)?", source, flags=re.UNICODE)
-    output_words = re.findall(r"[\wÀ-ÿ]+(?:['’][\wÀ-ÿ]+)?", translated, flags=re.UNICODE)
+    words = [
+        word for word in re.findall(r"[\wÀ-ÿ]+(?:['’][\wÀ-ÿ]+)?", source, flags=re.UNICODE)
+        if any(c.isalpha() for c in word)
+    ]
+    output_words = [
+        word for word in re.findall(r"[\wÀ-ÿ]+(?:['’][\wÀ-ÿ]+)?", translated, flags=re.UNICODE)
+        if any(c.isalpha() for c in word)
+    ]
     normalized_source = [word.casefold().replace("’", "'") for word in words]
     normalized_output = [word.casefold().replace("’", "'") for word in output_words]
     if not normalized_source or normalized_source != normalized_output:

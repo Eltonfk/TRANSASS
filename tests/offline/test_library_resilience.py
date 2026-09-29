@@ -151,3 +151,17 @@ class LibraryResilienceTests(unittest.TestCase):
             job = {}
             with self.assertRaisesRegex(RuntimeError, "V3_LIBRARY_EPISODE_NOT_REGISTERED"):
                 app_module._require_v3_library_episode(video, job)
+
+    def test_is_untranslated_source_copy_exempts_pure_numeric_and_symbolic_lines(self):
+        from pipeline_v3 import _is_untranslated_source_copy
+
+        # Pure numbers and punctuation (like Full-Time Magister E02 event 210: "5... 6... 7!")
+        self.assertFalse(_is_untranslated_source_copy("5... 6... 7!", "5... 6... 7!", "inglês"))
+        self.assertFalse(_is_untranslated_source_copy("1, 2, 3.", "1, 2, 3.", "inglês"))
+        self.assertFalse(_is_untranslated_source_copy("100%!", "100%!", "inglês"))
+        self.assertFalse(_is_untranslated_source_copy("♪ ... ♪", "♪ ... ♪", "inglês"))
+
+        # Actual English text copies must still be detected
+        self.assertTrue(_is_untranslated_source_copy("Hello!", "Hello!", "inglês"))
+        self.assertTrue(_is_untranslated_source_copy("Run away!", "Run away!", "inglês"))
+
