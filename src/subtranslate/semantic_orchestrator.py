@@ -12,6 +12,7 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Callable, Sequence
 
 from ass_engine import (
@@ -34,6 +35,7 @@ _STYLE_HINTS = ("sign", "plate", "card", "screen", "onscreen", "on-screen", "cap
 _WORD_RE = re.compile(r"[\wÀ-ÿ]+", re.UNICODE)
 
 
+@lru_cache(maxsize=4096)
 def _visible_words(text: str) -> tuple[str, ...]:
     clean = visible_text(text, line_break=" ")
     return tuple(w.casefold().replace("’", "'") for w in _WORD_RE.findall(clean))
@@ -130,11 +132,26 @@ class TranslationBatch:
 class InMemorySemanticOrchestrator:
     """Orchestrates in-memory batching, dispatching, and envelope reconstruction."""
 
-    def __init__(self, target_batch_size: int = 16) -> None:
-        self.target_batch_size = target_batch_size
+    def __init__(
+        self,
+        target_batch_size: int = 16,
+        *,
+        max_batch_words: int = 90,
+        max_batch_chars: int = 420,
+    ) -> None:
+        self.target_batch_size = max(1, target_batch_size)
+        self.max_batch_words = max(1, max_batch_words)
+        self.max_batch_chars = max(1, max_batch_chars)
 
-    def plan_batches(self, doc: ASSDocumentAST) -> tuple[list[TranslationBatch], list[dict[str, Any]]]:
+    def plan_batches(
+        self,
+        doc: ASSDocumentAST,
+        *,
+        excluded_event_indices: set[int] | None = None,
+        additional_units: Sequence[TranslationUnit] = (),
+    ) -> tuple[list[TranslationBatch], list[dict[str, Any]]]:
         """Create planned dialogue batches and distinct sign groups."""
+        excluded_event_indices = excluded_event_indices or set()
         sign_groups = build_sign_groups(doc.events)
         sign_member_indices = set()
         for g in sign_groups:
@@ -145,6 +162,8 @@ class InMemorySemanticOrchestrator:
         # 1. Dialogue units
         for node in doc.events:
             if node.is_comment or node.is_drawing:
+                continue
+            if node.index in excluded_event_indices:
                 continue
             if node.index in sign_member_indices:
                 continue
@@ -167,14 +186,34 @@ class InMemorySemanticOrchestrator:
                 metadata={"group": g},
             ))
 
-        # 3. Assemble batches
+        units.extend(additional_units)
+
+        # 3. Assemble adaptive cognitive batches
         batches: list[TranslationBatch] = []
         current: list[TranslationUnit] = []
+        current_words = 0
+        current_chars = 0
+
         for u in units:
-            current.append(u)
-            if len(current) >= self.target_batch_size:
+            unit_words = len(_visible_words(u.source_text))
+            unit_chars = len(u.source_text)
+
+            exceeds_count = len(current) >= self.target_batch_size
+            exceeds_density = current and (
+                (current_words + unit_words > self.max_batch_words)
+                or (current_chars + unit_chars > self.max_batch_chars)
+            )
+
+            if exceeds_count or exceeds_density:
                 batches.append(TranslationBatch(batch_index=len(batches), units=current))
                 current = []
+                current_words = 0
+                current_chars = 0
+
+            current.append(u)
+            current_words += unit_words
+            current_chars += unit_chars
+
         if current:
             batches.append(TranslationBatch(batch_index=len(batches), units=current))
 

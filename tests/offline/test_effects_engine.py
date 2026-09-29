@@ -75,6 +75,26 @@ def test_in_memory_effects_engine_pipeline():
     assert r"\c&H" in trans_doc[0].text
     # O evento de karaokê deve ter preservado o timing original da música
     assert r"\k10" in trans_doc[1].text
+    assert trans_doc[1].visible == "Hikaru"
+
+
+def test_karaoke_tags_are_reanchored_without_replacing_translation():
+    original = ASSDocumentAST.from_string(
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        r"Dialogue: 0,0:00:05.00,0:00:08.00,OP,,0,0,0,,{\k10}Hi{\k20}ka{\k30}ru" "\n"
+    )
+    translated = ASSDocumentAST.from_string(
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:05.00,0:00:08.00,OP,,0,0,0,,Brilhe\n"
+    )
+
+    stats = InMemoryEffectsEngine().process_effects(translated, original)
+
+    assert translated[0].visible == "Brilhe"
+    assert has_karaoke_tags(translated[0].text)
+    assert stats["karaoke_preserved"] == 1
 
 
 def test_animated_transform_colors_ignored_by_effects_engine():
@@ -96,4 +116,3 @@ def test_animated_transform_colors_ignored_by_effects_engine():
 
     assert stats["visual_glyphs_applied"] == 0
     assert trans_doc[0].text == r"{=2}{\move(225,396,281.865,396.045,25,7283)\c&H0C1E00&\t(835,1485,\c&H332419&)}Comer"
-

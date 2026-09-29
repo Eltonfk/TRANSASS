@@ -259,6 +259,57 @@ def _replace_payload_slot(source_slot: str, target_text: str) -> str:
     return rendered
 
 
+def _terminal_numeric_anchor(source_piece: str, target_words: list[str]) -> int | None:
+    """Return the target cut after a unique number ending a source line.
+
+    Numbers are useful cross-language anchors: when an ASS line ends in a date
+    or quantity and the model omits the line break, keep that number on the
+    same translated line instead of splitting it from its context.
+    """
+    source_payload = PAYLOAD_TOKEN_RE.sub("", source_piece or "")
+    source_match = re.search(r"(?<!\w)(\d+)[^\w]*$", source_payload)
+    if not source_match:
+        return None
+    source_number = source_match.group(1)
+    target_matches = [
+        index
+        for index, word in enumerate(target_words)
+        if source_number in re.findall(r"(?<!\w)\d+(?!\w)", word)
+    ]
+    return target_matches[0] + 1 if len(target_matches) == 1 else None
+
+
+def _collapse_generated_horizontal_spacing(source: str, rendered: str) -> str:
+    """Remove extra spaces introduced when fewer target words fill source slots.
+
+    Preserve deliberate repeated source whitespace and never normalize inside
+    ASS override tags. Whitespace around tags and ASS controls remains intact.
+    """
+    if re.search(r"[ \t]{2,}", TAG_RE.sub("", source or "")):
+        return rendered
+
+    result: list[str] = []
+    cursor = 0
+    for match in TAG_RE.finditer(rendered or ""):
+        result.append(re.sub(r"[ \t]{2,}", " ", rendered[cursor:match.start()]))
+        result.append(match.group(0))
+        cursor = match.end()
+    result.append(re.sub(r"[ \t]{2,}", " ", (rendered or "")[cursor:]))
+    normalized = "".join(result)
+    source_visible = TAG_RE.sub("", source or "")
+
+    if not source_visible.startswith((" ", "\t")):
+        prefix_match = re.match(r"(?:\{[^}]*\})*", normalized)
+        prefix = prefix_match.group(0) if prefix_match else ""
+        normalized = prefix + normalized[len(prefix):].lstrip(" \t")
+    if not source_visible.endswith((" ", "\t")):
+        suffix_match = re.search(r"(?:\{[^}]*\})*$", normalized)
+        suffix = suffix_match.group(0) if suffix_match else ""
+        body = normalized[:len(normalized) - len(suffix)] if suffix else normalized
+        normalized = body.rstrip(" \t") + suffix
+    return normalized
+
+
 def replace_source_payload(source: str, target: str) -> str:
     """Replace linguistic text while rebuilding the source-owned ASS envelope.
 
@@ -307,6 +358,14 @@ def replace_source_payload(source: str, target: str) -> str:
                     len(target_words),
                     max(start, round(len(target_words) * source_count / total)),
                 )
+                numeric_anchor = _terminal_numeric_anchor(source_piece, target_words)
+                later_content = any(source_word_counts[index + 1:])
+                if (
+                    numeric_anchor is not None
+                    and numeric_anchor >= start
+                    and (not later_content or numeric_anchor < len(target_words))
+                ):
+                    end = numeric_anchor
             rendered.append(replace_source_payload(source_piece, " ".join(target_words[start:end])))
             start = end
         return "".join(
@@ -348,7 +407,11 @@ def replace_source_payload(source: str, target: str) -> str:
             sequence[index][1], " ".join(target_words[start:end])
         )
         start = end
-    return "".join(replacements.get(index, value) for index, (_kind, value) in enumerate(sequence))
+    rendered = "".join(
+        replacements.get(index, value)
+        for index, (_kind, value) in enumerate(sequence)
+    )
+    return _collapse_generated_horizontal_spacing(source, rendered)
 
 
 def is_drawing_event(text: str) -> bool:

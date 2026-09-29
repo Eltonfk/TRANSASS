@@ -155,11 +155,14 @@ class InMemoryEffectsEngine:
 
             # 2. Karaoke handling
             if self.enable_karaoke and is_song_or_karaoke_node(node):
-                # Preserva tags de karaokê originais fielmente
                 if has_karaoke_tags(orig_text):
-                    node.text = orig_text
+                    # Reaplica o envelope ASS da fonte sobre o texto traduzido.
+                    # Isso ancora os tempos/tags no alvo sem substituir a
+                    # tradução pelo payload original.
+                    from ass_structure import replace_source_payload
+
+                    node.text = replace_source_payload(orig_text, node.visible)
                     stats["karaoke_preserved"] += 1
-                    continue
 
             # 3. Visual glyph gradient handling
             if self.enable_visual_glyphs and orig_node:

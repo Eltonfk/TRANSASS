@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pysubs2
 
+from ass_engine import line_break_inside_word
 import ass_structure
 import pipeline_v2_1_3 as pipeline
 from v238_source_payload import rc4_replace_source_payload
@@ -81,6 +82,38 @@ def test_source_payload_replaces_source_punctuation_without_losing_inline_tags()
 def test_source_payload_preserves_original_soft_break_token():
     assert rc4_replace_source_payload(r"One\nTwo", "Um dois") == r"Um\ndois"
     assert rc4_replace_source_payload(r"One\nTwo", r"Um\nDois") == r"Um\nDois"
+
+
+def test_source_payload_keeps_terminal_number_with_its_ass_line_and_normalizes_generated_gaps():
+    source = r"mais est morte le 15\Nen dépérissant peu à peu."
+    target = "mas morreu no dia 15, morrendo lentamente."
+
+    rendered = ass_structure.replace_source_payload(source, target)
+
+    assert rendered == r"mas morreu no dia 15,\Nmorrendo lentamente."
+    assert ass_structure.break_tokens(rendered) == [r"\N"]
+    assert not line_break_inside_word(rendered)
+    assert "  " not in rendered
+
+
+def test_line_break_validator_distinguishes_complete_numbers_from_split_digits():
+    assert not line_break_inside_word(r"dia\N15, morrendo lentamente")
+    assert line_break_inside_word(r"1\N5")
+    assert line_break_inside_word(r"vi\Nda")
+
+
+def test_shiki_e09_reconstruction_does_not_reject_break_between_complete_words():
+    source = "D'accord. Dors bien\\Net rétablis-toi vite."
+    translated = "Tudo bem. Dê bom sono e se recupere logo."
+
+    rendered = ass_structure.replace_source_payload(source, translated)
+
+    assert rendered == r"Tudo bem. Dê bom\Nsono e se recupere logo."
+    assert not line_break_inside_word(rendered)
+
+
+def test_source_payload_preserves_deliberate_repeated_spaces():
+    assert ass_structure.replace_source_payload("a  b", "x y") == "x  y"
 
 
 def test_pipeline_preserves_soft_break_and_hard_space_during_reconstruction(tmp_path):

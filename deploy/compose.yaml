@@ -15,9 +15,8 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
-    # V2.3.8 keeps durable unit/capture indexes in the web process while a
-    # long episode is running.  512 MiB caused status polling and ledger
-    # reconciliation to saturate the container before the model was busy.
+    # Durable translation captures and indexes live in the web process while
+    # an episode is running.  Keep enough headroom for polling and recovery.
     mem_limit: 1g
     cpus: 1.0
     env_file:
@@ -30,14 +29,14 @@ services:
       # container o serviço deve usar exclusivamente os pontos montados.
       MEDIA_ROOT: /shows
       STATE_DIR: /app/state
-      TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v2_3_8}
+      TRANSLATOR_PIPELINE: ${TRANSLATOR_PIPELINE:-v3}
       TRANSLATOR_SOURCE_LANGUAGE: ${TRANSLATOR_SOURCE_LANGUAGE:-inglês}
       TRANSLATOR_OLLAMA_URL: ${TRANSLATOR_OLLAMA_URL:-http://host.docker.internal:11434}
-      TRANSLATOR_OLLAMA_MODEL: ${TRANSLATOR_OLLAMA_MODEL:-qwen3.5:9b}
-      TRANSLATOR_FALLBACK_OLLAMA_MODEL: ${TRANSLATOR_FALLBACK_OLLAMA_MODEL:-qwen3.5:9b}
-      TRANSLATOR_REVIEW_MODEL: ${TRANSLATOR_REVIEW_MODEL:-qwen3.5:9b}
+      TRANSLATOR_OLLAMA_MODEL: ${TRANSLATOR_OLLAMA_MODEL:-qwen2.5:14b}
+      TRANSLATOR_FALLBACK_OLLAMA_MODEL: ${TRANSLATOR_FALLBACK_OLLAMA_MODEL:-qwen2.5:14b}
+      TRANSLATOR_REVIEW_MODEL: ${TRANSLATOR_REVIEW_MODEL:-qwen2.5:14b}
       TRANSLATOR_REVIEW_MAX_PER_FILE: ${TRANSLATOR_REVIEW_MAX_PER_FILE:-30}
-      TRANSLATOR_BATCH_SIZE: ${TRANSLATOR_BATCH_SIZE:-4}
+      TRANSLATOR_BATCH_SIZE: ${TRANSLATOR_BATCH_SIZE:-12}
       TRANSLATOR_CONTEXT_NEIGHBORS: ${TRANSLATOR_CONTEXT_NEIGHBORS:-1}
       TRANSLATOR_CONTEXT_MAX_CHARS: ${TRANSLATOR_CONTEXT_MAX_CHARS:-360}
       TRANSLATOR_MIN_FILE_AGE_SECONDS: ${TRANSLATOR_MIN_FILE_AGE_SECONDS:-600}

@@ -13,7 +13,7 @@ import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 import pysubs2
 
@@ -48,21 +48,43 @@ LEGITIMATE_SHORT_WORDS: frozenset[str] = frozenset({
     "e", "ou", "se", "que", "mas", "com", "sem", "sob", "até", "nem", "pois",
     # Pronomes retos e oblíquos
     "eu", "tu", "ele", "ela", "nós", "vós", "eles", "elas",
-    "me", "te", "se", "nos", "vos", "lhe", "lhes",
+    "me", "te", "se", "si", "ti", "nos", "vos", "lhe", "lhes",
     # Pronomes possessivos e demonstrativos
     "meu", "teu", "seu", "sua", "meus", "teus", "seus", "suas",
     "isso", "isto", "esse", "essa", "este", "esta",
-    # Advérbios frequentes
-    "já", "só", "lá", "cá", "ali", "aqui", "bem", "mal", "mau", "não", "sim",
+    # Advérbios frequentes e adjetivos curtos de uso comum
+    "já", "só", "lá", "cá", "aí", "ali", "aqui", "bem", "mal", "mau", "má", "não", "sim",
+    "bom", "boa",
     # Formas verbais curtas de alta frequência
-    "é", "era", "foi", "vai", "vem", "dar", "ver", "ter", "ser", "sou", "são",
-    "tem", "diz", "faz", "vou", "fiz", "deu", "viu", "sai", "ia",
+    "é", "era", "foi", "vai", "vem", "vir", "vão", "vêm", "ir", "dar", "ver", "ter", "ser", "sou", "são",
+    "tem", "diz", "faz", "fez", "vou", "fiz", "deu", "vi", "viu", "vê", "dá", "dou", "dão", "vim", "li", "leu", "pus",
+    "sai", "ia", "fui", "sei", "tão", "há", "dê", "pôr", "pôs", "põe", "riu", "dói", "têm", "lê", "crê",
+    # Numerais cardinais curtos
+    "dez",
     # Substantivos monossílabos ou dissílabos comuns
     "dia", "sol", "lua", "mar", "céu", "fim", "paz", "dor", "som", "tom", "voz",
-    "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês",
-    "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua",
+    "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês", "mim",
+    "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua", "fé", "pó",
     # Interjeições comuns de dublagem/legendagem
     "oba", "olá", "alô", "opa", "uau", "ai", "ui", "ah", "oh", "ei",
+})
+
+# These fragments are not ordinary standalone PT-BR words. Ambiguous tokens
+# such as ``idade`` and ``mente`` stay out so valid boundaries like
+# ``Minha\\Nidade`` are not rejected as word splits.
+_COMMON_WORD_SUFFIX_FRAGMENTS: frozenset[str] = frozenset({
+    "dade", "dades", "ção", "ções", "sões",
+    "ável", "áveis", "ível", "íveis",
+})
+_COMMON_WORDS_WITH_POSSIBLE_SPLITS: frozenset[str] = frozenset({
+    "felicidade", "felicidades", "possibilidade", "possibilidades",
+    "qualidade", "verdade", "verdades", "dezembro", "vida", "vidas",
+})
+_AMBIGUOUS_COMPLETE_WORD_BOUNDARIES: frozenset[tuple[str, str]] = frozenset({
+    ("qual", "idade"),
+})
+_SOURCE_PROVEN_NAME_BOUNDARIES: frozenset[tuple[str, str]] = frozenset({
+    ("ver", "dade"),
 })
 
 CRITICAL_VALIDATION_FLAGS: frozenset[str] = frozenset({
@@ -96,18 +118,25 @@ def _word_char(char: str) -> bool:
 
 def visible_text(text: str, *, line_break: str = "\n") -> str:
     """Return visible ASS text stripped of override tags with normalized controls."""
-    value = TAG_RE.sub("", text or "")
-    value = value.replace(r"\N", line_break).replace(r"\n", line_break)
-    return value.replace(r"\h", " ")
+    if not text:
+        return ""
+    value = TAG_RE.sub("", text) if "{" in text else text
+    if "\\" in value:
+        value = value.replace(r"\N", line_break).replace(r"\n", line_break).replace(r"\h", " ")
+    return value
 
 
 def break_tokens(text: str) -> list[str]:
     """Return hard/soft line-break controls in source order."""
-    return [match.group(0) for match in BREAK_RE.finditer(text or "")]
+    if not text or "\\" not in text:
+        return []
+    return [match.group(0) for match in BREAK_RE.finditer(text)]
 
 
 def break_count(text: str) -> int:
     """Return count of line breaks in text."""
+    if not text or "\\" not in text:
+        return 0
     return len(break_tokens(text))
 
 
@@ -118,7 +147,9 @@ def hard_space_count(text: str) -> int:
 
 def inline_tag_counts(text: str) -> Counter[str]:
     """Return histogram of override tags."""
-    return Counter(TAG_RE.findall(text or ""))
+    if not text or "{" not in text:
+        return Counter()
+    return Counter(TAG_RE.findall(text))
 
 
 def clean_residual_override_tags(text: str) -> str:
@@ -141,6 +172,8 @@ def clean_residual_override_tags(text: str) -> str:
 def is_drawing_event(event_or_text: str | Any) -> bool:
     """Return whether the event or text contains active ASS vector drawing."""
     text = getattr(event_or_text, "text", event_or_text) or ""
+    if not text or ("\\p" not in text and "\\P" not in text):
+        return False
     tags = "".join(TAG_RE.findall(text))
     match = DRAWING_MODE_RE.search(tags)
     if not match:
@@ -183,30 +216,122 @@ def validate_inline_tags(source: str, candidate: str) -> list[str]:
     return sorted(set(flags))
 
 
-def line_break_inside_word(text: str) -> bool:
+_SOURCE_UPPERCASE_BREAK_TOKEN_RE = re.compile(r"(?<!\w)[A-ZÀ-ÖØ-Þ]{2,5}(?!\w)")
+_PROSE_DELIMITER_TOKEN_RE = re.compile(
+    r'["()\[\]“”«»„‟]|(?<!\w)[‘’]|[‘’](?!\w)',
+    re.UNICODE,
+)
+
+
+def source_uppercase_break_tokens(text: str) -> tuple[str, ...]:
+    """Return short, complete uppercase tokens evidenced by one source event.
+
+    This is used only to avoid treating a preserved acronym (for example
+    ``EEG``) as a fragment at a translated visual line boundary. It does not
+    authorize a break inside the token itself, nor infer abbreviations from
+    translated text.
+    """
+    visible = visible_text(str(text or ""), line_break=" ")
+    return tuple(dict.fromkeys(match.group(0) for match in _SOURCE_UPPERCASE_BREAK_TOKEN_RE.finditer(visible)))
+
+
+def prose_delimiter_token_counts(text: str) -> dict[str, int]:
+    """Count visible prose delimiters, excluding tags and intraword apostrophes."""
+    visible = visible_text(str(text or ""), line_break=" ")
+    tokens = prose_delimiter_token_sequence(visible)
+    return {
+        "double_quotes": sum(token in {'"', "“", "”", "«", "»", "„", "‟"} for token in tokens),
+        "single_curly_quotes": sum(token in {"‘", "’"} for token in tokens),
+        "open_parentheses": tokens.count("("),
+        "close_parentheses": tokens.count(")"),
+        "open_brackets": tokens.count("["),
+        "close_brackets": tokens.count("]"),
+    }
+
+
+def prose_delimiter_token_sequence(text: str) -> tuple[str, ...]:
+    """Return visible prose delimiters in order, excluding ASS override tags.
+
+    Counts alone cannot detect reordered delimiters such as ``(text)`` becoming
+    ``)text(``. Exact delimiter-token order is stable across translated words
+    while preserving source quotation/bracket ownership per event.
+    """
+    visible = visible_text(str(text or ""), line_break=" ")
+    return tuple(match.group(0) for match in _PROSE_DELIMITER_TOKEN_RE.finditer(visible))
+
+
+def line_break_inside_word(
+    text: str,
+    *,
+    allowed_short_words: Iterable[str] = (),
+) -> bool:
     """Validate that a visual break (\\N) does not slice a word in half.
 
-    Permits legitimate short Portuguese function words (da, do, de, e, na, no, etc.)
-    around the break.
+    Permits complete short Portuguese tokens from the curated lexicon, including
+    function words and frequent content words such as ``bom`` and ``boa``.
     """
+    allowed_words = {str(word).casefold() for word in allowed_short_words if str(word).strip()}
     for match in BREAK_RE.finditer(text or ""):
         index = match.start()
-        left_raw = text[:index]
-        right_raw = text[match.end():]
-        # ASS style tags immediately adjacent to break are explicit boundaries
-        if re.search(r"\{[^}]*\}\s*$", left_raw) or re.match(r"\s*\{[^}]*\}", right_raw):
-            continue
+        # Strip inline ASS tags before examining the visible characters around
+        # the break. Formatting changes do not create a lexical boundary.
         plain = visible_text(text, line_break="")
         plain_index = len(visible_text(text[:index], line_break=""))
-        if plain_index > 0 and plain_index + 1 < len(plain) and _word_char(plain[plain_index - 1]) and _word_char(plain[plain_index]):
-            left_match = re.search(r"[\wÀ-ÿ]+$", plain[:plain_index])
-            right_match = re.match(r"[\wÀ-ÿ]+", plain[plain_index:])
+        if (
+            plain_index > 1
+            and plain_index + 1 < len(plain)
+            and plain[plain_index - 1] == "-"
+            and _word_char(plain[plain_index - 2])
+            and _word_char(plain[plain_index])
+        ):
+            return True
+        if (
+            plain_index + 2 < len(plain)
+            and plain[plain_index] == "-"
+            and _word_char(plain[plain_index - 1])
+            and _word_char(plain[plain_index + 1])
+        ):
+            return True
+        if plain_index > 0 and plain_index < len(plain) and _word_char(plain[plain_index - 1]) and _word_char(plain[plain_index]):
+            # A line break between two digits would still split one number
+            # (e.g. ``1\\N5``); complete numeric tokens on either side are
+            # independent units and must not be mistaken for a split word.
+            if plain[plain_index - 1].isdigit() and plain[plain_index].isdigit():
+                return True
+            # Keep hyphenated Portuguese clitics (colocá-lo/explicá-la)
+            # together; their final syllable is not an independent word.
+            lexical_run = r"[\wÀ-ÿ]+(?:-[\wÀ-ÿ]+)*"
+            left_match = re.search(lexical_run + r"$", plain[:plain_index])
+            right_match = re.match(lexical_run, plain[plain_index:])
             left_len = len(left_match.group(0)) if left_match else 0
             right_len = len(right_match.group(0)) if right_match else 0
             left_word = left_match.group(0).lower() if left_match else ""
             right_word = right_match.group(0).lower() if right_match else ""
-            left_valid = left_len >= 4 or left_word in LEGITIMATE_SHORT_WORDS
-            right_valid = right_len >= 4 or right_word in LEGITIMATE_SHORT_WORDS
+            # A source-backed short token must not override a known lexical
+            # split. For example, an uppercase ``DEZ`` elsewhere in the event
+            # cannot make ``dez\\Nembro`` a valid rendering of ``dezembro``.
+            if (
+                left_word + right_word in _COMMON_WORDS_WITH_POSSIBLE_SPLITS
+                and (left_word, right_word) not in _AMBIGUOUS_COMPLETE_WORD_BOUNDARIES
+                and not (
+                    (left_word, right_word) in _SOURCE_PROVEN_NAME_BOUNDARIES
+                    and right_word in allowed_words
+                )
+            ):
+                return True
+            protected_name_at_boundary = left_word in allowed_words or right_word in allowed_words
+            if not protected_name_at_boundary and right_word in _COMMON_WORD_SUFFIX_FRAGMENTS:
+                minimum_prefix = 3 if right_word in {"dade", "dades"} else 5
+                if left_len >= minimum_prefix:
+                    return True
+            left_valid = (
+                left_len >= 4 or left_word in LEGITIMATE_SHORT_WORDS
+                or left_word in allowed_words or left_word.isdigit()
+            )
+            right_valid = (
+                right_len >= 4 or right_word in LEGITIMATE_SHORT_WORDS
+                or right_word in allowed_words or right_word.isdigit()
+            )
             if left_valid and right_valid:
                 continue
             return True
@@ -312,7 +437,7 @@ class ASSDocumentAST:
         return self.ssa
 
     def save(self, path: str | Path, encoding: str = "utf-8") -> None:
-        """Serialize in-memory AST directly to destination disk path atomically."""
+        """Serialize this AST to a path; publication atomicity belongs to the caller."""
         self.sync_to_ssa()
         dest = Path(path)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +461,7 @@ def validate_document_structure(
     selected_indices: set[int] | None = None,
     segmented_indices: set[int] | None = None,
     allow_tag_reflow_indices: set[int] | None = None,
+    allowed_break_words_by_event: dict[int, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     """Perform comprehensive structural validation between source and candidate.
 
@@ -398,7 +524,13 @@ def validate_document_structure(
         if (
             index not in (segmented_indices or set())
             and left_text != right_text
-            and line_break_inside_word(right_text)
+            and line_break_inside_word(
+                right_text,
+                allowed_short_words=(
+                    *tuple((allowed_break_words_by_event or {}).get(index, ())),
+                    *source_uppercase_break_tokens(left_text),
+                ),
+            )
         ):
             issues.append(f"evento {index}: LINE_BREAK_INSIDE_WORD")
 
