@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -27,42 +28,55 @@ def request_json(url: str, method: str = "GET", payload: dict | None = None) -> 
         return int(error.code), json.loads(error.read().decode("utf-8"))
 
 
+def run_scenario(root: Path) -> int:
+    media = root / "Biblioteca de Animes — teste [PT-BR]"
+    (media / "Série Á [Temporada 1]").mkdir(parents=True)
+    paths = DesktopPaths(root / "Dados do Transass", root / "Configuração")
+    paths.ensure()
+    paths.selected_media_folder_file.write_text(str(media), encoding="utf-8")
+    runtime = LocalRuntime(paths=paths, core_root=ROOT)
+    try:
+        base = runtime.start(port=0)
+        checks: list[str] = []
+        status, health = request_json(base + "health")
+        assert status == 200 and health.get("status") == "ok"
+        checks.append("health")
+        status, browse = request_json(base + "browse?path=")
+        assert status == 200 and any("Série" in str(item) for item in browse.get("subfolders", []))
+        checks.append("unicode-path")
+        status, onboarding = request_json(base + "onboarding/status")
+        assert status == 200 and onboarding["media"]["available"]
+        checks.append("onboarding")
+        payload = {"primary": {"provider": "ollama", "model": "beta-smoke", "base_url": "http://127.0.0.1:9"}, "fallback": None, "keys": {}, "pipeline": "v3"}
+        status, _ = request_json(base + "transport-config", "POST", payload)
+        assert status == 200
+        status, provider = request_json(base + "onboarding/provider-test", "POST", {})
+        assert status == 200 and provider["ok"] is False and "conectar" in provider["message"].lower()
+        checks.append("provider-offline")
+        status, complete = request_json(base + "onboarding/complete", "POST", {})
+        assert status == 200 and complete["ok"] is True
+        status, diagnostic = request_json(base + "diagnostics/export")
+        assert status == 200 and "api_key" not in json.dumps(diagnostic).lower()
+        checks.append("diagnostic")
+        print("BETA_SMOKE_OK", ",".join(checks))
+        return 0
+    finally:
+        runtime.stop()
+
+
 def main() -> int:
+    # The app owns its state lease until process exit. On Windows that open
+    # handle prevents TemporaryDirectory cleanup. Keep ownership unchanged:
+    # run the scenario in a child and clean only after the OS has closed it.
+    if len(sys.argv) == 3 and sys.argv[1] == "--scenario-root":
+        return run_scenario(Path(sys.argv[2]))
     with tempfile.TemporaryDirectory(prefix="transass-beta-") as raw_root:
-        root = Path(raw_root)
-        media = root / "Biblioteca de Animes — teste [PT-BR]"
-        (media / "Série Á [Temporada 1]").mkdir(parents=True)
-        paths = DesktopPaths(root / "Dados do Transass", root / "Configuração")
-        paths.ensure()
-        paths.selected_media_folder_file.write_text(str(media), encoding="utf-8")
-        runtime = LocalRuntime(paths=paths, core_root=ROOT)
-        try:
-            base = runtime.start(port=0)
-            checks: list[str] = []
-            status, health = request_json(base + "health")
-            assert status == 200 and health.get("status") == "ok"
-            checks.append("health")
-            status, browse = request_json(base + "browse?path=")
-            assert status == 200 and any("Série" in str(item) for item in browse.get("subfolders", []))
-            checks.append("unicode-path")
-            status, onboarding = request_json(base + "onboarding/status")
-            assert status == 200 and onboarding["media"]["available"]
-            checks.append("onboarding")
-            payload = {"primary": {"provider": "ollama", "model": "beta-smoke", "base_url": "http://127.0.0.1:9"}, "fallback": None, "keys": {}, "pipeline": "v3"}
-            status, _ = request_json(base + "transport-config", "POST", payload)
-            assert status == 200
-            status, provider = request_json(base + "onboarding/provider-test", "POST", {})
-            assert status == 200 and provider["ok"] is False and "conectar" in provider["message"].lower()
-            checks.append("provider-offline")
-            status, complete = request_json(base + "onboarding/complete", "POST", {})
-            assert status == 200 and complete["ok"] is True
-            status, diagnostic = request_json(base + "diagnostics/export")
-            assert status == 200 and "api_key" not in json.dumps(diagnostic).lower()
-            checks.append("diagnostic")
-            print("BETA_SMOKE_OK", ",".join(checks))
-            return 0
-        finally:
-            runtime.stop()
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--scenario-root", raw_root],
+            check=False,
+            timeout=60,
+        )
+        return result.returncode
 
 
 if __name__ == "__main__":

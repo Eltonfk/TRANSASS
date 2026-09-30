@@ -109,3 +109,18 @@ backup e autorização. Uma instância de serviço mantém lease mesmo sem fila.
 Usar os novos instaladores e revisar uma candidata em operação real somente
 quando houver autorização específica para modelo, episódio e orçamento. Não
 há recomendação de reescrita, eliminação do legado ou limpeza automática.
+
+## Complemento — primeiro gate remoto
+
+O commit `e0996fc` passou nos quatro shards offline e no build Docker da
+[CI 36761906002](https://github.com/Eltonfk/TRANSASS/actions/runs/36761906002).
+No [build Desktop 36761906537](https://github.com/Eltonfk/TRANSASS/actions/runs/36761906537),
+Linux concluiu bundle, AppImage e teste do ponto de entrada. Windows aprovou
+44 testes, incluindo as duas provas Inno, mas falhou ao remover a pasta
+temporária do beta smoke: o processo ainda mantinha o lease aberto.
+
+A correção isola o cenário beta em um processo filho. O processo pai espera
+o encerramento antes de remover a pasta temporária, inclusive no Windows.
+O lock de segurança da aplicação **não foi removido nem liberado antecipadamente**.
+Uma regressão verifica o encerramento e a limpeza efetiva. A falha do primeiro
+runner permanece como evidência; seus binários não constituem a release final.
