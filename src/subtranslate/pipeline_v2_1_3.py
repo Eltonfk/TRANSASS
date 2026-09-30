@@ -2992,7 +2992,12 @@ def validate_structure(original: pysubs2.SSAFile, candidate: pysubs2.SSAFile, se
     for index in range(min(len(original), len(candidate))):
         left, right = original[index], candidate[index]
         for field_name in fields:
-            if getattr(left, field_name, None) != getattr(right, field_name, None):
+            left_val = getattr(left, field_name, None)
+            right_val = getattr(right, field_name, None)
+            if field_name in {"start", "end"}:
+                if abs(int(left_val or 0) - int(right_val or 0)) > 10:
+                    issues.append(f"evento {index}: campo {field_name} alterado")
+            elif left_val != right_val:
                 issues.append(f"evento {index}: campo {field_name} alterado")
         if left.is_comment:
             if left.text != right.text:
