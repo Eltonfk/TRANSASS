@@ -124,3 +124,27 @@ o encerramento antes de remover a pasta temporária, inclusive no Windows.
 O lock de segurança da aplicação **não foi removido nem liberado antecipadamente**.
 Uma regressão verifica o encerramento e a limpeza efetiva. A falha do primeiro
 runner permanece como evidência; seus binários não constituem a release final.
+
+## Complemento — confirmação nativa da versão publicada
+
+O commit de código `96534de1be09c99fee6f67e798dfd462af973784`, alvo da tag
+anotada `v3.0.1`, concluiu todos os gates sem novas chamadas a modelos:
+
+- [CI 36762768829](https://github.com/Eltonfk/TRANSASS/actions/runs/36762768829):
+  quatro shards offline aprovados, compilação e build Docker aprovado.
+- [Desktop 36762768530](https://github.com/Eltonfk/TRANSASS/actions/runs/36762768530):
+  Linux com **52 testes aprovados**, dois Inno não aplicáveis; Windows com
+  **45 testes aprovados**, nove testes do empacotador Linux não aplicáveis.
+  As duas provas Inno executaram efetivamente no Windows.
+- Beta smoke e bundle congelado aprovados nas duas plataformas. O ponto de
+  entrada real do AppImage confirmou `Transass 3.0.1`; o runtime extraído
+  aprovou health/onboarding em modo headless.
+- O instalador Windows real aprovou instalação padrão e personalizada,
+  registro legado, recusa de destinos inseguros, reinstalação e desinstalação.
+  Sentinelas de histórico, Library, mídia e arquivos criados pelo usuário
+  permaneceram intactas. O executável instalado também iniciou corretamente.
+
+A versão é validada para esses cenários nativos; não se declara teste visual
+em um PC físico nem compatibilidade comprovada com todo driver/hardware.
+Esta confirmação é aditiva: não muda a falha anterior, não transforma prova
+offline em tradução real e não atualiza o Docker de produção.
