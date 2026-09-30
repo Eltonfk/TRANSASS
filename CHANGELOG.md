@@ -6,6 +6,57 @@ Versão única de verdade: `src/subtranslate/_version.py` (consumida por `/healt
 
 ## [Unreleased]
 
+Sem alterações posteriores à release 3.0.1 registradas nesta consolidação.
+
+## [3.0.1] - 2026-09-30
+
+### Segurança
+
+- Instalador Windows separa programa e dados, não apaga a pasta inteira ao
+  desinstalar e recusa reutilizar logs legados com exclusão ampla.
+- Manutenção exige serviço parado, lock exclusivo e revalidação de jobs,
+  referências e identidade de cada alvo; links e caminhos incompatíveis são
+  recusados. O V3 entra no inventário sem apagar evidências automaticamente.
+- Cancelamento coordena arquivamento, lineage e publicação; operações já
+  iniciadas são informadas, não prometidas como desfeitas.
+- Tradução e retradução compartilham o gate conservador de fallback: chamada
+  física ou captura ambígua impede repetição silenciosa por outro provedor.
+
+### Corrigido
+
+- Reparo e saída final preservam sequência e posse de aspas/parênteses.
+  Flags remanescentes não são ignoradas para declarar conclusão.
+- Capitalização de diálogo não autoriza cópia da fonte; placas só agrupam
+  texto e pontuação equivalentes. Tags mantêm ordem e alcance no gradiente.
+- Quebras legítimas antes de `irá` e `ira` deixam de ser falso positivo, sem
+  permitir cortes de palavras conhecidas como `mentira` e `partirá`.
+- Atualizações da lista preservam páginas e seleção; falhas de paginação
+  interrompem retradução de temporada. Selos e idioma de origem são coerentes.
+- Migração Desktop ocorre antes de preencher o destino e não copia o lock de
+  processo como se fosse estado do usuário.
+- Pacote Python declara dependências e recursos de execução, incluindo i18n.
+
+### Distribuição e testes
+
+- Versão 3.0.1 alinhada nos manifests e imagens padrão, com gate automático.
+- Comando local e shards usam o mesmo coletor pytest; coleta vazia falha.
+- Runners nativos validam AppImage e instalação/desinstalação Windows com
+  dados sintéticos. Artefatos contêm somente instaladores, checksums e SBOM,
+  sem duplicar o bundle; retenção do CI é de 14 dias.
+- Documentação ativa atualizada; tags e relatórios históricos preservados.
+
+## [3.0.0] - 2026-09-29
+
+### Adicionado
+
+- Pipeline V3 unificado em memória: AST ASS, orquestração semântica e motor
+  de efeitos, com validação antes e depois da serialização.
+- Progresso de lotes e telemetria do V3 no controle web. Módulos históricos
+  continuam disponíveis para compatibilidade, não como novos pipelines.
+
+As alterações abaixo registram a evolução acumulada até essa tag, incluindo
+estados intermediários anteriores à adoção canônica do V3.
+
 ### Alterado
 
 - A suíte offline passou a quatro shards determinísticos com estado isolado,

@@ -23,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Validate release identity
+        run: python scripts/check_release.py --ref "${{ github.ref_name }}"
       - name: Install Desktop build dependencies
         run: |
           python -m pip install -r requirements.lock
@@ -35,6 +37,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Test Desktop runtime
+        env:
+          TRANSASS_TEST_WINDOWS_INSTALLER: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: |
           python -m pytest desktop/tests -q
           python desktop/tests/run_beta_smoke.py
@@ -69,10 +73,6 @@ jobs:
         run: python desktop/packaging/build_bundle.py --dist build/desktop
       - name: Smoke test frozen bundle
         run: python desktop/tests/run_bundle_smoke.py build/desktop/Transass/Transass
-      - name: Generate checksums and SBOM
-        run: |
-          python desktop/packaging/checksums.py build/desktop
-          python desktop/packaging/generate_sbom.py build/desktop
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
         shell: bash
@@ -82,6 +82,17 @@ jobs:
           chmod +x "$RUNNER_TEMP/appimagetool"
           APPIMAGE_EXTRACT_AND_RUN=1 APPIMAGETOOL="$RUNNER_TEMP/appimagetool" \
             desktop/packaging/linux/build_appimage.sh
+      - name: Smoke test AppImage entry point
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          expected="Transass $(PYTHONPATH=src/subtranslate python -c 'from _version import __version__; print(__version__)')"
+          actual="$(APPIMAGE_EXTRACT_AND_RUN=1 build/Transass-x86_64.AppImage --version)"
+          test "$actual" = "$expected"
+          extracted="$(mktemp -d "$RUNNER_TEMP/transass-appimage-smoke-XXXXXX")"
+          cd "$extracted"
+          "$GITHUB_WORKSPACE/build/Transass-x86_64.AppImage" --appimage-extract > extract.log
+          python "$GITHUB_WORKSPACE/desktop/tests/run_bundle_smoke.py" squashfs-root/usr/bin/Transass
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -90,36 +101,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $installer = Get-ChildItem -LiteralPath Output -Filter "Transass-Setup-*.exe" |
-            Select-Object -First 1
-          if ($null -eq $installer) {
-            throw "Instalador do Transass não foi gerado"
-          }
-          $installDir = Join-Path $env:RUNNER_TEMP "TransassInstalled"
-          $install = Start-Process -FilePath $installer.FullName -ArgumentList @(
-            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installDir"
-          ) -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            throw "Instalação silenciosa falhou com código $($install.ExitCode)"
-          }
-          python desktop/tests/run_bundle_smoke.py (Join-Path $installDir "Transass.exe")
-          $uninstaller = Join-Path $installDir "unins000.exe"
-          if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-            throw "Desinstalador não foi criado"
-          }
-          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @(
-            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
-          ) -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) {
-            throw "Desinstalação silenciosa falhou com código $($uninstall.ExitCode)"
-          }
-      - name: Upload bundle
+          $installers = @(Get-ChildItem -LiteralPath Output -Filter "Transass-Setup-*.exe")
+          if ($installers.Count -ne 1) { throw "Instalador da release não é único" }
+          ./desktop/tests/run_installer_smoke.ps1 -Installer $installers[0].FullName
+      - name: Finalize release files
+        shell: bash
+        run: |
+          mkdir -p build/release
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp Output/Transass-Setup-*.exe build/release/
+          fi
+          python desktop/packaging/generate_sbom.py build/release
+          mv build/release/sbom.cdx.json "build/release/sbom-${{ matrix.artifact }}.cdx.json"
+          python desktop/packaging/checksums.py build/release
+          mv build/release/SHA256SUMS "build/release/SHA256SUMS-${{ matrix.artifact }}.txt"
+      - name: Upload installers and release evidence
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            build/desktop
-            build/desktop/**/*.exe
-            build/Transass-x86_64.AppImage
             build/release
-            Output/*.exe
+          if-no-files-found: error
+          retention-days: 14

@@ -60,6 +60,8 @@ Status comprovado em 2026-09-29:
 
 ## Relatórios datados de diagnóstico e incidentes operacionais
 
+- [Auditoria e implementação 3.0.1 — segurança, validação e distribuição](reports/2026-09-30-audit-implementation-v3.0.1.md)
+
 Os registros históricos detalhados de execuções de episódios, incidentes com modelos,
 telemetria térmica e reconciliações de contêineres estão preservados em `docs/reports/`:
 
@@ -68,3 +70,4 @@ telemetria térmica e reconciliações de contêineres estão preservados em `do
 - [Shiki S01E10 — Incidente Candidate-Only e Isolamento de Staging](reports/2026-09-27-shiki-e10-candidate-only-incident.md)
 - [Shiki S01E13 — Resposta Incompleta Ollama e JSON estrito](reports/2026-09-28-shiki-e13-ollama-incomplete-response.md)
 - [Shiki S01E14 — Histórico de Tentativas e Reconciliações (r28 a r48)](reports/2026-09-28-shiki-e14-reconciliations-r28-to-r48.md)
+- [Full-Time Magister S02E02 — falso positivo de quebra de palavra e atualização após a fila](reports/2026-09-30-full-time-magister-s02e02-line-break-validation.md)

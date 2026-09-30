@@ -4,10 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transass"
-version = "3.0.0"
+version = "3.0.1"
 description = "Serviço de tradução de legendas de anime com pipeline canônico, durabilidade forense e motor de tradução escolhível."
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "Flask==3.1.3",
+    "Werkzeug==3.1.8",
+    "requests==2.34.2",
+    "pysubs2==1.8.1",
+    "jsonschema==4.10.3",
+    "psutil==7.0.0",
+    "gunicorn==23.0.0; sys_platform != 'win32'",
+]
 license = {text = "MIT"}
 authors = [{name = "Transass contributors"}]
 keywords = ["subtitles", "translation", "anime", "ass", "jellyfin", "ollama", "gemini"]
@@ -44,7 +53,7 @@ py-modules = [
     "production_v2_2_5_adapter", "production_v2_2_6_adapter",
     "production_v2_3_0_adapter", "production_v2_3_8_adapter",
     "queue_helpers", "runtime_config", "runtime_paths", "credential_store",
-    "state_migration", "diagnostics", "maintenance", "translation_memory",
+    "state_migration", "state_access", "diagnostics", "maintenance", "translation_memory",
     "transport_config_store", "transport_providers", "v233_styled_spans",
     "translation_quality",
     "v235_visual_glyph_program", "v236_durable_response_capture",
@@ -59,6 +68,7 @@ py-modules = [
     "v238_response_normalization", "v238_response_provider",
     "v238_semantic_style_ownership", "v238_source_payload",
     "web_audit_retranslation", "web_durable_provider", "web_execution_context",
+    "web_fallback_safety",
     "web_retranslation_runner",
     "ass_engine", "semantic_orchestrator", "effects_engine", "pipeline_v3",
     "v3_runtime",
@@ -75,6 +85,7 @@ py-modules = [
     "src/subtranslate/static/app.js",
     "src/subtranslate/static/glossary.css",
     "src/subtranslate/static/glossary.js",
+    "src/subtranslate/static/i18n.js",
     "src/subtranslate/static/onboarding.css",
     "src/subtranslate/static/onboarding.js",
     "src/subtranslate/static/review.css",

@@ -178,6 +178,21 @@ alterar somente o payload linguístico comprovadamente elegível.
 
 ### Implementação compartilhada
 
+Na linha 3.0.1, reparo e saída final usam a mesma validação de delimitadores:
+quantidade, sequência e papel de abertura/fechamento junto ao texto de cada
+evento. Uma falha remanescente bloqueia a candidata; não se retiram flags para
+transformar erro em sucesso. Citações que atravessam eventos conservam sua posse.
+
+A validação de override considera ordem e ancoragem, não apenas quantidade.
+Gradientes só redistribuem cores quando é possível reconstruir também os
+intervalos das outras tags; escopos ambíguos falham fechados. Placas compartilham
+tradução apenas quando pontuação, controles e texto são equivalentes.
+
+Títulos confirmados pelo acervo podem ser protegidos pelo caller. Nomes
+ingleses repetidos com contexto no meio de cláusulas podem conservar identidade;
+iniciais maiúsculas, sozinhas, não dão essa autorização. Essa evidência não
+obriga a deixar placas genéricas em inglês quando a tradução é válida.
+
 As regras básicas ficam em `src/subtranslate/ass_structure.py`. O V3 usa essa
 camada compartilhada para reconstruir o texto em torno das tags; adaptadores
 históricos também a reutilizam. O helper `replace_source_payload` é a rota

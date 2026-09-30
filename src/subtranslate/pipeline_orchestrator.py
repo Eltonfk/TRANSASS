@@ -177,6 +177,9 @@ def _call_full_adapter(plan_id: str, source: Path, output: Path, context: dict[s
             enable_visual_effects=bool(context.get("enable_visual_effects", True)),
             enable_karaoke=bool(context.get("enable_karaoke", True)),
             source_language=str(context.get("source_language") or "inglês"),
+            protected_names=tuple(context.get("protected_names") or ()) + (
+                str(context.get("series_title") or ""),
+            ),
         )
     if plan_id in {"v2_1_2", "v2_1_3"}:
         return function(source, output, glossary=glossary)

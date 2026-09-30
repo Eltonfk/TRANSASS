@@ -8,14 +8,19 @@ SQLite library, glossary and transport configuration are never targets.
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 import json
 import os
 import shutil
+import stat
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from state_access import StateAccessLease
 
 
 ACTIVE_JOB_STATES = {
@@ -74,6 +79,7 @@ class MaintenanceCandidate:
     size_bytes: int
     modified_at: str
     reason: str
+    identity: tuple[int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -138,9 +144,16 @@ def _load_state(state_dir: Path) -> dict[str, Any]:
     path = state_dir / "jobs.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError) as error:
+        raise RuntimeError("limpeza bloqueada: jobs.json ilegível ou inválido") from error
+    if (
+        not isinstance(payload, dict) or not isinstance(payload.get("jobs"), list)
+        or any(not isinstance(job, dict) for job in payload["jobs"])
+    ):
+        raise RuntimeError("limpeza bloqueada: jobs.json inválido")
+    return payload
 
 
 def _job_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -152,8 +165,7 @@ def _active_job_ids(payload: dict[str, Any]) -> tuple[str, ...]:
     active = []
     for job in _job_list(payload):
         if str(job.get("status", "")).upper() in ACTIVE_JOB_STATES:
-            if job.get("id") is not None:
-                active.append(str(job["id"]))
+            active.append(str(job.get("id") or "<unknown>"))
     return tuple(sorted(set(active)))
 
 
@@ -164,6 +176,12 @@ def _referenced_job_ids(payload: dict[str, Any]) -> set[str]:
     for job in _job_list(payload):
         if job.get("id") is not None:
             result.add(str(job["id"]))
+        run_id = str(job.get("v3_run_id") or job.get("id") or "")
+        if run_id:
+            result.add(hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:24])
+        for key in ("job_token", "run_id"):
+            if job.get(key):
+                result.add(str(job[key]))
     return result
 
 
@@ -175,11 +193,12 @@ def _candidate(kind: str, path: Path, reason: str) -> MaintenanceCandidate:
         size_bytes=_size(path),
         modified_at=_timestamp(stat.st_mtime),
         reason=reason,
+        identity=(stat.st_dev, stat.st_ino, stat.st_mtime_ns),
     )
 
 
 def _direct_children(path: Path, *, directories: bool | None = None) -> Iterable[Path]:
-    if not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
         return ()
     try:
         children = tuple(path.iterdir())
@@ -207,14 +226,14 @@ def scan_state(state_dir: str | Path, policy: RetentionPolicy | None = None) -> 
 
     for pattern in TRANSIENT_NAMES:
         for path in root.glob(pattern):
-            if path.is_file() and _older_than(path, current - policy.transient_hours * 3600):
+            if not path.is_symlink() and path.is_file() and _older_than(path, current - policy.transient_hours * 3600):
                 candidates.append(_candidate("transient", path, "arquivo temporário de persistência antigo"))
 
-    runs_root = root / "v238-runs"
     run_cutoff = current - policy.run_days * 86400
-    for path in _direct_children(runs_root, directories=True):
-        if _older_than(path, run_cutoff) and path.name not in referenced_ids and path.name not in active_ids:
-            candidates.append(_candidate("run", path, f"run sem referência com mais de {policy.run_days} dias"))
+    for runs_name in ("v238-runs", "v3-runs"):
+        for path in _direct_children(root / runs_name, directories=True):
+            if _older_than(path, run_cutoff) and path.name not in referenced_ids:
+                candidates.append(_candidate("run", path, f"run sem referência com mais de {policy.run_days} dias"))
 
     staging_root = root / "staging"
     staging_cutoff = current - policy.staging_days * 86400
@@ -231,7 +250,7 @@ def scan_state(state_dir: str | Path, policy: RetentionPolicy | None = None) -> 
         reverse=True,
     )
     for path in ledger_jobs[policy.failure_ledger_jobs:]:
-        if path.name not in active_ids:
+        if path.name not in referenced_ids:
             candidates.append(_candidate("failure-ledger", path, f"ledger além do limite de {policy.failure_ledger_jobs} jobs"))
 
     backups = sorted(
@@ -258,32 +277,99 @@ def scan_state(state_dir: str | Path, policy: RetentionPolicy | None = None) -> 
 def apply_report(report: MaintenanceReport) -> int:
     """Apply a previously generated report after a final idle-state check.
 
-    The caller must scan immediately before applying.  The guard refuses to
-    mutate state while a job is active and revalidates every target beneath
-    the state directory to avoid path traversal or stale-target surprises.
+    Requires a stopped service, a fresh durable jobs check and unchanged
+    candidates. Directory deletion is supported only with symlink-safe fd APIs.
     """
 
     if report.service_busy:
         raise RuntimeError("limpeza bloqueada: há tradução em execução")
-    root = Path(report.state_dir).resolve()
-    removed = 0
-    allowed_kinds = {"transient", "run", "staging", "failure-ledger", "config-backup"}
-    for item in report.candidates:
-        if item.kind not in allowed_kinds:
-            raise ValueError(f"tipo de candidato não permitido: {item.kind}")
-        target = Path(item.path).resolve()
+    root = Path(report.state_dir).absolute()
+    _reject_links(root)
+    with StateAccessLease(root):
+        payload = _load_state(root)
+        if _active_job_ids(payload):
+            raise RuntimeError("limpeza bloqueada: há tradução em execução")
+        referenced = _referenced_job_ids(payload)
+        targets: list[tuple[MaintenanceCandidate, Path]] = []
+        for item in report.candidates:
+            target = Path(item.path).absolute()
+            try:
+                relative = target.relative_to(root)
+            except ValueError as error:
+                raise ValueError(f"alvo fora do state dir: {target}") from error
+            if not _allowed_target(item.kind, relative):
+                raise ValueError(f"alvo incompatível com categoria {item.kind}: {target}")
+            _reject_links(target)
+            if not target.exists():
+                continue
+            if item.identity is None or _identity(target) != item.identity:
+                raise RuntimeError(f"alvo alterado desde o relatório: {target}")
+            if target.name in referenced or any(target.name in str(job) for job in _job_list(payload)):
+                raise RuntimeError(f"alvo referenciado por job: {target}")
+            if target.is_dir() and not shutil.rmtree.avoids_symlink_attacks:
+                raise RuntimeError("remoção de diretórios indisponível neste sistema; use somente relatório")
+            targets.append((item, target))
+        removed = 0
+        for item, target in targets:
+            # Anchor every parent with O_NOFOLLOW, including the state root.
+            parent_fd = _open_directory_no_links(target.parent)
+            try:
+                stat = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (stat.st_dev, stat.st_ino, stat.st_mtime_ns) != item.identity:
+                    raise RuntimeError(f"alvo alterado durante manutenção: {target}")
+                if target.is_dir():
+                    shutil.rmtree(target.name, dir_fd=parent_fd)
+                else:
+                    os.unlink(target.name, dir_fd=parent_fd)
+                removed += 1
+            finally:
+                os.close(parent_fd)
+        return removed
+
+
+def _identity(path: Path) -> tuple[int, int, int]:
+    stat = path.lstat()
+    return stat.st_dev, stat.st_ino, stat.st_mtime_ns
+
+
+def _reject_links(path: Path) -> None:
+    for part in (path, *path.parents):
         try:
-            target.relative_to(root)
-        except ValueError as error:
-            raise ValueError(f"alvo fora do state dir: {target}") from error
-        if not target.exists() or target.is_symlink():
+            attributes = getattr(part.lstat(), "st_file_attributes", 0)
+        except FileNotFoundError:
             continue
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
-        removed += 1
-    return removed
+        if part.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            raise ValueError(f"link simbólico/junction não permitido: {part}")
+
+
+def _allowed_target(kind: str, relative: Path) -> bool:
+    parts = relative.parts
+    if kind == "run":
+        return len(parts) == 2 and parts[0] in {"v238-runs", "v3-runs"}
+    if kind == "staging":
+        return len(parts) == 2 and parts[0] == "staging"
+    if kind == "failure-ledger":
+        return len(parts) == 3 and parts[:2] == ("failure-ledger", "jobs")
+    if kind == "transient":
+        return len(parts) == 1 and any(fnmatch.fnmatch(parts[0], p) for p in TRANSIENT_NAMES)
+    if kind == "config-backup":
+        return len(parts) == 1 and parts[0].startswith("transport_config.json.bak-")
+    return False
+
+
+def _open_directory_no_links(path: Path) -> int:
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError("remoção indisponível neste sistema; use somente relatório")
+    fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in path.parts[1:]:
+            next_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:

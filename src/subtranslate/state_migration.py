@@ -8,6 +8,10 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from state_access import StateAccessLease
+
+STATE_LOCK_NAME = ".state-access.lock"
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -27,7 +31,9 @@ def migrate_state(legacy_root: Path, target_root: Path, backup_root: Path | None
     if not legacy_root.is_dir() or legacy_root.resolve() == target_root.resolve():
         return {"migrated": False, "reason": "legacy_missing_or_same_root", "files": []}
     target_root.mkdir(parents=True, exist_ok=True)
-    entries = [p for p in legacy_root.rglob("*") if p.is_file()]
+    # A process lock is coordination, not user state. Never copy its inode or
+    # treat the permanent lock left by a previous launch as a migration.
+    entries = [p for p in legacy_root.rglob("*") if p.is_file() and p.name != STATE_LOCK_NAME]
     if not entries:
         return {"migrated": False, "reason": "legacy_empty", "files": []}
     backup_base = Path(backup_root or target_root.parent / "migration-backups")
@@ -58,7 +64,13 @@ def migrate_state(legacy_root: Path, target_root: Path, backup_root: Path | None
 def migrate_from_candidates(project_root: Path, target_root: Path) -> dict[str, object]:
     """Use the old repository ``deploy/state`` location when target is empty."""
     target_root = Path(target_root)
-    if any(target_root.iterdir()) if target_root.is_dir() else False:
+    if any(p.name != STATE_LOCK_NAME for p in target_root.iterdir()) if target_root.is_dir() else False:
         return {"migrated": False, "reason": "target_not_empty", "files": []}
     legacy = Path(project_root) / "deploy" / "state"
-    return migrate_state(legacy, target_root)
+    if not legacy.is_dir():
+        return {"migrated": False, "reason": "legacy_missing_or_same_root", "files": []}
+    with StateAccessLease(target_root):
+        # Recheck under the same OS lease used by the service and cleanup.
+        if any(p.name != STATE_LOCK_NAME for p in target_root.iterdir()):
+            return {"migrated": False, "reason": "target_not_empty", "files": []}
+        return migrate_state(legacy, target_root)

@@ -67,7 +67,7 @@ def main() -> int:
     try:
         from _version import __version__  # type: ignore[import-not-found]
     except (ImportError, AttributeError):
-        __version__ = "2.5.2"
+        __version__ = "3.0.1"
     application.setApplicationVersion(str(__version__))
     icon_candidates = []
     meipass = getattr(sys, "_MEIPASS", None)

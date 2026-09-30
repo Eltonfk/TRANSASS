@@ -53,7 +53,9 @@ def test_distribution_manifests_preserve_user_data():
         ROOT / "desktop/packaging/linux/io.github.Eltonfk.Transass.desktop"
     ).read_text(encoding="utf-8")
     assert "PrivilegesRequired=lowest" in installer
-    assert "{localappdata}\\Transass" in installer
+    assert "DefaultDirName={localappdata}\\Programs\\Transass" in installer
+    assert "UsePreviousAppDir=no" in installer
+    assert "[UninstallDelete]" not in installer
     assert "OutputDir=..\\..\\..\\Output" in installer
     assert "Exec=Transass" in linux_entry
     assert "Icon=transass" in linux_entry
@@ -144,4 +146,5 @@ def test_frozen_launcher_supports_version_probe_without_qt():
         text=True,
         env=environment,
     )
-    assert result.stdout.strip() == "Transass 3.0.0"
+    from _version import __version__
+    assert result.stdout.strip() == f"Transass {__version__}"

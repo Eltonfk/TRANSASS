@@ -20,6 +20,8 @@ from ass_engine import (
     is_drawing_event,
     visible_text,
     TAG_RE,
+    CONTROL_RE,
+    inline_tag_anchor_signature,
 )
 
 # ---------------------------------------------------------------------------
@@ -121,6 +123,65 @@ def apply_glyph_color_gradient(target_text: str, colors: list[str], prefix_tags:
     return "".join(parts)
 
 
+def rebuild_source_glyph_gradient(source: str, target: str) -> str | None:
+    """Project static source colors without hoisting other override commands.
+
+    Non-color blocks keep proportional grapheme anchors. If a non-empty
+    source interval would collapse, or reset/animated color scope is involved,
+    the transformation has no proven safe reconstruction and must fail closed.
+    """
+    colors = extract_primary_colors(source)
+    source_visible = visible_text(source)
+    source_graphemes = grapheme_clusters(source_visible)
+    if not (
+        re.search(r"[\wÀ-ÿ]\s*\{", source)
+        and len(colors) >= 2
+        and len(colors) >= len(source_graphemes) - 2
+    ):
+        return None
+    target_graphemes = grapheme_clusters(target)
+    if (
+        not source_graphemes or not target_graphemes
+        or CONTROL_RE.search(source) or CONTROL_RE.search(target)
+        or "\n" in source_visible or "\n" in target
+        or re.search(r"\\(?:t\(|r)", "".join(TAG_RE.findall(source)))
+    ):
+        raise ValueError("ASS_INLINE_TAG_ANCHOR_FAILURE:UNSUPPORTED_GRADIENT_SCOPE")
+
+    source_offsets = {0: 0}
+    offset = 0
+    for index, grapheme in enumerate(source_graphemes, 1):
+        offset += len(grapheme)
+        source_offsets[offset] = index
+    anchors: dict[int, list[str]] = {}
+    owner_by_target = {0: 0, len(target_graphemes): len(source_graphemes)}
+    for match, (_tag, source_offset) in zip(TAG_RE.finditer(source), inline_tag_anchor_signature(source)):
+        non_color = clean_residual_override_tags(PRIMARY_COLOR_RE.sub("", match.group(0)))
+        if not non_color:
+            continue
+        if source_offset not in source_offsets:
+            raise ValueError("ASS_INLINE_TAG_ANCHOR_FAILURE:GRAPHEME_SPLIT")
+        source_anchor = source_offsets[source_offset]
+        target_anchor = round(source_anchor * len(target_graphemes) / len(source_graphemes))
+        previous_owner = owner_by_target.get(target_anchor)
+        if previous_owner is not None and previous_owner != source_anchor:
+            raise ValueError("ASS_INLINE_TAG_ANCHOR_FAILURE:COLLAPSED_GRADIENT_SCOPE")
+        owner_by_target[target_anchor] = source_anchor
+        anchors.setdefault(target_anchor, []).append(non_color)
+
+    rendered = apply_glyph_color_gradient(target, colors)
+    color_blocks = list(TAG_RE.finditer(rendered))
+    if len(color_blocks) != len(target_graphemes):
+        raise ValueError("ASS_INLINE_TAG_ANCHOR_FAILURE:GRADIENT_RECONSTRUCTION")
+    parts = []
+    for index, block in enumerate(color_blocks):
+        parts.extend(anchors.get(index, ()))
+        end = color_blocks[index + 1].start() if index + 1 < len(color_blocks) else len(rendered)
+        parts.append(rendered[block.start():end])
+    parts.extend(anchors.get(len(color_blocks), ()))
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Unified Post-Processing Engine
 # ---------------------------------------------------------------------------
@@ -166,24 +227,18 @@ class InMemoryEffectsEngine:
 
             # 3. Visual glyph gradient handling
             if self.enable_visual_glyphs and orig_node:
-                source_colors = extract_primary_colors(orig_text)
-                # Dense per-character styling indicator
-                has_interspersed_tags = bool(re.search(r"[\wÀ-ÿ]\s*\{", orig_text))
-                if (
-                    has_interspersed_tags
-                    and len(source_colors) >= 2
-                    and len(source_colors) >= len(grapheme_clusters(orig_node.visible)) - 2
-                ):
+                if node.visible == orig_node.visible:
+                    # Identity needs no projection and preserves even complex
+                    # animated/reset scopes exactly under source authority.
+                    node.text = orig_text
+                else:
                     try:
-                        clean_target = node.visible
-                        base_tags = clean_residual_override_tags(
-                            PRIMARY_COLOR_RE.sub("", "".join(TAG_RE.findall(orig_text)))
-                        )
-                        node.text = apply_glyph_color_gradient(clean_target, source_colors, prefix_tags=base_tags)
+                        gradient = rebuild_source_glyph_gradient(orig_text, node.visible)
+                    except Exception as exc:
+                        raise ValueError("ASS_INLINE_TAG_ANCHOR_FAILURE:GRADIENT_RECONSTRUCTION") from exc
+                    if gradient is not None:
+                        node.text = gradient
                         stats["visual_glyphs_applied"] += 1
-                    except Exception:
-                        # Fallback seguro para o texto limpo com tags base (proven safe in Ep 15)
-                        stats["visual_glyphs_fallback"] += 1
 
             # 4. Global override tag cleanup (remove empty or asterisk residual tags)
             node.text = clean_residual_override_tags(node.text)

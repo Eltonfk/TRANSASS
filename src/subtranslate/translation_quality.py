@@ -13,7 +13,8 @@ from collections.abc import Iterable
 import unicodedata
 
 from ass_engine import (
-    prose_delimiter_token_counts,
+    prose_delimiter_flags,
+    prose_delimiter_ownership_sequence,
     prose_delimiter_token_sequence,
     visible_text,
 )
@@ -35,9 +36,11 @@ def remove_unowned_terminal_ascii_quote_closures(source: str, translated: str) -
     """
     value = str(translated or "")
     source_tokens = prose_delimiter_token_sequence(str(source or ""))
+    source_ownership = prose_delimiter_ownership_sequence(source)
     translated_tokens = prose_delimiter_token_sequence(value)
     if (
         not source_tokens
+        or source_ownership[-1][1] != "open"
         or source_tokens.count('"') % 2 == 0
         or len(translated_tokens) <= len(source_tokens)
         or translated_tokens[:len(source_tokens)] != source_tokens
@@ -58,7 +61,7 @@ def remove_unowned_terminal_ascii_quote_closures(source: str, translated: str) -
         + remaining_quotes
         + trailing.group("suffix")
     )
-    return corrected if prose_delimiter_token_sequence(corrected) == source_tokens else value
+    return corrected if prose_delimiter_ownership_sequence(corrected) == source_ownership else value
 
 
 def restore_source_enclosing_ascii_quotes(source: str, translated: str) -> str:
@@ -599,7 +602,7 @@ def extract_repeated_names(source_texts: Iterable[str], source_language: str | N
     return tuple(
         spellings[key]
         for key in sorted(spellings)
-        if occurrences[key] >= 2 and (mid_clause[key] >= 1 or len(texts) < 20)
+        if occurrences[key] >= 2 and (mid_clause[key] >= 1 or (canonical == "french" and len(texts) < 20))
     )
 
 
@@ -727,10 +730,7 @@ def translation_quality_flags(
     output_visible = visible_text(translated)
     flags: list[str] = []
 
-    if prose_delimiter_token_counts(source) != prose_delimiter_token_counts(translated):
-        flags.append("ASS_DELIMITER_TOKEN_COUNT_MISMATCH")
-    if prose_delimiter_token_sequence(source) != prose_delimiter_token_sequence(translated):
-        flags.append("ASS_DELIMITER_SEQUENCE_MISMATCH")
+    flags.extend(prose_delimiter_flags(source, translated))
 
     if _is_pt_br(target_language):
         for article_match in _PTBR_ARTICLE_NOUN.finditer(output_visible):

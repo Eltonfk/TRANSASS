@@ -26,3 +26,28 @@ def test_durability_file_receives_runtime_weight(tmp_path: Path) -> None:
     path.write_text("pass\n", encoding="utf-8")
 
     assert _test_file_weight(path) == 600_000
+
+
+def test_offline_runner_executes_pytest_functions_and_propagates_failure(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    test = tmp_path / "test_gate_failure.py"
+    test.write_text("def test_function_is_collected():\n    assert False, 'fixture failure'\n", encoding="utf-8")
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run([sys.executable, str(root / "scripts/run_offline_tests.py"), str(test)],
+                            cwd=root, capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    assert "1 failed" in result.stdout and "fixture failure" in result.stdout
+
+
+def test_offline_runner_does_not_report_pass_for_zero_tests(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    test = tmp_path / "test_empty.py"
+    test.write_text("# no test functions\n", encoding="utf-8")
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run([sys.executable, str(root / "scripts/run_offline_tests.py"), str(test)],
+                            cwd=root, capture_output=True, text=True, check=False)
+    assert result.returncode == 5

@@ -8,6 +8,7 @@ controls, and presentation.
 
 from __future__ import annotations
 
+import atexit
 import html
 import hashlib
 import json
@@ -23,6 +24,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +53,8 @@ from runtime_config import RuntimeConfig, execution_identity, load_project_env
 from runtime_paths import configure_binary_path, resource_root
 from gpu_thermal_guard import GpuThermalGuard, ThermalGuardConfig, ThermalSnapshot
 from failure_ledger import retain_staging
+from state_access import StateAccessLease
+from web_fallback_safety import safe_fallback_eligible
 from web_audit_retranslation import (
     _canonical_language_code,
     _sidecar_candidates,
@@ -88,6 +92,14 @@ STATE_FILE = STATE_DIR / "jobs.json"
 AUDIT_FILE = STATE_DIR / "audits.json"
 TRANSPORT_CONFIG_PATH = RUNTIME_CONFIG.transport_config
 LIBRARY_ROOT = RUNTIME_CONFIG.library_root
+# Import is the Flask/Gunicorn/Desktop service initialization boundary. Keep
+# one lease for the process, including idle queues, before Library/state writes.
+_existing_service_lease = globals().get("_service_state_lease")
+if _existing_service_lease is not None and _existing_service_lease.state_dir.resolve() != STATE_DIR.resolve():
+    raise RuntimeError("SERVICE_STATE_ROOT_CHANGE_REQUIRES_PROCESS_RESTART")
+_service_state_lease = (_existing_service_lease or StateAccessLease(STATE_DIR)).acquire()
+if _existing_service_lease is None:
+    atexit.register(_service_state_lease.release)
 _library_roots = [Path(item.strip()) for item in os.environ.get("ANIME_LIBRARY_ROOTS", str(BASE_LIBRARY)).split(os.pathsep) if item.strip()]
 subtitle_library = AnimeSubtitleLibrary(LIBRARY_ROOT, media_roots=_library_roots)
 human_feedback = HumanFeedbackService(subtitle_library)
@@ -1042,7 +1054,8 @@ def _public_job(job: dict | None) -> dict | None:
             "operation", "source_record_id", "old_record_id", "bulk_fail_fast",
             "not_started_reason", "new_record_id", "audit", "diagnostic",
             "candidate_output_name", "candidate_output_sha256", "candidate_download_url",
-            "thermal_guard",
+            "thermal_guard", "published", "library_record_created", "cancel_requested",
+            "active_side_effect",
         )
         if key in job
     }
@@ -1277,6 +1290,36 @@ def _queue_counts() -> dict:
 def _set_job(job: dict, **values) -> None:
     job.update(values)
     _persist_locked()
+
+
+class JobCancellationRequested(RuntimeError):
+    """A final side effect was refused at its coordinated cancellation gate."""
+
+
+def _raise_if_job_cancelled(job: dict) -> None:
+    """Called with state_lock held; stop and the gate share one decision."""
+    if state.get("thermal_stop_requested") or job.get("child_thermal_trip"):
+        raise JobCancellationRequested("V3_THERMAL_GUARD_TRIPPED")
+    if job.get("cancel_requested") or state.get("cancel_requested") or state.get("stop_requested"):
+        raise JobCancellationRequested("Job interrompido pelo usuário")
+
+
+@contextmanager
+def _job_side_effect(job: dict, phase: str):
+    """Stop can refuse the next operation, but cannot undo one already begun."""
+    with state_lock:
+        _raise_if_job_cancelled(job)
+        job["active_side_effect"] = phase
+        try:
+            _persist_locked()
+        except Exception:
+            job.pop("active_side_effect", None)
+            raise
+    try:
+        yield
+    finally:
+        with state_lock:
+            job.pop("active_side_effect", None)
 
 
 def _summary_level(line: str) -> str:
@@ -1536,16 +1579,17 @@ def _thermal_guard_for_job(job: dict, *, force: bool = False) -> GpuThermalGuard
 def _v3_thermal_gate_for_provider(
     provider_name: str,
     guard: GpuThermalGuard | None,
+    job: dict | None = None,
 ):
     """Apply GPU cooling only to local inference; always honor user cancel."""
     uses_local_gpu = str(provider_name or "").casefold() == "ollama"
 
     def thermal_gate() -> bool:
-        if state.get("cancel_requested"):
+        if (job or {}).get("cancel_requested") or state.get("cancel_requested"):
             return True
         if uses_local_gpu and guard is not None and not guard.wait_for_cooling():
             return True
-        return bool(state.get("cancel_requested"))
+        return bool((job or {}).get("cancel_requested") or state.get("cancel_requested"))
 
     return thermal_gate
 
@@ -2244,7 +2288,9 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
                 result = execute_pipeline_plan("v2_3_8", staged_source, staged_output, ctx)
                 break
             except Exception as exc:
-                if _is_transport_error(exc):
+                if safe_fallback_eligible(
+                    exc, response_provider=ctx.get("response_provider"), output_path=staged_output,
+                ):
                     transport_error = exc
                     continue
                 raise
@@ -2278,7 +2324,7 @@ def _run_episode_v238(job: dict, thermal_guard: GpuThermalGuard | None = None) -
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
                 job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
-            elif state.get("cancel_requested"):
+            elif job.get("cancel_requested") or state.get("cancel_requested"):
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
                 job["reason"] = "stopped_by_user"
@@ -2528,7 +2574,7 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                 progress_callback=progress_callback,
             )
         else:
-            from v3_runtime import create_v3_live_transport, is_v3_transport_error, v3_batch_size
+            from v3_runtime import create_v3_live_transport, v3_batch_size
 
             attempts = [("primary", primary_section)]
             if configured_fallback:
@@ -2554,7 +2600,7 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                     if attempt_guard is not None:
                         local_thermal_guards.append(attempt_guard)
 
-                thermal_gate = _v3_thermal_gate_for_provider(provider_name, attempt_guard)
+                thermal_gate = _v3_thermal_gate_for_provider(provider_name, attempt_guard, job=job)
 
                 if provider_name in API_KEY_PROVIDERS and not str(
                     section.get("api_key")
@@ -2602,6 +2648,7 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                         target_batch_size=batch_size,
                         source_language=source_language,
                         progress_callback=progress_callback,
+                        protected_names=(str(v3_library_episode.get("series_title") or ""),),
                     )
                     provider_metrics = dict(response_provider.metrics)
                     budget = response_provider.operation_budget
@@ -2615,9 +2662,9 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                 except Exception as exc:
                     if (
                         attempt_index + 1 < len(attempts)
-                        and not staged_output.exists()
-                        and response_provider.metrics.get("physical_client_calls", 0) == 0
-                        and is_v3_transport_error(exc)
+                        and safe_fallback_eligible(
+                            exc, response_provider=response_provider, output_path=staged_output,
+                        )
                     ):
                         transport_error = exc
                         fallback_used = True
@@ -2664,7 +2711,7 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
                 job["stage"] = "FAILED"
                 job["reason"] = "gpu_thermal_guard"
                 job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
-            elif state.get("cancel_requested"):
+            elif job.get("cancel_requested") or state.get("cancel_requested"):
                 job["status"] = "CANCELLED"
                 job["stage"] = "STOPPED"
                 job["reason"] = "stopped_by_user"
@@ -2766,16 +2813,11 @@ def _run_episode_v3(job: dict, thermal_guard: GpuThermalGuard | None = None) -> 
             _persist_locked()
     except Exception as error:
         with state_lock:
-            if state.get("thermal_stop_requested"):
-                job["status"] = "FAILED"
-                job["stage"] = "FAILED"
-                job["reason"] = "gpu_thermal_guard"
-                job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
-            else:
-                job["status"] = "FAILED"
-                job["stage"] = "FAILED"
-                job["reason"] = "translator_exception"
-                job["error"] = str(error) if error is not None else "exceção sem mensagem"
+            job.update(_v3_failure_state(
+                error, thermal_stop=bool(state.get("thermal_stop_requested")),
+                cancel_requested=bool(job.get("cancel_requested") or state.get("cancel_requested")),
+                thermal_error=job.get("thermal_error"),
+            ))
             job["finished_at"] = _now()
             _append_log(f"Falhou (V3): {job['name']} — {job['error']}", level="error", job_id=job["id"])
             _persist_locked()
@@ -3076,8 +3118,9 @@ def _run_retranslation_episode(job: dict) -> None:
     proc = None
     summary = None
     try:
-        proc = subprocess.Popen(command, cwd=str(RUNTIME_ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         with state_lock:
+            _raise_if_job_cancelled(job)
+            proc = subprocess.Popen(command, cwd=str(RUNTIME_ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
             state["process"] = proc
             job["status"] = "TRANSLATING"
             job["stage"] = "TRANSLATING"
@@ -3119,6 +3162,7 @@ def _run_retranslation_episode(job: dict) -> None:
         return_code = proc.wait()
         with state_lock:
             state["process"] = None
+            _raise_if_job_cancelled(job)
         if return_code != 0 or not output.is_file():
             # V2.2.4 emits a persisted failure summary before it exits.  Keep
             # that structured evidence on the exception path instead of
@@ -3154,6 +3198,7 @@ def _run_retranslation_episode(job: dict) -> None:
             # staged artifact available for web confirmation, but it must not
             # create a Library record or publish a sidecar.
             with state_lock:
+                _raise_if_job_cancelled(job)
                 job["status"] = "COMPLETED"
                 job["stage"] = "CANDIDATE_READY"
                 job["reason"] = "candidate_only_no_library_no_publication"
@@ -3180,17 +3225,18 @@ def _run_retranslation_episode(job: dict) -> None:
             if stage_path.parent != output.parent.resolve():
                 raise LineageContractError("retranslation stage handle escaped staging root")
             source_record = subtitle_library.get_record(source_id)
-            lineage_result = archive_v230_records(
-                subtitle_library,
-                source_record=source_record,
-                stage_artifact=stage_path,
-                final_output=output,
-                stage_summary=summary.get("stages", [{}])[0].get("result", {}) if isinstance(summary, dict) and summary.get("stages") else {},
-                final_summary=summary,
-                expected_stage_sha256=summary.get("stage_artifact_sha256") if isinstance(summary, dict) else None,
-                job_id=job["id"], model=_model(), publish=False,
-                retranslated_from=int(old_id) if old_id and int(old_id) != source_id else None,
-            )
+            with _job_side_effect(job, "ARCHIVING_WITH_LINEAGE"):
+                lineage_result = archive_v230_records(
+                    subtitle_library,
+                    source_record=source_record,
+                    stage_artifact=stage_path,
+                    final_output=output,
+                    stage_summary=summary.get("stages", [{}])[0].get("result", {}) if isinstance(summary, dict) and summary.get("stages") else {},
+                    final_summary=summary,
+                    expected_stage_sha256=summary.get("stage_artifact_sha256") if isinstance(summary, dict) else None,
+                    job_id=job["id"], model=_model(), publish=False,
+                    retranslated_from=int(old_id) if old_id and int(old_id) != source_id else None,
+                )
             new_record = lineage_result["final_record"]
         else:
             source_record = subtitle_library.get_record(source_id)
@@ -3201,22 +3247,30 @@ def _run_retranslation_episode(job: dict) -> None:
                 source_language_code = _canonical_language_code(
                     job.get("source_language") or _global_source_language()
                 )
-            new_record = subtitle_library.ingest_file(
-                output, episode_id=int(job["episode_id"]), language="pt-BR", source_kind="TRANSLATED",
-                source_language=source_language_code, original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
-                job_id=job["id"], pipeline_version=effective_pipeline, model=_model(),
-                validation_status="VALIDATED", events_total=summary.get("events") if isinstance(summary, dict) else audit.get("output_events"),
-                preferred=False, review_status="GENERATED", created_by="web-retranslation",
-                notes="Retradução solicitada pela camada web; publicação separada.", require_authorized_path=False,
-            )
-            subtitle_library.add_lineage(int(new_record["id"]), source_id, "TRANSLATED_FROM")
+            with _job_side_effect(job, "ARCHIVING"):
+                new_record = subtitle_library.ingest_file(
+                    output, episode_id=int(job["episode_id"]), language="pt-BR", source_kind="TRANSLATED",
+                    source_language=source_language_code, original_filename=f"{job.get('name', 'subtitle')}.pt-BR.ass",
+                    job_id=job["id"], pipeline_version=effective_pipeline, model=_model(),
+                    validation_status="VALIDATED", events_total=summary.get("events") if isinstance(summary, dict) else audit.get("output_events"),
+                    preferred=False, review_status="GENERATED", created_by="web-retranslation",
+                    notes="Retradução solicitada pela camada web; publicação separada.", require_authorized_path=False,
+                )
+                with state_lock:
+                    job["new_record_id"] = int(new_record["id"])
+                    job["library_record_created"] = True
+                    _persist_locked()
+            with _job_side_effect(job, "LINEAGE"):
+                subtitle_library.add_lineage(int(new_record["id"]), source_id, "TRANSLATED_FROM")
             if old_id and int(old_id) != source_id:
-                subtitle_library.add_lineage(int(new_record["id"]), int(old_id), "RETRANSLATED_FROM")
+                with _job_side_effect(job, "LINEAGE"):
+                    subtitle_library.add_lineage(int(new_record["id"]), int(old_id), "RETRANSLATED_FROM")
         with state_lock:
-            job["status"] = "COMPLETED"
-            job["stage"] = "COMPLETED"
+            job["status"] = "PUBLISHING"
+            job["stage"] = "PUBLISHING"
             job["reason"] = "library_record_created_no_publication"
             job["new_record_id"] = int(new_record["id"])
+            job["library_record_created"] = True
             job["published"] = False
             job["audit"] = {
                 "status": audit.get("status"),
@@ -3225,8 +3279,7 @@ def _run_retranslation_episode(job: dict) -> None:
                 "review_flags": audit.get("review_flags", []),
                 "eligible_for_archive": True,
             }
-            job["finished_at"] = _now()
-            _append_log(f"Retradução concluída; nova versão arquivada: {job.get('name', '')}", level="summary", job_id=job["id"])
+            _append_log(f"Nova versão arquivada: {job.get('name', '')}", level="summary", job_id=job["id"])
             _persist_locked()
         # Publicação é separada do arquivamento. Delegar ao contrato da Library
         # para resolver o caminho pelo episódio, publicar sem sobrescrever e
@@ -3234,17 +3287,22 @@ def _run_retranslation_episode(job: dict) -> None:
         # temporária em staging, não o caminho do vídeo.
         try:
             allow_replace = bool(job.get("force_current") or job.get("confirm_replace"))
-            publication = subtitle_library.publish(int(new_record["id"]), allow_replace=allow_replace)
+            with _job_side_effect(job, "PUBLISHING"):
+                publication = subtitle_library.publish(int(new_record["id"]), allow_replace=allow_replace)
             if publication.get("status") != "PUBLISHED":
                 raise LibraryError("Library não confirmou a publicação do registro")
             with state_lock:
                 job["published"] = True
                 job["reason"] = "library_record_created_and_published"
+                if job.get("cancel_requested"):
+                    job["reason"] = "publication_completed_after_stop_request"
                 _append_log(
                     f"Publicado: {publication.get('target_relative_path') or job.get('name', '')}",
                     level="summary", job_id=job["id"],
                 )
                 _persist_locked()
+        except JobCancellationRequested:
+            raise
         except PublicationConflict as publish_error:
             with state_lock:
                 job["published"] = False
@@ -3257,6 +3315,11 @@ def _run_retranslation_episode(job: dict) -> None:
                 job["reason"] = "library_record_created_no_publication"
                 job["error"] = f"Falha ao publicar: {publish_error}"
                 _persist_locked()
+        with state_lock:
+            job["status"] = "COMPLETED"
+            job["stage"] = "COMPLETED"
+            job["finished_at"] = _now()
+            _persist_locked()
     except Exception as error:
         failure_payload = {}
         try:
@@ -3303,9 +3366,10 @@ def _run_retranslation_episode(job: dict) -> None:
                 job["reason"] = "gpu_thermal_guard"
                 job["error"] = job.get("thermal_error") or "GPU atingiu o limite térmico; job interrompido preventivamente"
             else:
-                job["status"] = "CANCELLED" if state["stop_requested"] else "FAILED"
-                job["stage"] = "STOPPED" if state["stop_requested"] else "FAILED"
-                job["reason"] = "retranslation_failed"
+                cancelled = bool(job.get("cancel_requested") or state.get("stop_requested") or state.get("cancel_requested"))
+                job["status"] = "CANCELLED" if cancelled else "FAILED"
+                job["stage"] = "STOPPED" if cancelled else "FAILED"
+                job["reason"] = "stopped_by_user" if cancelled else "retranslation_failed"
                 job["error"] = str(error)
             if ledger_dir:
                 job["failure_ledger_dir"] = str(ledger_dir)
@@ -4383,24 +4447,42 @@ def stop():
     with state_lock:
         active = state.get("process")
         waiting = [job for job in state["jobs"] if job.get("session_id") == state.get("session_id") and job.get("status") == "WAITING"]
-        if not active and not waiting and not state["running"]:
+        current = next((job for job in state["jobs"] if job.get("id") == state.get("current_job_id")), None)
+        inflight = [job for job in state["jobs"] if job.get("session_id") == state.get("session_id") and job.get("status") in {"STARTING", "TRANSLATING", "VALIDATING", "PUBLISHING"}]
+        worker = state.get("worker")
+        worker_live = bool(worker and worker.is_alive())
+        if not active and not waiting and not inflight and not state["running"] and not worker_live:
             return jsonify({"error": "nenhuma fila ativa"}), 409
         state["stop_requested"] = True
         state["cancel_requested"] = True  # M4: flag cooperativa para jobs in-process
         state["pause_requested"] = False
         state["stopped_by_user"] = True
+        for job in inflight:
+            job["cancel_requested"] = True
         for job in waiting:
+            job["cancel_requested"] = True
             job["status"] = "CANCELLED"
             job["reason"] = "stopped_by_user"
             job["error"] = "Fila parada pelo usuário"
             job["finished_at"] = _now()
         if active:
             _send_process_group_signal(active, signal.SIGTERM)
-        else:
+        elif not inflight and not worker_live:
             state["running"] = False
         _append_log("Parando fila", level="summary")
         _persist_locked()
-    return jsonify({"ok": True, "action": "stopping" if active else "stopped"})
+        operation = (current or {}).get("active_side_effect")
+        response = {
+            "ok": True, "action": "stopping" if active or inflight or worker_live else "stopped",
+            "in_progress_operation": operation,
+            "cancellation_deferred": bool(operation),
+            "current_job_published": bool((current or {}).get("published")),
+        }
+        if operation:
+            response["message"] = "A operação atual já começou e pode concluir; as próximas serão bloqueadas."
+        elif response["current_job_published"]:
+            response["message"] = "O episódio atual já foi publicado; a parada vale para os próximos."
+    return jsonify(response)
 
 
 @app.route("/retry-failed", methods=["POST"])

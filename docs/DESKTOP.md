@@ -16,14 +16,20 @@ Windows x64. Ambos contêm Python, QtWebEngine, núcleo do tradutor,
 ## Artefatos
 
 - `Transass-x86_64.AppImage`
-- `Transass-Setup-2.5.2.exe`
+- `Transass-Setup-3.0.1.exe`
 - bundle Windows `build/desktop/Transass/Transass.exe`
-- `SHA256SUMS` e `sbom.cdx.json`
+- `SHA256SUMS-*.txt` e `sbom-*.cdx.json` por plataforma
 
 O workflow `.github/workflows/desktop.yml` compila em runners Linux e Windows
 nativos. O smoke congelado valida versão, manifesto de mídia, `/health` e
 onboarding antes de publicar o artefato. “Abriu na máquina do desenvolvedor” é
 uma lembrança afetiva, não um teste de release.
+
+O gate Windows também instala e desinstala em um perfil descartável com
+sentinelas de estado, acervo e mídia, inclusive o cenário legado. A instalação
+padrão usa `%LOCALAPPDATA%\Programs\Transass`; não reutilize a pasta de dados
+nem execute desinstaladores antigos. O Linux valida o entry point do AppImage
+e o serviço embutido após extração. Nenhum desses testes chama um modelo real.
 
 Detalhes de build ficam em `desktop/packaging/linux/README.md` e
 `desktop/packaging/windows/README.md`.

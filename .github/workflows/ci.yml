@@ -27,6 +27,9 @@ jobs:
           cache-dependency-path: |
             requirements.lock
             requirements-test.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: Install dependencies
         run: |
@@ -40,6 +43,7 @@ jobs:
           # writable temp path on CI instead of the container default /app.
           TRANSLATOR_WEB_STATE_DIR: ${{ runner.temp }}/transass-state
         run: |
+          python3 scripts/check_release.py
           python3 scripts/run_test_shard.py --shard ${{ matrix.shard }} --total 4 \
             --junit-dir "${{ runner.temp }}/test-results"
 
@@ -64,8 +68,8 @@ jobs:
 
       - name: Build image
         run: |
-          echo "TRANSASS_BUILD_VERSION=$(PYTHONPATH=src/subtranslate python3 -c 'from _version import __version__; print(__version__)')" >> "$GITHUB_ENV"
+          build_version="$(PYTHONPATH=src/subtranslate python3 -c 'from _version import __version__; print(__version__)')"
           docker build --pull=false \
-            --build-arg TRANSASS_BUILD_VERSION="${TRANSASS_BUILD_VERSION}" \
+            --build-arg TRANSASS_BUILD_VERSION="${build_version}" \
             --build-arg TRANSASS_BUILD_COMMIT="${GITHUB_SHA}" \
             -f deploy/Dockerfile -t transass:ci .

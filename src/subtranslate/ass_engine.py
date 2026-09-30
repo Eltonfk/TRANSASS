@@ -58,7 +58,7 @@ LEGITIMATE_SHORT_WORDS: frozenset[str] = frozenset({
     # Formas verbais curtas de alta frequência
     "é", "era", "foi", "vai", "vem", "vir", "vão", "vêm", "ir", "dar", "ver", "ter", "ser", "sou", "são",
     "tem", "diz", "faz", "fez", "vou", "fiz", "deu", "vi", "viu", "vê", "dá", "dou", "dão", "vim", "li", "leu", "pus",
-    "sai", "ia", "fui", "sei", "tão", "há", "dê", "pôr", "pôs", "põe", "riu", "dói", "têm", "lê", "crê",
+    "sai", "ia", "irá", "fui", "sei", "tão", "há", "dê", "pôr", "pôs", "põe", "riu", "dói", "têm", "lê", "crê",
     # Numerais cardinais curtos
     "dez",
     # Substantivos monossílabos ou dissílabos comuns
@@ -66,7 +66,7 @@ LEGITIMATE_SHORT_WORDS: frozenset[str] = frozenset({
     "mão", "pés", "pé", "rei", "lei", "pai", "mãe", "tio", "tia", "ano", "mês", "mim",
     "vez", "ato", "cor", "luz", "dom", "elo", "ora", "ar", "rua", "fé", "pó",
     "pau", "cão", "chá", "rio", "bar", "lar", "mel", "sal", "gel", "lã", "nó", "pá",
-    "asa", "aço", "ovo", "uso",
+    "asa", "aço", "ovo", "uso", "ira",
     # Interjeições comuns de dublagem/legendagem
     "oba", "olá", "alô", "opa", "uau", "ai", "ui", "ah", "oh", "ei",
     "au", "hein", "psiu", "hum", "uh", "eh",
@@ -82,6 +82,13 @@ _COMMON_WORD_SUFFIX_FRAGMENTS: frozenset[str] = frozenset({
 _COMMON_WORDS_WITH_POSSIBLE_SPLITS: frozenset[str] = frozenset({
     "felicidade", "felicidades", "possibilidade", "possibilidades",
     "qualidade", "verdade", "verdades", "dezembro", "vida", "vidas",
+    # Complete ``ira``/``irá`` at a visual boundary must not authorize known
+    # word fragments. Do not include ambiguous joins such as ``ira`` + ``do``.
+    "mentira", "mentiras", "cadeira", "cadeiras", "fronteira", "fronteiras",
+    "madeira", "bandeira", "respira", "conspira", "transpira", "adquira", "prefira",
+    "partirá", "servirá", "sentirá", "atrairá", "sorrirá", "definirá", "primeira",
+    "emitirá", "cumprirá", "decidirá", "existirá", "permitirá",
+    "verdadeira", "porteira", "fogueira", "cachoeira", "feiticeira", "brincadeira",
 })
 _AMBIGUOUS_COMPLETE_WORD_BOUNDARIES: frozenset[tuple[str, str]] = frozenset({
     ("qual", "idade"),
@@ -205,6 +212,13 @@ def inline_tag_split_word(text: str) -> bool:
 
 def validate_inline_tags(source: str, candidate: str) -> list[str]:
     """Validate tag count/order and reject newly introduced lexical splits."""
+    # Empty/asterisk blocks carry no override command. Effects cleanup may
+    # remove them; compare the same normalized envelopes without exempting
+    # any block that contains a real command.
+    source = clean_residual_override_tags(source)
+    candidate = clean_residual_override_tags(candidate)
+    if source == candidate:
+        return []
     flags: list[str] = []
     source_counts = inline_tag_counts(source)
     candidate_counts = inline_tag_counts(candidate)
@@ -212,11 +226,45 @@ def validate_inline_tags(source: str, candidate: str) -> list[str]:
         if any(candidate_counts[tag] > source_counts[tag] for tag in candidate_counts):
             flags.append("ASS_INLINE_TAG_DUPLICATION")
         flags.append("ASS_TAG_MISMATCH")
+    if TAG_RE.findall(source or "") != TAG_RE.findall(candidate or ""):
+        flags.append("ASS_INLINE_TAG_ORDER_MISMATCH")
+    if source_counts or candidate_counts:
+        from ass_structure import replace_source_payload
+
+        expected = replace_source_payload(source, visible_text(candidate, line_break=r"\N"))
+        if inline_tag_anchor_signature(expected) != inline_tag_anchor_signature(candidate):
+            flags.append("ASS_INLINE_TAG_ANCHOR_FAILURE")
+        source_spans = TAG_RE.split(source)
+        candidate_spans = TAG_RE.split(candidate)
+        if len(source_spans) == len(candidate_spans) and any(
+            bool(re.search(r"\w", visible_text(left))) != bool(re.search(r"\w", visible_text(right)))
+            for left, right in zip(source_spans, candidate_spans)
+        ):
+            # A deterministic allocator may itself collapse a styled span
+            # when the translation is shorter. Such loss is still a failure.
+            flags.append("ASS_INLINE_TAG_ANCHOR_FAILURE")
     # Tolerated if source itself contained the split (e.g. Kana-{\i1}chan)
     if inline_tag_split_word(candidate) and not inline_tag_split_word(source):
         flags.append("ASS_INLINE_TAG_SPLIT_WORD")
         flags.append("ASS_INLINE_TAG_ANCHOR_FAILURE")
     return sorted(set(flags))
+
+
+def inline_tag_anchor_signature(text: str) -> tuple[tuple[str, int], ...]:
+    """Record ordered visible anchors in one pass, not repeated prefix scans."""
+    result = []
+    offset = cursor = 0
+    trailing_slash = False
+    for match in TAG_RE.finditer(text or ""):
+        span = text[cursor:match.start()]
+        # Preserve visible_text's behavior even for a control split by an
+        # override block: stripping that block can join a backslash and N/n/h.
+        offset += len(visible_text(("\\" if trailing_slash else "") + span)) - int(trailing_slash)
+        if span:
+            trailing_slash = span.endswith("\\")
+        result.append((match.group(0), offset))
+        cursor = match.end()
+    return tuple(result)
 
 
 _SOURCE_UPPERCASE_BREAK_TOKEN_RE = re.compile(r"(?<!\w)[A-ZÀ-ÖØ-Þ]{2,5}(?!\w)")
@@ -261,6 +309,50 @@ def prose_delimiter_token_sequence(text: str) -> tuple[str, ...]:
     """
     visible = visible_text(str(text or ""), line_break=" ")
     return tuple(match.group(0) for match in _PROSE_DELIMITER_TOKEN_RE.finditer(visible))
+
+
+def prose_delimiter_ownership_sequence(text: str) -> tuple[tuple[str, str, bool, bool], ...]:
+    """Keep delimiter roles and their ownership of event-edge prose.
+
+    An unmatched straight quote at an event's end closes a quotation from a
+    previous event; it cannot become an opening quote in the translation.
+    Internal straight quotes use adjacent text to distinguish opening from
+    closing. Ambiguous placements remain ambiguous rather than being repaired.
+    """
+    visible = visible_text(str(text or ""), line_break=" ")
+    result = []
+    for match in _PROSE_DELIMITER_TOKEN_RE.finditer(visible):
+        token = match.group(0)
+        before, after = visible[:match.start()], visible[match.end():]
+        has_before = bool(re.search(r"\w", before))
+        has_after = bool(re.search(r"\w", after))
+        if token == '"':
+            if not has_before and has_after:
+                role = "open"
+            elif has_before and not has_after:
+                role = "close"
+            elif (not before or before[-1].isspace() or before[-1] in "([{:=—–-") and after.strip():
+                role = "open"
+            elif (not after or after[0].isspace() or after[0] in ")]},;:.!?…") and before.strip():
+                role = "close"
+            else:
+                role = "ambiguous"
+        else:
+            role = "open" if token in "([“«„‟‘" else "close"
+        result.append((token, role, has_before, has_after))
+    return tuple(result)
+
+
+def prose_delimiter_flags(source: str, candidate: str) -> tuple[str, ...]:
+    """Shared delimiter validation for repairs and both final AST checks."""
+    flags = []
+    if prose_delimiter_token_counts(source) != prose_delimiter_token_counts(candidate):
+        flags.append("ASS_DELIMITER_TOKEN_COUNT_MISMATCH")
+    if prose_delimiter_token_sequence(source) != prose_delimiter_token_sequence(candidate):
+        flags.append("ASS_DELIMITER_SEQUENCE_MISMATCH")
+    if prose_delimiter_ownership_sequence(source) != prose_delimiter_ownership_sequence(candidate):
+        flags.append("ASS_DELIMITER_OWNERSHIP_MISMATCH")
+    return tuple(flags)
 
 
 def line_break_inside_word(
@@ -505,16 +597,24 @@ def validate_document_structure(
         right_text = getattr(right, "text", "") or ""
 
         # 3. Tags ASS e tags com asterisco/residuais
-        if allow_tag_reflow_indices is None or index not in allow_tag_reflow_indices:
-            if sorted(TAG_RE.findall(left_text)) != sorted(TAG_RE.findall(right_text)):
-                issues.append(f"evento {index}: tags alteradas")
-            for flag in validate_inline_tags(left_text, right_text):
-                if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_DUPLICATION", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
-                    issues.append(f"evento {index}: {flag}")
-        else:
-            for flag in validate_inline_tags(left_text, right_text):
-                if flag in {"ASS_INLINE_TAG_SPLIT_WORD", "ASS_INLINE_TAG_ANCHOR_FAILURE"}:
-                    issues.append(f"evento {index}: {flag}")
+        tag_flags = validate_inline_tags(left_text, right_text)
+        if tag_flags and index in (allow_tag_reflow_indices or set()):
+            from effects_engine import rebuild_source_glyph_gradient
+
+            try:
+                expected_gradient = rebuild_source_glyph_gradient(left_text, visible_text(right_text))
+            except ValueError:
+                expected_gradient = None
+            if (
+                expected_gradient is not None
+                and inline_tag_anchor_signature(expected_gradient) == inline_tag_anchor_signature(right_text)
+            ):
+                # Only the independently reconstructed source gradient may
+                # change color multiplicity; non-color anchors remain checked.
+                tag_flags = [flag for flag in tag_flags if flag == "ASS_INLINE_TAG_SPLIT_WORD"]
+        if "ASS_TAG_MISMATCH" in tag_flags:
+            issues.append(f"evento {index}: tags alteradas")
+        issues.extend(f"evento {index}: {flag}" for flag in tag_flags)
 
         # 4. Quebras visuais e espaços rígidos
         if break_count(left_text) != break_count(right_text):
@@ -522,6 +622,8 @@ def validate_document_structure(
 
         if hard_space_count(left_text) != hard_space_count(right_text):
             issues.append(f"evento {index}: \\h alterado")
+
+        issues.extend(f"evento {index}: {flag}" for flag in prose_delimiter_flags(left_text, right_text))
 
         if selected_indices is not None and index not in selected_indices:
             continue

@@ -71,6 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for path in selected:
             print(path.relative_to(PROJECT_ROOT))
         return 0
+    if not selected:
+        parser.error("shard vazio: nenhuma suíte foi coletada")
     command = [sys.executable, "-m", "pytest", "-q"]
     if arguments.junit_dir is not None:
         arguments.junit_dir.mkdir(parents=True, exist_ok=True)

@@ -21,7 +21,7 @@ class LocalRuntime:
         default_root = Path(frozen_root) if frozen_root else Path(__file__).resolve().parents[3]
         self.core_root = Path(core_root or os.environ.get("TRANSASS_CORE_ROOT") or default_root).resolve()
         # An injected path set is authoritative (tests, portable mode and
-        # callers embedding the runtime).  Ensure it before loading a
+        # callers embedding the runtime).  Resolve it before loading a
         # repository .env, whose Compose aliases must not redirect it.
         if paths is not None:
             # Freeze the caller's roots before loading a repository .env.  A
@@ -32,7 +32,7 @@ class LocalRuntime:
                 paths.config_root,
                 state_root=paths.state_dir,
                 media_root_override=paths.media_root,
-            ).ensure()
+            )
         else:
             self.paths = None
         source_root = self.core_root / "src" / "subtranslate"
@@ -42,11 +42,15 @@ class LocalRuntime:
             from runtime_config import load_project_env  # type: ignore[import-not-found]
 
             load_project_env(self.core_root)
-        self.paths = self.paths or default_paths().ensure()
-        if source_root.is_dir():
+        self.paths = self.paths or default_paths()
+        # Migration only accepts an empty destination. Creating Library and
+        # ledger directories first makes a new destination look populated.
+        # Let copy errors abort startup before initializing any new state.
+        if source_root.is_dir() or getattr(sys, "frozen", False):
             from state_migration import migrate_from_candidates  # type: ignore[import-not-found]
 
             migrate_from_candidates(self.core_root, self.paths.state_dir)
+        self.paths.ensure()
         self._server: BaseWSGIServer | None = None
         self._thread: Thread | None = None
         self._url: str | None = None

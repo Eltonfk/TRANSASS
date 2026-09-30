@@ -4,6 +4,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 bundle="${1:-$root/build/desktop/Transass}"
 appdir="${2:-$root/build/Transass.AppDir}"
+# Refuse broad/custom targets and preserve every existing AppDir. This check
+# runs before probing the bundle or appimagetool, and never deletes old builds.
+resolved_appdir="$(realpath -m -- "$appdir")"
+if [[ -L "$root/build" || "$resolved_appdir" != "$root/build/Transass.AppDir" || -e "$appdir" || -L "$appdir" ]]; then
+  echo "AppDir recusado: use somente build/Transass.AppDir ainda inexistente, sem links simbólicos." >&2
+  exit 1
+fi
+appdir="$resolved_appdir"
 : "${APPIMAGETOOL:?Defina APPIMAGETOOL apontando para o binário appimagetool}"
 expected_version="$(PYTHONPATH="$root/src/subtranslate" python3 -c 'from _version import __version__; print(__version__)')"
 bundle_version="$("$bundle/Transass" --version)"
@@ -12,7 +20,9 @@ if [[ "$bundle_version" != "Transass $expected_version" ]]; then
   echo "Reconstrua build/desktop antes de gerar o AppImage." >&2
   exit 1
 fi
-rm -rf "$appdir"
+mkdir -p "$root/build"
+# Atomic creation also rejects a directory created after the path check.
+mkdir "$appdir"
 mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" \
   "$appdir/usr/share/icons/hicolor/256x256/apps" "$appdir/usr/share/metainfo"
 cp -a "$bundle/." "$appdir/usr/bin/"

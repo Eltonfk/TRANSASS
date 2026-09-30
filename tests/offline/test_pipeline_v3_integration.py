@@ -9,6 +9,67 @@ from pipeline_v3 import translate_subtitle_file_v3
 from ass_engine import ASSDocumentAST
 
 
+@pytest.mark.parametrize("source_text,translated", [
+    (
+        r"In the end, the Holy Court\Nwill find out about us.",
+        r"No final, a Corte Sagrada\Nirá descobrir sobre nós.",
+    ),
+    (
+        r"The Black Curia created the Spring of\NRage that resembles the Sacred Spring.",
+        r"A Cúria Negra criou a Primavera da\NIra que se assemelha à Primavera Sagrada.",
+    ),
+])
+def test_v3_preserves_full_time_magister_e02_complete_word_breaks(
+    tmp_path: Path, source_text: str, translated: str,
+):
+    source = tmp_path / "source.ass"
+    destination = tmp_path / "candidate.pt-BR.ass"
+    document = pysubs2.SSAFile()
+    document.events.append(pysubs2.SSAEvent(start=1230, end=4560, text=source_text))
+    document.save(str(source))
+
+    result = translate_subtitle_file_v3(
+        source, destination,
+        transport_call=lambda payload: {str(item["id"]): translated for item in payload},
+        source_language="inglês",
+    )
+
+    assert result["status"] == "COMPLETED"
+    assert result["validation"]["valid"] is True
+    assert result["serialized_validation"]["valid"] is True
+    output = ASSDocumentAST.from_file(destination)
+    assert len(output) == 1
+    assert output[0].text == translated
+    assert output[0].start == 1230
+    assert output[0].end == 4560
+
+
+@pytest.mark.parametrize("translated", [
+    r"Isso é ment\Nira", r"Uma cade\Nira", r"Ele ir\Ná descobrir",
+    r"emit\Nirá", r"cumpr\Nirá", r"decid\Nirá", r"exist\Nirá", r"permit\Nirá",
+    r"verdade\Nira", r"porte\Nira", r"fogue\Nira", r"cachoe\Nira",
+    r"feitice\Nira", r"brincade\Nira",
+])
+def test_v3_still_rejects_short_word_fragments_after_ira_lexicon_fix(
+    tmp_path: Path, translated: str,
+):
+    from pipeline_v3 import PipelineV3Error
+
+    source = tmp_path / "source.ass"
+    destination = tmp_path / "rejected.pt-BR.ass"
+    document = pysubs2.SSAFile()
+    document.events.append(pysubs2.SSAEvent(start=1000, end=3000, text=r"A truthful statement\Nfor the guard."))
+    document.save(str(source))
+
+    with pytest.raises(PipelineV3Error, match="LINE_BREAK_INSIDE_WORD"):
+        translate_subtitle_file_v3(
+            source, destination,
+            transport_call=lambda payload: {str(item["id"]): translated for item in payload},
+            source_language="inglês",
+        )
+    assert not destination.exists()
+
+
 def test_pipeline_v3_end_to_end_in_memory(tmp_path: Path):
     raw_source = (
         "[Script Info]\nTitle: Integration Test\nScriptType: v4.00+\n\n"
@@ -2287,8 +2348,11 @@ def test_pipeline_v3_detects_short_copy_and_preserves_long_proper_title():
         "The Legend of the Galactic Heroes",
         "The Legend of the Galactic Heroes",
         "inglês",
+        protected_names=("The Legend of the Galactic Heroes",),
     ) is False
-    assert _is_untranslated_source_copy("He Yu.", "He Yu.", "inglês") is False
+    assert _is_untranslated_source_copy(
+        "He Yu.", "He Yu.", "inglês", protected_names=("He Yu",),
+    ) is False
     assert _is_untranslated_source_copy(
         "- Hein ?\n- Kyôko.",
         "- Hein?\n- Kyôko.",
@@ -2960,4 +3024,3 @@ def test_v3_accepts_translated_song_lines_with_musical_notes():
         )
         assert result["status"] == "COMPLETED"
         assert ASSDocumentAST.from_file(out)[0].text == "♪ Céu brilhante, refletido nos meus olhos ♪"
-

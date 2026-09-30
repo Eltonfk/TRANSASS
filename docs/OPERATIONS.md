@@ -15,7 +15,8 @@ entra no relatório.
 ## Atualizar Docker
 
 ```sh
-docker build --pull=false -f deploy/Dockerfile -t transass:v2.5.2 .
+docker build --pull=false -f deploy/Dockerfile -t transass:v3.0.1 .
+export TRANSASS_IMAGE=transass:v3.0.1
 docker compose --env-file .env -f deploy/compose.yaml up -d --force-recreate
 ```
 
@@ -38,10 +39,18 @@ docker exec --user 1000 transass \
   python3 scripts/transass_maintenance.py --state-dir /app/state --json
 ```
 
-Depois de conferir os candidatos e fazer um backup do estado, a remoção pode
-ser solicitada explicitamente com `--apply`. A ferramenta recusa a operação se
-houver tradução ativa, protege referências duráveis e bloqueia caminhos fora do
-state. O Compose permite ajustar `TRANSASS_RETENTION_RUN_DAYS`,
+Depois de conferir os candidatos e fazer um backup, pare o serviço antes de
+solicitar `--apply`, com autorização explícita do operador. Não use `--apply`
+via `docker exec` no serviço em execução. A leitura acima continua permitida.
+
+A limpeza usa um lock exclusivo entre processos, relê `jobs.json`, verifica
+identidade dos alvos e recusa links, categorias incompatíveis e referências
+duráveis. O inventário inclui `v3-runs` e `v238-runs`; evidência referenciada por
+jobs históricos não vira lixo por ter envelhecido. No Windows, a aplicação de
+remoções permanece bloqueada quando as APIs de exclusão ancorada não estão
+disponíveis; o relatório funciona normalmente. Nenhuma limpeza é automática.
+
+O Compose permite ajustar `TRANSASS_RETENTION_RUN_DAYS`,
 `TRANSASS_RETENTION_STAGING_DAYS`, `TRANSASS_RETENTION_TRANSIENT_HOURS`,
 `TRANSASS_RETENTION_FAILURE_LEDGER_JOBS` e `TRANSASS_RETENTION_CONFIG_BACKUPS`.
 

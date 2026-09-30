@@ -115,6 +115,35 @@ def test_inline_tag_split_word():
     assert inline_tag_split_word(r"Palavra, {\i1}outra") is False
 
 
+@pytest.mark.parametrize("text", [
+    r"No final, a Corte Sagrada\Nirá descobrir sobre nós.",
+    r"A Cúria Negra criou a Primavera da\NIra que se assemelha à Primavera Sagrada.",
+    r"Ele irá\Ndescobrir a verdade.",
+    r"Sua ira\Nassustou os guardas.",
+    r"A ira\Ndo rei.", r"A ira\Ndos deuses.",
+    r"Sua IRA\nassustou os guardas.",
+    r"A Corte Sagrada{\i0}\N{\i1}irá descobrir sobre nós.",
+])
+def test_full_time_magister_e02_complete_words_at_visual_break(text):
+    assert line_break_inside_word(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    r"i\Nrá descobrir", r"ir\Ná descobrir", r"I\Nra",
+    r"ment\Nira", r"ment\Niras", r"cade\Nira", r"cade\Niras",
+    r"fronte\Nira", r"fronte\Niras", r"made\Nira", r"bande\Nira",
+    r"resp\Nira", r"consp\Nira", r"transp\Nira", r"adqu\Nira", r"pref\Nira",
+    r"part\Nirá", r"serv\Nirá", r"sent\Nirá", r"atra\Nirá", r"sorr\Nirá",
+    r"defin\Nirá", r"prime\Nira",
+    r"emit\Nirá", r"cumpr\Nirá", r"decid\Nirá", r"exist\Nirá", r"permit\Nirá",
+    r"verdade\Nira", r"porte\Nira", r"fogue\Nira", r"cachoe\Nira",
+    r"feitice\Nira", r"brincade\Nira",
+    r"ment{\i0}\n{\i1}ira", r"pala\Nvra", r"dez\Nembro", r"felicida\Nde",
+])
+def test_short_words_ira_and_ira_accented_do_not_authorize_lexical_fragments(text):
+    assert line_break_inside_word(text) is True
+
+
 def test_is_drawing_event():
     assert is_drawing_event(r"{\p1}m 0 0 l 100 0 100 100 0 100{\p0}") is True
     assert is_drawing_event(r"{\an8}Texto normal sem vetor") is False
@@ -303,4 +332,3 @@ def test_line_break_accepts_common_short_nouns_and_interjections():
     assert not line_break_inside_word(r"Au, au, au, au\Nau, au, au!")
     assert not line_break_inside_word(r"O cão\Nlatia sem parar.")
     assert not line_break_inside_word(r"Tome um chá\Nantes de dormir.")
-

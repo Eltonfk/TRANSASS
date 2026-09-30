@@ -1,6 +1,6 @@
 services:
   transass:
-    image: ${TRANSASS_IMAGE:-transass:v2.5.2}
+    image: ${TRANSASS_IMAGE:-transass:v3.0.1}
     container_name: transass
     restart: unless-stopped
     init: true

@@ -19,6 +19,7 @@ from ass_engine import (
     ASSDocumentAST,
     ASSEventNode,
     break_count,
+    break_tokens,
     clean_residual_override_tags,
     is_drawing_event,
     validate_document_structure,
@@ -70,27 +71,30 @@ def cluster_temporal_signs(nodes: list[ASSEventNode], tolerance_ms: int = 200) -
     return mapping
 
 
+def _sign_equivalence_key(node: ASSEventNode) -> tuple[str, tuple[str, ...], str]:
+    """Include punctuation and control positions in semantic equivalence.
+
+    Override blocks can differ between layers of the same sign. Visible
+    punctuation, spacing, line breaks and hard spaces belong to its wording.
+    """
+    return (TAG_RE.sub("", node.text), tuple(break_tokens(node.text)), node.style.casefold())
+
+
 def build_sign_groups(nodes: list[ASSEventNode]) -> list[dict[str, Any]]:
     """Build semantic sign groups that share identical wording and styling."""
     candidates = [n for n in nodes if is_sign_node(n) and _visible_words(n.text)]
     if not candidates:
         return []
     clusters = cluster_temporal_signs(candidates)
-    grouped: dict[tuple[int, str], list[ASSEventNode]] = defaultdict(list)
+    grouped: dict[tuple[int, tuple[str, tuple[str, ...], str]], list[ASSEventNode]] = defaultdict(list)
 
     for node in candidates:
-        fingerprint = hashlib.sha256(
-            json.dumps({
-                "words": _visible_words(node.text),
-                "breaks": node.text.count(r"\N"),
-                "style": node.style.casefold(),
-            }, sort_keys=True).encode()
-        ).hexdigest()[:16]
         cluster_id = clusters.get(node.index, node.index)
-        grouped[(cluster_id, fingerprint)].append(node)
+        grouped[(cluster_id, _sign_equivalence_key(node))].append(node)
 
     result: list[dict[str, Any]] = []
-    for (cluster_id, fingerprint), members in sorted(grouped.items(), key=lambda x: x[0]):
+    for (cluster_id, key), members in sorted(grouped.items(), key=lambda x: x[0]):
+        fingerprint = hashlib.sha256(json.dumps(key, ensure_ascii=False).encode()).hexdigest()[:16]
         members.sort(key=lambda m: m.index)
         sample = members[0]
         result.append({
@@ -228,6 +232,28 @@ class InMemorySemanticOrchestrator:
         """Apply received translations to document nodes while preserving ASS style envelopes."""
         # 1. Map sign group translations to member indices
         sign_translations_by_index: dict[int, str] = {}
+        nodes_by_index = {node.index: node for node in doc.events}
+        seen_members: set[int] = set()
+        seen_group_ids: set[str] = set()
+        # Validate every membership before mutating any event, including stale
+        # or externally supplied groups. Hash equality is not semantic proof.
+        for group in sign_groups:
+            if group["group_id"] in seen_group_ids:
+                raise ValueError("SIGN_GROUP_ID_MISMATCH")
+            seen_group_ids.add(group["group_id"])
+            sample = group["sample_node"]
+            sample_key = _sign_equivalence_key(sample)
+            for index in group["member_indices"]:
+                member = nodes_by_index.get(index)
+                if (
+                    member is None
+                    or not is_sign_node(member)
+                    or _sign_equivalence_key(member) != sample_key
+                    or member.visible != group["source_text"]
+                    or index in seen_members
+                ):
+                    raise ValueError("SIGN_GROUP_MEMBER_MISMATCH")
+                seen_members.add(index)
         for g in sign_groups:
             trans = translations.get(g["group_id"])
             if trans:

@@ -16,7 +16,7 @@ as variáveis `TRANSASS_DATA_DIR`/`TRANSASS_CONFIG_DIR` definirem outro local.
 
 ## Desktop Windows
 
-1. Baixe `Transass-Setup-2.5.2.exe` da release.
+1. Baixe `Transass-Setup-3.0.1.exe` da release.
 2. Execute o instalador para o usuário atual.
 3. Abra **Transass** pelo menu Iniciar.
 4. Escolha a pasta dos episódios e configure o motor.
@@ -24,6 +24,12 @@ as variáveis `TRANSASS_DATA_DIR`/`TRANSASS_CONFIG_DIR` definirem outro local.
 O instalador não requer Python, Docker ou Git. Windows pode exibir um alerta
 SmartScreen enquanto os binários ainda não possuem assinatura comercial;
 confira o SHA-256 publicado antes de continuar.
+
+Arquivos do programa ficam em `%LOCALAPPDATA%\Programs\Transass`; dados
+continuam em `%LOCALAPPDATA%\Transass`. O instalador recusa sobreposição com
+pastas de dados configuradas e preserva arquivos não instalados por ele.
+Para instalações antigas na pasta de dados, escolha a nova pasta padrão:
+não execute o desinstalador antigo, que pode conter a regra de exclusão ampla.
 
 ## Docker
 
@@ -47,7 +53,8 @@ WEB_PORT=5050
 Construa e inicie:
 
 ```sh
-docker build --pull=false -f deploy/Dockerfile -t transass:v2.5.2 .
+docker build --pull=false -f deploy/Dockerfile -t transass:v3.0.1 .
+export TRANSASS_IMAGE=transass:v3.0.1
 docker compose --env-file .env -f deploy/compose.yaml up -d
 ```
 
@@ -65,6 +72,10 @@ ollama pull qwen3.5:9b
 ```
 
 ## Desenvolvimento
+
+Python 3.11+ é necessário. O pacote declara dependências e inclui templates,
+JavaScript e glossários; `pip install .` instala o núcleo web. O Desktop usa
+também `desktop/packaging/requirements-desktop.txt`.
 
 ```sh
 python3 -m venv .venv

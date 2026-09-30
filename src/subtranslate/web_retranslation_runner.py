@@ -24,6 +24,7 @@ from pipeline_lineage import public_summary
 from runtime_config import default_failure_ledger_root, default_state_dir, default_transport_config, execution_identity
 from transport_providers import API_KEY_PROVIDERS, DEEPSEEK_MIN_DELAY_SECONDS, api_key_from_env, transport_from_config
 from transport_config_store import load_transport_config
+from web_fallback_safety import safe_fallback_eligible
 
 TRANSPORT_CONFIG_PATH = Path(os.environ.get(
     "TRANSPORT_CONFIG_PATH", str(default_transport_config())))
@@ -186,6 +187,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
             provider = WebDurableResponseProvider(
                 transport_config, mode="LIVE_CAPTURED", capture_root=capture_root,
             )
+            args._primary_response_provider = provider
             glossary = {}
             glossary_hash = hashlib.sha256(b"no-glossary").hexdigest()
             ctx = build_v238_execution_context(
@@ -343,6 +345,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                 capture_root=capture_root,
                 before_call=thermal_gate,
             )
+            args._primary_response_provider = response_provider
             transport_call = make_v3_transport_call(
                 active_transport,
                 response_provider=response_provider,
@@ -361,6 +364,7 @@ def _run_pipeline(args, pipeline: str, transport: Any | None, source_language: s
                             "operation": "RETRANSLATE",
                             "transport_call": transport_call,
                             "source_language": source_language,
+                            "series_title": args.series_title,
                             "target_batch_size": v3_batch_size(
                                 transport_config,
                                 str(getattr(active_transport, "name", "")),
@@ -504,38 +508,27 @@ def main() -> int:
         or "inglês"
     )
 
+    used_fallback = False
+    args._primary_response_provider = None
     if args.failed_event_ids:
         result = _run_selective_retranslation(args, pipeline, primary, source_language)
     else:
         try:
             result = _run_pipeline(args, pipeline, primary, source_language)
         except Exception as primary_error:
-            message = str(primary_error).lower()
-            if pipeline in {"v3", "v3_0_0"}:
-                from v3_runtime import is_v3_transport_error
-
-                transport_failure = is_v3_transport_error(primary_error)
-            else:
-                transport_failure = any(token in message for token in (
-                    "connectionerror", "timeout", "connection refused", "max retries",
-                    "temporarily unavailable", "name or service not known",
-                ))
-            if args.no_fallback or fallback is None or not transport_failure:
+            if args.no_fallback or fallback is None or not safe_fallback_eligible(
+                primary_error,
+                response_provider=args._primary_response_provider,
+                output_path=args.output,
+            ):
                 raise
-            result = None
-    used_fallback = False
-    if not args.no_fallback and (
+            used_fallback = True
+            result = _run_pipeline(args, pipeline, fallback, source_language)
+
+    if args._primary_response_provider is not None and (
         not isinstance(result, dict) or not args.output.is_file()
-    ) and fallback is not None:
-        # Only a transport failure or missing artifact may use a transport
-        # fallback. Linguistic validation failures require explicit selective
-        # retry so an entire episode is never silently repeated.
-        used_fallback = True
-        if args.output.is_file():
-            primary_output = args.output.with_name(f".{args.output.name}.primary.ass")
-            shutil.copy2(args.output, primary_output)
-            args.output.unlink()
-        result = _run_pipeline(args, pipeline, fallback, source_language)
+    ):
+        raise RuntimeError("WEB_RETRANSLATION_OUTPUT_REQUIRED")
 
     internal = (result or {}).get("_internal") if isinstance(result, dict) else None
     stage_handle = Path(internal["stage_artifact_path"]).name if isinstance(internal, dict) and internal.get("stage_artifact_path") else None

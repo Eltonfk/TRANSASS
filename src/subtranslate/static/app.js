@@ -19,7 +19,7 @@ function selected(){return episodes.filter(ep=>selectedEpisodeKeys.has(episodeKe
 function selectedEpisodeIds(){return episodes.filter(ep=>selectedEpisodeKeys.has(episodeKey(ep))).map(ep=>ep.library_episode_id).filter(Boolean).map(Number)}
 function bindSelection(){document.querySelectorAll('#episodes input[type=checkbox]').forEach(input=>{input.onchange=()=>{const key=input.dataset.selectionKey;if(input.checked)selectedEpisodeKeys.add(key);else selectedEpisodeKeys.delete(key);syncSelectionUi()}});document.querySelectorAll('#episodes .srclang').forEach(sel=>{const key=sel.dataset.key;langSelects[key]=sel;sel.onfocus=()=>populateLangSelect(sel);sel.onchange=()=>{episodeSourceLang[key]=sel.value;refreshSourceStatus(key,sel.dataset.epid,sel.value)}});syncSelectionUi()}
 async function loadBrowse(){try{const d=await api('/browse?path='+encodeURIComponent(path));$('crumb').innerHTML=path?path.split('/').map((x,i)=>`<button data-p="${esc(path.split('/').slice(0,i+1).join('/'))}">${esc(x)}</button>`).join(' › '):'<span class="muted">Shows</span>';$('crumb').querySelectorAll('button').forEach(b=>b.onclick=()=>{path=b.dataset.p;loadBrowse()});const sel=$('folderSelect');sel.replaceChildren(...d.subfolders.map(folder=>{const option=document.createElement('option');option.value=folder;option.textContent = folder;return option}));if(!d.subfolders.length){const option=document.createElement('option');option.textContent='Nenhuma subpasta';option.disabled=true;sel.append(option)}$('upBtn').disabled=!path;$('enterBtn').disabled=!d.subfolders.length;$('useBtn').disabled=!d.has_videos;$('useBtn').textContent=selectedFolder===path?'Temporada carregada':'Carregar esta temporada';$('libraryNote').classList.add('hidden')}catch(e){$('libraryNote').textContent='Biblioteca temporariamente indisponível.';$('libraryNote').classList.remove('hidden');console.error('browse',e)}}
-let episodeRenderFingerprint='';
+let episodeRenderFingerprint='',episodeLoadPromise=null;
 async function refreshSourceStatus(key, episodeId, lang){if(!episodeId)return;try{const d=await api('/source-status?episode_id='+encodeURIComponent(episodeId)+'&source_language='+encodeURIComponent(lang));const el=document.querySelector('[data-source-badge="'+key+'"]');if(el)el.innerHTML=sourceBadge(d)}catch(e){}}
 async function populateLangSelect(sel){const epid=sel.dataset.epid;const rel=sel.dataset.path;if((!epid&&!rel)||sel.dataset.loaded)return;sel.dataset.loaded='1';try{const q=epid?('episode_id='+encodeURIComponent(epid)):('path='+encodeURIComponent(rel));const d=await api('/source-options?'+q);const opts=Array.from(new Set(d.options.map(o=>o.language).filter(Boolean)));if(!opts.length)return;const cur=sel.value;sel.replaceChildren(...opts.map(l=>{const option=document.createElement('option');option.value=l;option.textContent=l;option.selected=l===cur;return option}))}catch(e){console.error('source-options',e)}}
 function applySeasonLang(lang){seasonLangValue=lang;episodes.forEach(ep=>{const key=episodeKey(ep);episodeSourceLang[key]=lang;const el=langSelects[key];if(el)el.value=lang});loadEpisodes()}
@@ -30,7 +30,7 @@ async function auditSelectedSeason(){try{const series=await seriesForFolder();if
 async function retranslate(ids,confirmBatch=false){try{if(!ids.length)return notify('Selecione episódios com fonte original arquivada.','warn');const langs={};episodes.forEach(ep=>{const id=Number(ep.library_episode_id);if(ids.includes(id)){const key=episodeKey(ep);langs[id]=episodeSourceLang[key]||seasonLangValue||globalSourceLang}});const langBody=JSON.stringify({episode_ids:ids,source_languages:langs,process_eligible_only:!confirmBatch});if(confirmBatch){const preview=await api('/retranslate/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const c=preview.counts||{};if(c.blocked){return notify(`Pré-verificação bloqueada: ${c.blocked} episódio(s) sem fonte compatível. Nenhuma tarefa foi criada.`,'warn')}if(!confirm(`Retraduzir ${c.eligible||0} episódio(s) e ignorar ${c.skipped_current_validated||0} que já estão atualizados? A fila para na primeira falha. A versão antiga será preservada e nada será publicado automaticamente.`))return;}const queued=await api('/retranslate',{method:'POST',headers:{'Content-Type':'application/json'},body:langBody});const skipped=queued.not_eligible||queued.preflight?.counts?.blocked||0;if(skipped&&queued.queued){notify(`${queued.queued} episódio(s) enfileirado(s); ${skipped} seleção(ões) incompatível(is) foram ignoradas.`,'warn')}else notify(`${queued.queued||0} retradução(ões) enfileirada(s).`,'ok');await refresh(true)}catch(e){notify(e.message,'fail')}}
 async function seriesForFolder(){const d=await api('/library/series?classification=ANIME');return d.series.find(s=>selectedFolder===s.library_relative_path||selectedFolder.startsWith(s.library_relative_path+'/'))}
 async function autoClassifyFolder(folder){try{await api('/library/auto-classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder})});await loadArchive()}catch(e){console.warn('auto-classify',e)}}
-async function action(url){try{await api(url,{method:'POST'});await refresh(true)}catch(e){notify(e.message,'fail')}}
+async function action(url){try{const d=await api(url,{method:'POST'});if(d.message)notify(d.message,d.cancellation_deferred?'warn':'info');await refresh(true)}catch(e){notify(e.message,'fail')}}
 function age(iso){if(!iso)return '—';const t=Date.parse(iso);if(!Number.isFinite(t))return esc(iso);const sec=Math.max(0,Math.floor((Date.now()-t)/1000));if(sec<60)return `há ${sec}s`;const min=Math.floor(sec/60);if(min<60)return `há ${min}min`;return `há ${Math.floor(min/60)}h ${min%60}min`}
 function duration(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(Number(sec)));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;return h?`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`}
 function statusLabel(status){const keys={ALREADY_TRANSLATED:'status.alreadyTranslated',NOT_STARTED:'status.notStarted',WAITING:'status.waiting',STARTING:'status.starting',TRANSLATING:'status.translating',VALIDATING:'status.validating',PUBLISHING:'status.publishing',PAUSED:'status.paused',FAILED:'status.failed',COMPLETED:'status.completed',SKIPPED_CURRENT_VALIDATED:'status.skippedCurrent',NOT_STARTED_AFTER_FAILURE:'status.blockedAfterFailure',SEMANTIC_RECONSTRUCTION:'status.stageSemantic'};return keys[status]?uiI18n.t(keys[status]):(isQi83()?'◇':String(status||''))}
@@ -140,50 +140,84 @@ async function loadHistory(){try{const d=await api('/history?technical='+($('sho
 async function loadArchive(){const stats=$('libraryStats'),seriesBox=$('archiveSeries');if(stats)stats.textContent=t('library.loading');if(seriesBox)seriesBox.textContent=t('library.loading');try{const d=await api('/library');const c=d.counts||{};stats.textContent=`${c.records||0} versões · ${c.objects||0} objetos · ${c.publications||0} publicados`;const s=await api('/library/series?classification=ANIME');const series=Array.isArray(s.series)?s.series:[];seriesBox.innerHTML=series.length?series.map(x=>`<div class="jobline"><span><b>${esc(x.title)}</b><br><small>${esc(x.library_relative_path||'')} · ${esc(x.classification)}</small></span><button class="button" data-library-series="${x.id}">Abrir</button></div>`).join(''):t('library.none');seriesBox.querySelectorAll('[data-library-series]').forEach(b=>b.onclick=()=>openArchiveSeries(b.dataset.librarySeries))}catch(e){if(stats)stats.textContent=t('library.unavailable');if(seriesBox)seriesBox.textContent=t('library.unavailable');console.warn('archive',e)}}
 async function loadMemory(){const stats=$('memoryStats'),itemsBox=$('memoryItems');if(stats)stats.textContent=t('memory.loading');if(itemsBox)itemsBox.textContent=t('memory.loading');try{const d=await api('/memory');const c=d.counts||{};stats.textContent=`${c.active||0} ativas · ${c.items||0} históricas · ${c.conflicts||0} conflitos · ${c.usages||0} usos · somente SEGMENT_APPROVED`;itemsBox.innerHTML=(Array.isArray(d.items)?d.items:[]).map(x=>`<div class="jobline"><span><b>${esc(x.source)}</b> → ${esc(x.approved_text)}</span><span>${esc(x.anime_title||'Anime')} · ${esc(x.status)} · ${x.usage_count||0} usos <button class="button" data-memory-status="${x.id}" data-next-status="${x.status==='ACTIVE'?'INACTIVE':'ACTIVE'}">${x.status==='ACTIVE'?'Desativar':'Ativar'}</button></span></div>`).join('')||t('memory.none');itemsBox.querySelectorAll('[data-memory-status]').forEach(b=>b.onclick=async()=>{try{await api('/memory/items/'+b.dataset.memoryStatus+'/status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:b.dataset.nextStatus})});await loadMemory()}catch(e){alert(e.message)}})}catch(e){if(stats)stats.textContent=t('memory.unavailable');if(itemsBox)itemsBox.textContent=t('memory.unavailable');console.warn('memory',e)}}
 async function loadInbox(){const ready=$('inboxReady'),review=$('inboxReview'),failed=$('inboxFailed');[ready,review,failed].forEach(box=>{if(box)box.textContent=t('inbox.loading')});try{const d=await api('/inbox'),c=d.categories||{};const render=(items,empty)=>{const list=Array.isArray(items)?items:[];return list.length?list.slice(0,30).map(j=>`<div class="inbox-item"><b>${esc(j.episode||j.name||'Episódio')}</b><div class="muted">${esc(j.reason||j.error||j.status||'')}</div>${j.candidate_download_url?`<a class="button compact" href="${esc(j.candidate_download_url)}">Baixar candidato</a>`:''}</div>`).join(''):t(empty)};ready.innerHTML=render(c.ready_to_publish,'inbox.noneCandidate');review.innerHTML=render(c.needs_review,'inbox.nonePending');failed.innerHTML=render(c.failed,'inbox.noneRecentFailure');const total=(d.counts?.ready_to_publish||0)+(d.counts?.needs_review||0)+(d.counts?.failed||0);if($('navInboxCount'))$('navInboxCount').textContent=total?String(total):''}catch(e){[ready,review,failed].forEach(box=>{if(box)box.textContent=t('inbox.unavailable')});console.warn('inbox',e)}}
- $('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=async()=>{const button=$('useBtn');button.disabled=true;button.textContent='Carregando…';try{if(selectionFolder!==path){selectedEpisodeKeys.clear();selectionFolder=path}selectedFolder=path;episodeRenderFingerprint='';$('selectedFolderLabel').textContent=path||'Shows';await loadEpisodes();autoClassifyFolder(path);notify(`Temporada carregada: ${path||'Shows'}.`,'ok')}catch(e){notify('Não foi possível carregar a temporada: '+e.message,'fail')}finally{button.disabled=false;button.textContent='Temporada carregada'}};$('loadMoreEpisodes').onclick=loadMoreEpisodes;$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return notify('Série ainda não catalogada como ANIME.','warn');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){notify(e.message,'fail')}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('episodeSearch').oninput=renderEpisodes;$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;$('showThermalTelemetry').onchange=async()=>{showThermalTelemetry=$('showThermalTelemetry').checked;syncThermalLogVisibility();await reloadDiagnosticLogs()};$('refreshInbox').onclick=loadInbox;$('clearVisualLogs').onclick=()=>{$('logs').replaceChildren();renderedLogIds.clear();notify('Visualização limpa; o histórico persistente continua intacto.','ok')};document.querySelectorAll('[data-view-button]').forEach(button=>button.onclick=()=>setView(button.dataset.viewButton));document.addEventListener('keydown',event=>{if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){event.preventDefault();setView('translate');$('episodeSearch').focus()}if(event.key==='Escape'){for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close?.()}});let initialView='translate';try{initialView=localStorage.getItem('transass.activeView')||'translate'}catch(e){}syncThermalLogVisibility();setView(initialView,{remember:false});loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();loadInbox();refresh();connectEvents();setInterval(()=>{refresh();loadHistory()},10000);setInterval(loadHealth,5000);setInterval(()=>{if(activeView==='library')loadArchive();if(activeView==='memory')loadMemory();if(activeView==='inbox')loadInbox()},15000);
+ $('enterBtn').onclick=()=>{const v=$('folderSelect').value;if(v){path=path?path+'/'+v:v;loadBrowse()}};$('upBtn').onclick=()=>{path=path.split('/').slice(0,-1).join('/');loadBrowse()};$('useBtn').onclick=async()=>{const button=$('useBtn');button.disabled=true;button.textContent='Carregando…';try{if(selectionFolder!==path){selectedEpisodeKeys.clear()}selectedFolder=path;episodeRenderFingerprint='';$('selectedFolderLabel').textContent=path||'Shows';await loadEpisodes();autoClassifyFolder(path);notify(`Temporada carregada: ${path||'Shows'}.`,'ok')}catch(e){notify('Não foi possível carregar a temporada: '+e.message,'fail')}finally{button.disabled=false;button.textContent='Temporada carregada'}};$('loadMoreEpisodes').onclick=async()=>{try{await loadMoreEpisodes()}catch(e){notify('Não foi possível carregar mais episódios: '+e.message,'fail')}};$('selectMissing').onclick=()=>{episodes.forEach(ep=>{if(!ep.ptbr)selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()};$('selectLegacy').onclick=async()=>{try{const s=await seriesForFolder();if(!s)return notify('Série ainda não catalogada como ANIME.','warn');const d=await api('/library/legacy?series_id='+s.id);episodes.forEach(ep=>{if(d.episode_ids.includes(ep.library_episode_id))selectedEpisodeKeys.add(episodeKey(ep))});renderEpisodes()}catch(e){notify(e.message,'fail')}};$('clearSelection').onclick=()=>{selectedEpisodeKeys.clear();renderEpisodes()};$('episodeSearch').oninput=renderEpisodes;$('seasonLang').onchange=()=>applySeasonLang($('seasonLang').value);$('detectSeasonLang').onclick=detectSeasonLang;$('startBtn').onclick=start;$('retranslateSelectedBtn').onclick=()=>retranslate(selectedEpisodeIds(),false);$('auditSeasonBtn').onclick=auditSelectedSeason;$('retranslateSeasonBtn').onclick=async()=>{try{const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};$('pauseBtn').onclick=()=>action('/pause');$('resumeBtn').onclick=()=>action('/resume');$('stopBtn').onclick=()=>{if(confirm('Parar a fila? O episódio atual terminará/cancelará com segurança.'))action('/stop')};$('retryBtn').onclick=()=>action('/retry-failed');$('showTechnical').onchange=loadHistory;$('showThermalTelemetry').onchange=async()=>{showThermalTelemetry=$('showThermalTelemetry').checked;syncThermalLogVisibility();await reloadDiagnosticLogs()};$('refreshInbox').onclick=loadInbox;$('clearVisualLogs').onclick=()=>{$('logs').replaceChildren();renderedLogIds.clear();notify('Visualização limpa; o histórico persistente continua intacto.','ok')};document.querySelectorAll('[data-view-button]').forEach(button=>button.onclick=()=>setView(button.dataset.viewButton));document.addEventListener('keydown',event=>{if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){event.preventDefault();setView('translate');$('episodeSearch').focus()}if(event.key==='Escape'){for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close?.()}});let initialView='translate';try{initialView=localStorage.getItem('transass.activeView')||'translate'}catch(e){}syncThermalLogVisibility();setView(initialView,{remember:false});loadPipeline();loadTransportConfig();loadBrowse();loadHistory();loadHealth();loadInbox();refresh();connectEvents();setInterval(()=>{refresh();loadHistory()},10000);setInterval(loadHealth,5000);setInterval(()=>{if(activeView==='library')loadArchive();if(activeView==='memory')loadMemory();if(activeView==='inbox')loadInbox()},15000);
 
 // Reaplica o estado vazio traduzido depois do bloco legado de eventos.
 $('clearVisualLogs').onclick=()=>{resetDiagnosticLog();renderedLogIds.clear();notify('Visualização limpa; o histórico persistente continua intacto.','ok')};
 
- // A primeira carga costumava enviar o idioma global (inglês) antes de
- // descobrir que a temporada só possui tracks francesas. A declaração abaixo
- // substitui a versão anterior por uma versão que autodetecta o idioma da
- // primeira fonte; uma escolha manual posterior continua sendo respeitada.
- async function loadEpisodes(){
-  if(!selectedFolder){episodes=[];$('episodes').innerHTML='<div class="empty-state"><b>Nenhuma temporada carregada</b>Escolha uma pasta e clique em “Carregar esta temporada”.</div>';syncSelectionUi();return}
-  if(selectionFolder!==selectedFolder){selectedEpisodeKeys.clear();selectionFolder=selectedFolder}
-  const lang=seasonLangValue||globalSourceLang;
-  const d=await api('/episodes?path='+encodeURIComponent(selectedFolder)+'&source_language='+encodeURIComponent(lang)+'&offset=0&limit=40');
-  episodes=d.episodes;episodeOffset=d.offset||0;episodeHasMore=Boolean(d.has_more);if($('loadMoreEpisodes')){$('loadMoreEpisodes').hidden=!episodeHasMore;$('loadMoreEpisodes').disabled=!episodeHasMore}
-  lastEpisodesRefreshAt=Date.now();
-  const detectedFolder=globalThis.__subtranslateDetectedSourceFolder||'';
-  if(detectedFolder!==selectedFolder){
-   globalThis.__subtranslateDetectedSourceFolder=selectedFolder;
-   const first=episodes.find(ep=>ep.source);
+// Share in-flight loads. A status refresh covers every already loaded page;
+// failures never replace a complete list with a partial first page.
+function episodePageUrl(folder,lang,offset,limit=40){return '/episodes?path='+encodeURIComponent(folder)+'&source_language='+encodeURIComponent(lang)+'&offset='+offset+'&limit='+limit}
+function syncEpisodePager(){const button=$('loadMoreEpisodes');if(button){button.hidden=!episodeHasMore;button.disabled=episodeLoading||!episodeHasMore}}
+async function fetchEpisodePages(folder,lang,count){
+ const result=[];let more=true;
+ while(more&&result.length<count){
+  const d=await api(episodePageUrl(folder,lang,result.length,Math.min(200,Math.max(40,count-result.length))));
+  const page=Array.isArray(d.episodes)?d.episodes:[];
+  if(d.has_more&&!page.length)throw new Error('Paginação sem avanço; tente atualizar a temporada.');
+  result.push(...page);more=Boolean(d.has_more);
+ }
+ return {episodes:result,has_more:more};
+}
+async function loadEpisodes(){
+ if(episodeLoadPromise){await episodeLoadPromise;if(selectionFolder===selectedFolder)return}
+ if(!selectedFolder){episodes=[];$('episodes').innerHTML='<div class="empty-state"><b>Nenhuma temporada carregada</b>Escolha uma pasta e clique em “Carregar esta temporada”.</div>';syncSelectionUi();return}
+ const folder=selectedFolder,changed=selectionFolder!==folder,count=changed?40:Math.max(40,episodes.length);
+ let lang=seasonLangValue||globalSourceLang;
+ episodeLoading=true;syncEpisodePager();
+ episodeLoadPromise=(async()=>{
+  let d=await fetchEpisodePages(folder,lang,count);
+  if(folder!==selectedFolder||lang!==(seasonLangValue||globalSourceLang))return;
+  if(globalThis.__subtranslateDetectedSourceFolder!==folder){
+   const first=d.episodes.find(ep=>ep.source);
    if(first){
     try{
      const options=await api('/source-options?path='+encodeURIComponent(first.source));
+     if(folder!==selectedFolder||lang!==(seasonLangValue||globalSourceLang))return;
      const languages=Array.from(new Set((options.options||[]).map(o=>o.language).filter(Boolean)));
      const detected=languages.includes(lang)?lang:languages[0];
+     globalThis.__subtranslateDetectedSourceFolder=folder;
      if(detected&&detected!==lang){
-      seasonLangValue=detected;
+      seasonLangValue=lang=detected;
       const season=$('seasonLang');
-      if(season&&!Array.from(season.options).some(o=>o.value===detected)){
-       const option=document.createElement('option');option.value=detected;option.textContent=detected;season.append(option)
-      }
+      if(season&&!Array.from(season.options).some(o=>o.value===detected)){const option=document.createElement('option');option.value=detected;option.textContent=detected;season.append(option)}
       if(season)season.value=detected;
-      return loadEpisodes();
+      d=await fetchEpisodePages(folder,lang,count);
      }
     }catch(e){console.warn('source autodetect',e)}
    }
   }
+  if(folder!==selectedFolder||lang!==(seasonLangValue||globalSourceLang))return;
+  if(changed){selectedEpisodeKeys.clear();selectionFolder=folder}
+  episodes=d.episodes;episodeOffset=episodes.length;episodeHasMore=d.has_more;lastEpisodesRefreshAt=Date.now();
   const valid=new Set(episodes.map(episodeKey));
   selectedEpisodeKeys=new Set([...selectedEpisodeKeys].filter(key=>valid.has(key)));
-  const fingerprint=JSON.stringify(episodes.map(ep=>[episodeKey(ep),ep.status,ep.audit_status,ep.ptbr,ep.source_status]));
-  if(fingerprint!==episodeRenderFingerprint){episodeRenderFingerprint=fingerprint;renderEpisodes()}else syncSelectionUi()
+  const fingerprint=JSON.stringify(episodes);
+  if(fingerprint!==episodeRenderFingerprint){episodeRenderFingerprint=fingerprint;renderEpisodes()}else syncSelectionUi();
+ })();
+ try{await episodeLoadPromise}finally{episodeLoadPromise=null;episodeLoading=false;syncEpisodePager()}
+}
+async function loadMoreEpisodes(){
+ if(episodeLoadPromise){await episodeLoadPromise;if(episodeLoading)return false}
+ if(!selectedFolder||!episodeHasMore)return false;
+ const folder=selectedFolder,lang=seasonLangValue||globalSourceLang,nextOffset=episodes.length;
+ episodeLoading=true;syncEpisodePager();
+ episodeLoadPromise=(async()=>{
+  const d=await api(episodePageUrl(folder,lang,nextOffset));
+  if(folder!==selectedFolder||lang!==(seasonLangValue||globalSourceLang))return false;
+  const known=new Set(episodes.map(episodeKey)),page=(d.episodes||[]).filter(ep=>!known.has(episodeKey(ep)));
+  if(d.has_more&&!page.length)throw new Error('Paginação sem avanço; tente atualizar a temporada.');
+  episodes=episodes.concat(page);episodeOffset=episodes.length;episodeHasMore=Boolean(d.has_more);episodeRenderFingerprint='';renderEpisodes();return page.length>0;
+ })();
+ try{return await episodeLoadPromise}finally{episodeLoadPromise=null;episodeLoading=false;syncEpisodePager()}
+}
+async function loadAllEpisodes(){
+ const folder=selectedFolder;
+ for(let page=0;episodeHasMore;page++){
+  if(page>=250)throw new Error('Temporada excedeu o limite de paginação; atualize a lista.');
+  if(!await loadMoreEpisodes()||folder!==selectedFolder)throw new Error('Lista de episódios mudou ou não avançou. Nenhuma retradução foi iniciada.');
  }
-
- async function loadMoreEpisodes(){if(!selectedFolder||!episodeHasMore||episodeLoading)return;episodeLoading=true;const button=$('loadMoreEpisodes');if(button)button.disabled=true;try{const nextOffset=episodes.length;const d=await api('/episodes?path='+encodeURIComponent(selectedFolder)+'&source_language='+encodeURIComponent(seasonLangValue||globalSourceLang)+'&offset='+nextOffset+'&limit=40');episodes=episodes.concat(d.episodes||[]);episodeOffset=episodes.length;episodeHasMore=Boolean(d.has_more);episodeRenderFingerprint='';renderEpisodes()}catch(e){notify('Não foi possível carregar mais episódios: '+e.message,'fail')}finally{episodeLoading=false;if(button){button.disabled=!episodeHasMore;button.hidden=!episodeHasMore}}}
+}
 
  let currentArchiveSeriesId=null;
 function recordValidated(record){return ['VALIDATED','OK','PUBLISHED'].includes(String(record.validation_status||'').toUpperCase())}
@@ -210,7 +244,8 @@ function recordStateBadge(record, preferredRecordId){
 function versionDetailsHtml(record){
  const lineage=record.lineage||[];
  const parent=lineage.find(item=>String(item.source_record_id)===String(record.id)&&item.parent_record_id!=null);
- const sourceText=parent?`Inglês · registro ${parent.parent_record_id}`:(record.source_language||'não informada');
+ const sourceLanguage=parent?.parent_language||parent?.source_language||record.source_language||'idioma não informado';
+ const sourceText=parent?`${sourceLanguage} · registro ${parent.parent_record_id}`:sourceLanguage;
  const published=recordPublished(record);
  const publication=record.publication||(record.publications||[]).find(item=>item.status==='PUBLISHED');
  const targetState=record.target_present?(record.target_record_id?`legenda atual: registro ${record.target_record_id}`:'legenda atual: versão não catalogada'):'nenhuma legenda atual ao lado do vídeo';
@@ -268,7 +303,7 @@ $('closeVersionDetails').onclick=()=>{$('versionDetailsDialog').close?.();$('ver
 // A ação de retraduzir a temporada precisa considerar páginas ainda não
 // carregadas. O botão continua explícito, mas garante que nenhum episódio
 // fique de fora por causa da paginação.
-if($('retranslateSeasonBtn'))$('retranslateSeasonBtn').onclick=async()=>{try{while(episodeHasMore)await loadMoreEpisodes();const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};
+if($('retranslateSeasonBtn'))$('retranslateSeasonBtn').onclick=async()=>{try{await loadAllEpisodes();const ids=episodes.map(ep=>ep.library_episode_id).filter(Boolean).map(Number);await retranslate(ids,true)}catch(e){notify(e.message,'fail')}};
 
 // Presentation-only refresh for the locale selector. The original queue and
 // source-selection state is untouched; only labels are rebuilt through i18n.
@@ -305,7 +340,7 @@ function badge(status){
  return `<span class="badge ${cls}">${esc(statusLabel(status))}</span>`;
 }
 function sourceBadge(ep){
- const s=ep.source_status||{},status=s.status||'SOURCE_NOT_FOUND';
+ const s=ep.source_status||(typeof ep.available==='boolean'?ep:{}),status=s.status||'SOURCE_NOT_FOUND';
  const cls=s.available?'ok':status==='SOURCE_AMBIGUOUS'||status==='SOURCE_AVAILABLE_PGS_UNSUPPORTED'||status==='SOURCE_STATUS_ERROR'?'wait':'neutral';
  const labels={SOURCE_AVAILABLE_LIBRARY:t('status.sourceLibrary'),SOURCE_AVAILABLE_SIDECAR:t('status.sourceSidecar'),SOURCE_AVAILABLE_INTERNAL_TEXT:t('status.sourceInternal'),SOURCE_AVAILABLE_PGS_UNSUPPORTED:t('status.sourcePgs'),SOURCE_AMBIGUOUS:t('status.sourceAmbiguous'),SOURCE_STATUS_ERROR:t('status.sourceError'),SOURCE_NOT_FOUND:t('status.sourceMissing')};
  const text=labels[status]||s.display||labels.SOURCE_NOT_FOUND;

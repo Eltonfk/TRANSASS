@@ -7,7 +7,8 @@ Consolidates all historical layers into a cohesive, single-pass pipeline:
 4. Comprehensive Structural Validation (ass_engine.py)
 5. Direct Atomic Persistence
 
-Eliminates repetitive intermediate disk checkpoints, reducing I/O latency by ~50%.
+Avoids repetitive intermediate disk checkpoints. Model latency and actual
+runtime improvements must be measured; no fixed speedup is assumed.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Any, Callable, Iterable
 
 from ass_engine import (
     ASSDocumentAST,
+    prose_delimiter_flags,
     validate_document_structure,
     visible_text,
 )
@@ -475,8 +477,8 @@ def _is_untranslated_source_copy(
     elif language == "french":
         common_words = common_words | _SOURCE_COPY_SINGLETONS["french"]
 
-    # Preserve title-cased names/titles before applying the long-copy rule.
-    # Sentence-like copies (e.g. "Run away with me!") remain rejectable.
+    # Capitalization is not name/title evidence: ordinary commands can use
+    # title case too. Identity requires protected source tokens throughout.
     title_case = (
         len(words) >= 2
         and not source.strip().isupper()
@@ -484,12 +486,18 @@ def _is_untranslated_source_copy(
         and (not terminal_punctuation or not all(w.casefold() in common_words for w in words))
     )
     if title_case:
-        if language == "french":
-            # French title casing alone is weak evidence: copied words such as
-            # "Banane / Banane" must not pass. Fully protected name-only
-            # identities were handled above with exact text/target checks.
-            return True
-        return False
+        protected_tokens = {
+            token.casefold()
+            for name in protected_names
+            for token in re.findall(r"[\wÀ-ÿ]+", str(name), re.UNICODE)
+        }
+        if (
+            set(normalized_source) & protected_tokens
+            and all(token in protected_tokens or token in _TITLE_CONNECTORS for token in normalized_source)
+            and visible_text(source).strip() == visible_text(translated).strip()
+        ):
+            return False
+        return True
     if len(normalized_source) >= 4:
         return True
     return bool(set(normalized_source) & common_words) or terminal_punctuation
@@ -763,7 +771,18 @@ def make_v3_transport_call(
             "response_mode": "text",
         }
         content = _call_model(canonical_payload)
-        return content.strip().strip('"').strip("'")
+        content = content.strip()
+        # A sole enclosing pair in a plain-text answer can be model framing
+        # only when the source owns no straight quotes and removing that pair
+        # reproduces every source delimiter role. Never strip a source closure.
+        if (
+            '"' not in source_text
+            and content.startswith('"') and content.endswith('"')
+            and content.count('"') == 2
+            and not prose_delimiter_flags(source_text, content[1:-1])
+        ):
+            return content[1:-1].strip()
+        return content
 
     response_schema = {
         "type": "object",
@@ -837,7 +856,7 @@ def make_v3_transport_call(
                 source_text,
                 translated,
                 source_language,
-                protected_names=tuple(item.get("protected_names", ())),
+                protected_names=tuple(item.get("protected_names", ())) + tuple(item.get("copy_identity_names", ())),
                 contextually_protected_names=tuple(item.get("contextually_protected_names", ())),
                 target_language=target_language,
             ):
@@ -938,7 +957,10 @@ def make_v3_transport_call(
             "Não reordene, acrescente, remova ou transfira delimitadores entre eventos; se a fonte deixa "
             "uma abertura continuar no evento seguinte, mantenha essa mesma posse."
             if any(
-                {"ASS_DELIMITER_TOKEN_COUNT_MISMATCH", "ASS_DELIMITER_SEQUENCE_MISMATCH"}.intersection(flags)
+                {
+                    "ASS_DELIMITER_TOKEN_COUNT_MISMATCH", "ASS_DELIMITER_SEQUENCE_MISMATCH",
+                    "ASS_DELIMITER_OWNERSHIP_MISMATCH",
+                }.intersection(flags)
                 for _item, flags in flagged
             )
             else ""
@@ -1016,14 +1038,9 @@ def make_v3_transport_call(
                 cleaned = restore_source_enclosing_ascii_quotes(str(item.get("source_text", "")), cleaned)
                 if cleaned != txt:
                     _store_translation(item, cleaned)
-            delimiter_flags = {"ASS_DELIMITER_TOKEN_COUNT_MISMATCH", "ASS_DELIMITER_SEQUENCE_MISMATCH"}
-            unresolved_semantic = [
-                (item, tuple(f for f in flags if f not in delimiter_flags))
-                for item, flags in unresolved
-            ]
-            unresolved_semantic = [(item, flags) for item, flags in unresolved_semantic if flags]
-            if unresolved_semantic:
-                item, flags = unresolved_semantic[0]
+            unresolved = _quality_risks_for_payload(list(repair_items_by_id.values()), translations)
+            if unresolved:
+                item, flags = unresolved[0]
                 raise V3ResponseContractError(
                     f"V3_TRANSLATION_QUALITY_RISK:{item['id']}:{','.join(flags)}:REPAIR_FAILED"
                 )
@@ -1162,6 +1179,7 @@ def translate_subtitle_file_v3(
     source_language: str = "inglês",
     target_language: str = "português do Brasil (pt-BR)",
     progress_callback: Callable[[int, int], None] | None = None,
+    protected_names: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Execute the end-to-end V3 in-memory translation pipeline."""
     import copy
@@ -1180,13 +1198,19 @@ def translate_subtitle_file_v3(
     original_doc = ASSDocumentAST.from_file(src_path)
     working_doc = ASSDocumentAST(copy.deepcopy(original_doc.ssa))
     total_events = len(original_doc)
-    protected_source_names = extract_repeated_french_names(
+    protected_source_names = tuple(dict.fromkeys((*extract_repeated_french_names(
         (
             node.visible
             for node in original_doc.events
             if not node.is_comment and node.type != "Comment"
         ),
         source_language,
+    ), *(str(name).strip() for name in protected_names if str(name).strip()))))
+    # English repeated-name evidence may authorize an exact identity, but is
+    # not a glossary mandate: "Music School" may legitimately be translated.
+    copy_identity_names = extract_repeated_names(
+        (node.visible for node in original_doc.events if not node.is_comment),
+        source_language if _canonical_source_language_v3(source_language) == "english" else "",
     )
 
     # 2. Planejamento semântico em memória. Letras são classificadas pela
@@ -1257,8 +1281,10 @@ def translate_subtitle_file_v3(
     translations: dict[int | str, str] = {}
     for batch_idx, batch in enumerate(batches):
         protected_names_by_unit: dict[str, tuple[str, ...]] = {}
+        copy_names_by_unit: dict[str, tuple[str, ...]] = {}
         contextual_protected_names_by_unit: dict[str, tuple[str, ...]] = {}
         for unit in batch.units:
+            copy_names_by_unit[str(unit.id)] = names_in_source(unit.source_text, copy_identity_names)
             names = names_in_source(unit.source_text, protected_source_names)
             contextual_names = tuple(dict.fromkeys(
                 name
@@ -1277,6 +1303,7 @@ def translate_subtitle_file_v3(
                 "source_text": unit.source_text,
                 "is_sign": unit.is_sign,
                 "protected_names": protected_names_by_unit[str(unit.id)],
+                "copy_identity_names": copy_names_by_unit[str(unit.id)],
                 "contextually_protected_names": contextual_protected_names_by_unit[str(unit.id)],
             }
             for unit in batch.units
@@ -1299,7 +1326,7 @@ def translate_subtitle_file_v3(
                         unit.source_text,
                         translated_text,
                         source_language,
-                        protected_names=protected_names_by_unit[str(unit.id)],
+                        protected_names=protected_names_by_unit[str(unit.id)] + copy_names_by_unit[str(unit.id)],
                         contextually_protected_names=(
                             contextual_protected_names_by_unit[str(unit.id)]
                         ),
@@ -1321,14 +1348,9 @@ def translate_subtitle_file_v3(
                     protected_names=protected_names_by_unit[str(unit.id)],
                 )
                 if quality_flags:
-                    semantic_flags = [
-                        f for f in quality_flags
-                        if f not in {"ASS_DELIMITER_TOKEN_COUNT_MISMATCH", "ASS_DELIMITER_SEQUENCE_MISMATCH"}
-                    ]
-                    if semantic_flags:
-                        raise V3ResponseContractError(
-                            f"V3_TRANSLATION_QUALITY_RISK:{unit.id}:{','.join(semantic_flags)}"
-                        )
+                    raise V3ResponseContractError(
+                        f"V3_TRANSLATION_QUALITY_RISK:{unit.id}:{','.join(quality_flags)}"
+                    )
                 translations[unit.id] = translated_text
             else:
                 raise V3TranslationCoverageError(f"V3_TRANSLATION_MISSING:{unit.id}")
@@ -1359,7 +1381,10 @@ def translate_subtitle_file_v3(
         enable_visual_glyphs=enable_visual_effects,
         enable_karaoke=enable_karaoke,
     )
-    effects_stats = effects_engine.process_effects(working_doc, original_doc)
+    try:
+        effects_stats = effects_engine.process_effects(working_doc, original_doc)
+    except ValueError as exc:
+        raise PipelineV3Error(str(exc)) from exc
 
     # 6. Validação profunda de conformidade estrutural
     sign_member_indices = set()
