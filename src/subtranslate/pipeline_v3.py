@@ -1250,6 +1250,9 @@ def translate_subtitle_file_v3(
         additional_units=additional_song_units,
     )
 
+    if progress_callback:
+        progress_callback(0, len(batches))
+
     # 3. Execução das chamadas de tradução
     translations: dict[int | str, str] = {}
     for batch_idx, batch in enumerate(batches):

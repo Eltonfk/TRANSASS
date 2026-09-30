@@ -932,11 +932,21 @@ def _job_telemetry(job: dict) -> dict:
         resolved = sum(1 for item in units.values() if str(item.get("status", "")).lower() == "resolved")
     if failed is None and units:
         failed = sum(1 for item in units.values() if str(item.get("status", "")).lower() in {"failed", "unresolved"})
+    progress_info = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    is_v3_job = (
+        str(progress_info.get("label") or "").startswith("Lote ")
+        or job.get("pipeline") == "v3"
+        or job.get("pipeline_id") == "v3"
+    )
+    if total is None and is_v3_job and progress_info.get("total") is not None:
+        total = progress_info.get("total")
+    if resolved is None and is_v3_job and progress_info.get("current") is not None:
+        resolved = progress_info.get("current")
     total = int(total) if isinstance(total, (int, float)) else None
     resolved = int(resolved) if isinstance(resolved, (int, float)) else None
     failed = int(failed) if isinstance(failed, (int, float)) else 0
 
-    if (status == "TRANSLATING" and semantic["total"]
+    if (not is_v3_job and status == "TRANSLATING" and semantic["total"]
             and total is not None and resolved == total):
         stage = "SEMANTIC_RECONSTRUCTION"
 
@@ -1057,9 +1067,14 @@ def _public_job(job: dict | None) -> dict | None:
     # Keep the legacy progress shape for clients that already consume it, but
     # make its unit count real whenever the ledger has a known total.
     if telemetry["total_units"] is not None:
+        existing_progress = public.get("progress") if isinstance(public.get("progress"), dict) else {}
+        scope = existing_progress.get("scope") or "units"
+        label = existing_progress.get("label") or job.get("name", "")
         public["progress"] = {
-            "scope": "units", "current": telemetry["resolved_units"] or 0,
-            "total": telemetry["total_units"], "label": job.get("name", ""),
+            "scope": scope,
+            "current": telemetry["resolved_units"] or 0,
+            "total": telemetry["total_units"],
+            "label": label,
         }
     return public
 

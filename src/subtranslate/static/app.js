@@ -73,13 +73,23 @@ function renderStatus(d){
   $('notStartedAfterFailureCount').textContent=q.not_started_after_failure||0;
   const cur=statusCurrentJob(d),t=cur||{},stage=statusLabel(t.stage||t.status);
   $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:uiI18n.t('progress.none');
-  const total=t.total_units,resolved=t.resolved_units??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
+  const prog=t.progress||d.progress||{};
+  const isV3=Boolean(!t.total_units||t.total_units===prog.total)&&(d.pipeline?.pipeline==='v3'||d.pipeline?.effective_pipeline_plan==='v3'||String(prog.label||'').startsWith('Lote '));
+  const total=t.total_units??prog.total,resolved=t.resolved_units??prog.current??0,pct=total?Math.min(100,Math.round(100*resolved/total)):0;
   $('progressBar').style.width=pct+'%';
   const semantic=t.semantic_calls??0;
-  const semanticText=semantic?` · reconstrução semântica: ${t.semantic_completed??0} concluída(s)${t.semantic_in_progress?` + ${t.semantic_in_progress} em andamento`:''}${t.semantic_incomplete?` · ${t.semantic_incomplete} incompleta(s)`:''}`:'';
-  const progressText=total!=null?`Unidades base: ${resolved}/${total}`:'PREPARANDO — total ainda não calculado';
+  const semanticLabel=isV3?'tradução semântica':'reconstrução semântica';
+  const semanticText=semantic?` · ${semanticLabel}: ${t.semantic_completed??0} concluída(s)${t.semantic_in_progress?` + ${t.semantic_in_progress} em andamento`:''}${t.semantic_incomplete?` · ${t.semantic_incomplete} incompleta(s)`:''}`:'';
+  const progressText=total!=null?(isV3?`Lotes: ${resolved}/${total}`:`Unidades base: ${resolved}/${total}`):'PREPARANDO — total ainda não calculado';
   $('currentMeta').textContent=cur?`${progressText}${semanticText}${t.current_event_id!=null?` · evento atual ${esc(t.current_event_id)}`:''}`:'';
-  const details=cur?[`<span>Chamadas base: <b>${t.calls??0}</b></span>`,semantic?`<span>Chamadas semânticas: <b>${semantic}</b></span>`:'',`<span>Tentativas: <b>${t.retries??0}</b></span>`,t.retry_budget_total!=null?`<span>Limite de tentativas: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',`<span>Tempo: <b>${duration(t.elapsed_seconds)}</b></span>`,`<span>Última atividade: <b>${age(t.last_activity_at)}</b></span>`].filter(Boolean).join(' · '):'';
+  const details=cur?[
+    isV3?`<span>Chamadas de modelo: <b>${semantic||t.calls||0}</b></span>`:`<span>Chamadas base: <b>${t.calls??0}</b></span>`,
+    (!isV3&&semantic)?`<span>Chamadas semânticas: <b>${semantic}</b></span>`:'',
+    `<span>Tentativas: <b>${t.retries??0}</b></span>`,
+    t.retry_budget_total!=null?`<span>Limite de tentativas: <b>${t.retry_budget_used??0}/${t.retry_budget_total}</b></span>`:'',
+    `<span>Tempo: <b>${duration(t.elapsed_seconds)}</b></span>`,
+    `<span>Última atividade: <b>${age(t.last_activity_at)}</b></span>`
+  ].filter(Boolean).join(' · '):'';
   $('currentTelemetry').innerHTML=details;
   if(cur&&cur.status==='FAILED'){const event=cur.current_event_id!=null?` · evento/unidade ${esc(cur.current_event_id)}`:'';$('currentTelemetry').innerHTML+=`<div class="note" style="margin-top:6px">Falha: ${esc(cur.reason||cur.error||'resultado reprovado')}${event}</div>`}
   const interrupted=d.bulk_stop_reason==='STOPPED_ON_FAILURE'?'<div class="note">Temporada interrompida após a primeira falha. Os episódios restantes não foram iniciados.</div>':'';
@@ -328,7 +338,8 @@ function localizeStatusPresentation(d){
  const q=d.queue||{},cur=statusCurrentJob(d),t=cur||{};
  const stage=statusLabel(t.stage||t.status);
  $('currentTitle').textContent=cur?`${cur.name} · ${stage}`:uiI18n.t('progress.none');
- const total=t.total_units,resolved=t.resolved_units??0,semantic=t.semantic_calls??0;
+ const prog=t.progress||d.progress||{};
+ const total=t.total_units??prog.total,resolved=t.resolved_units??prog.current??0,semantic=t.semantic_calls??0;
  $('currentMeta').textContent=cur?(total!=null?`${uiI18n.t('status.progress')} ${resolved}/${total}`:uiI18n.t('status.preparing')):'';
  const details=cur?[
   `<span>${uiI18n.t('status.baseCalls')}: <b>${t.calls??0}</b></span>`,

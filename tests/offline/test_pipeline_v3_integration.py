@@ -1322,7 +1322,8 @@ def test_pipeline_v3_progress_callback(tmp_path: Path):
     )
 
     assert result["status"] == "COMPLETED"
-    assert len(progress_ticks) == 2
+    assert len(progress_ticks) == 3
+    assert progress_ticks[0] == (0, 2)
     assert progress_ticks[-1] == (2, 2)
 
 
